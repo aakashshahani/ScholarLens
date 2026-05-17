@@ -14,7 +14,7 @@ from datetime import datetime
 
 from config import settings, UPLOAD_DIR
 from db import Database
-from agents import PDFAnalysisAgent
+from agents import PDFAnalysisAgent, ContradictionAgent
 
 
 # ── Page Config ──────────────────────────────────────────────
@@ -409,8 +409,13 @@ def get_db():
 def get_agent():
     return PDFAnalysisAgent()
 
+@st.cache_resource
+def get_contradiction_agent():
+    return ContradictionAgent()
+
 db = get_db()
 agent = get_agent()
+contradiction_agent = get_contradiction_agent()
 
 
 # ── Sidebar ──────────────────────────────────────────────────
@@ -426,10 +431,11 @@ with st.sidebar:
     if "nav_page" not in st.session_state:
         st.session_state["nav_page"] = "◈ Upload"
 
+    nav_options = ["◈ Upload", "◇ Library", "◆ Search", "◇ Detail", "⚡ Contradictions"]
     page = st.radio(
         "Navigate",
-        ["◈ Upload", "◇ Library", "◆ Search", "◇ Detail"],
-        index=["◈ Upload", "◇ Library", "◆ Search", "◇ Detail"].index(
+        nav_options,
+        index=nav_options.index(
             st.session_state.get("nav_page", "◈ Upload")
         ),
         key="nav_radio",
@@ -733,3 +739,179 @@ elif page == "◇ Detail":
                         paper_id=paper_id,
                     )
                 st.markdown(answer)
+
+
+# ── Page: Contradictions ─────────────────────────────────────
+
+elif page == "⚡ Contradictions":
+    st.markdown(
+        '<div class="sl-title">Cross-Paper Analysis</div>'
+        '<div class="sl-subtitle">Find contradictions, agreements, and nuances across your library.</div>',
+        unsafe_allow_html=True,
+    )
+
+    papers = db.list_papers(limit=50)
+
+    if len(papers) < 2:
+        st.markdown(
+            '<div class="sl-empty-state">'
+            '<div class="sl-empty-icon">⚡</div>'
+            '<div class="sl-empty-text">Need at least 2 papers to compare</div>'
+            '<div class="sl-empty-hint">Upload more papers from the Upload page</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        # Let user pick which papers to compare
+        selected_papers = st.multiselect(
+            "Select papers to compare (leave empty for all)",
+            papers,
+            format_func=lambda p: p.title,
+        )
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            threshold = st.slider(
+                "Similarity threshold",
+                0.3, 0.9, 0.5,
+                help="Lower = more comparisons (broader). Higher = only very similar claims.",
+            )
+        with col2:
+            max_pairs = st.slider(
+                "Max comparisons",
+                5, 30, 15,
+                help="Limits API calls. Each comparison costs a small amount.",
+            )
+
+        if st.button("⚡ RUN ANALYSIS", type="primary", use_container_width=True):
+            paper_ids = [p.id for p in selected_papers] if selected_papers else None
+
+            with st.status("⚡ Scanning for contradictions...", expanded=True) as status:
+                st.write("⟐ Extracting claims from papers...")
+
+                # Extract claims
+                all_claims = []
+                scan_papers = selected_papers if selected_papers else papers
+                for paper in scan_papers:
+                    claims = contradiction_agent.extract_claims(paper.id)
+                    all_claims.extend(claims)
+                    st.write(f"  ✓ {paper.title[:60]}... ({len(claims)} claims)")
+
+                if len(all_claims) < 2:
+                    st.error("Not enough claims extracted. Try different papers.")
+                    status.update(label="⚠ Not enough data", state="error")
+                else:
+                    st.write(f"⟐ Comparing {len(all_claims)} claims across papers...")
+                    pairs = contradiction_agent.find_claim_pairs(all_claims, threshold)
+                    pairs = pairs[:max_pairs]
+                    st.write(f"  ✓ Found {len(pairs)} similar claim pairs")
+
+                    if not pairs:
+                        st.warning("No similar claims found. Try lowering the similarity threshold.")
+                        status.update(label="⚠ No matches found", state="complete")
+                    else:
+                        st.write(f"⟐ Judging {len(pairs)} pairs...")
+                        results = []
+                        for i, pair in enumerate(pairs):
+                            result = contradiction_agent.judge_pair(pair)
+                            results.append(result)
+
+                        # Sort: contradictions first
+                        priority = {"contradiction": 0, "nuance": 1, "support": 2, "unrelated": 3, "error": 4}
+                        results.sort(key=lambda r: priority.get(r.relationship, 5))
+
+                        st.session_state["contradiction_results"] = results
+                        status.update(label=f"✓ Found {len(results)} relationships", state="complete")
+
+        # Display results
+        if "contradiction_results" in st.session_state:
+            results = st.session_state["contradiction_results"]
+
+            # Summary counts
+            counts = {}
+            for r in results:
+                counts[r.relationship] = counts.get(r.relationship, 0) + 1
+
+            color_map = {
+                "contradiction": "#f43f5e",
+                "nuance": "#f59e0b",
+                "support": "#10b981",
+                "unrelated": "#64748b",
+            }
+            label_map = {
+                "contradiction": "Contradictions",
+                "nuance": "Nuanced differences",
+                "support": "Agreements",
+                "unrelated": "Unrelated",
+            }
+
+            # Summary badges
+            summary_html = '<div style="display:flex; gap:12px; margin:1rem 0 1.5rem 0; flex-wrap:wrap;">'
+            for rel_type in ["contradiction", "nuance", "support", "unrelated"]:
+                count = counts.get(rel_type, 0)
+                if count > 0:
+                    color = color_map.get(rel_type, "#64748b")
+                    label = label_map.get(rel_type, rel_type)
+                    summary_html += (
+                        f'<div style="background:{color}18; border:1px solid {color}30; '
+                        f'border-radius:8px; padding:8px 16px; text-align:center;">'
+                        f'<div style="font-family:JetBrains Mono,monospace; font-size:1.5rem; '
+                        f'font-weight:700; color:{color};">{count}</div>'
+                        f'<div style="font-family:JetBrains Mono,monospace; font-size:0.65rem; '
+                        f'color:{color}; text-transform:uppercase; letter-spacing:1px;">{label}</div>'
+                        f'</div>'
+                    )
+            summary_html += '</div>'
+            st.markdown(summary_html, unsafe_allow_html=True)
+
+            # Filter tabs
+            filter_type = st.selectbox(
+                "Filter by",
+                ["All", "Contradictions", "Nuanced differences", "Agreements"],
+                label_visibility="collapsed",
+            )
+
+            filter_map = {
+                "All": None,
+                "Contradictions": "contradiction",
+                "Nuanced differences": "nuance",
+                "Agreements": "support",
+            }
+            active_filter = filter_map[filter_type]
+
+            for r in results:
+                if active_filter and r.relationship != active_filter:
+                    continue
+
+                color = color_map.get(r.relationship, "#64748b")
+                rel_label = r.relationship.upper()
+                cat_label = r.category
+
+                st.markdown(
+                    f'<div style="background:linear-gradient(145deg, #151d2e, #111827); '
+                    f'border:1px solid {color}30; border-left:3px solid {color}; '
+                    f'border-radius:0 10px 10px 0; padding:1.25rem 1.5rem; margin-bottom:12px;">'
+                    f'<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">'
+                    f'<span style="font-family:JetBrains Mono,monospace; font-size:0.7rem; '
+                    f'font-weight:600; color:{color}; letter-spacing:1px;">{rel_label}</span>'
+                    f'<span style="font-family:JetBrains Mono,monospace; font-size:0.65rem; '
+                    f'color:#64748b; text-transform:uppercase; letter-spacing:0.5px;">{cat_label}</span>'
+                    f'</div>'
+                    f'<div style="background:#0d132180; border-radius:6px; padding:10px 14px; margin-bottom:8px;">'
+                    f'<div style="font-family:JetBrains Mono,monospace; font-size:0.68rem; color:#64748b; margin-bottom:4px;">Paper A</div>'
+                    f'<div style="font-family:DM Sans,sans-serif; font-size:0.82rem; color:#94a3b8; margin-bottom:2px;">'
+                    f'<strong style="color:#f1f5f9;">{r.claim_a.paper_title[:70]}</strong></div>'
+                    f'<div style="font-family:DM Sans,sans-serif; font-size:0.85rem; color:#cbd5e1;">{r.claim_a.text}</div>'
+                    f'</div>'
+                    f'<div style="background:#0d132180; border-radius:6px; padding:10px 14px; margin-bottom:12px;">'
+                    f'<div style="font-family:JetBrains Mono,monospace; font-size:0.68rem; color:#64748b; margin-bottom:4px;">Paper B</div>'
+                    f'<div style="font-family:DM Sans,sans-serif; font-size:0.82rem; color:#94a3b8; margin-bottom:2px;">'
+                    f'<strong style="color:#f1f5f9;">{r.claim_b.paper_title[:70]}</strong></div>'
+                    f'<div style="font-family:DM Sans,sans-serif; font-size:0.85rem; color:#cbd5e1;">{r.claim_b.text}</div>'
+                    f'</div>'
+                    f'<div style="font-family:DM Sans,sans-serif; font-size:0.88rem; color:#94a3b8; line-height:1.6;">'
+                    f'{r.explanation}</div>'
+                    f'{"<div style=" + chr(34) + "font-family:DM Sans,sans-serif; font-size:0.82rem; color:#64748b; margin-top:8px; font-style:italic;" + chr(34) + ">Resolution: " + r.resolution + "</div>" if r.resolution else ""}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
