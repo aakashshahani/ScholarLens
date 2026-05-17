@@ -103,7 +103,8 @@ First iteration:
 <img width="1515" height="785" alt="image" src="https://github.com/user-attachments/assets/77571015-1795-4566-a564-e3770eb3d4fa" />
 <img width="1543" height="434" alt="image" src="https://github.com/user-attachments/assets/01f2e632-5ab5-44f7-b7c9-3bbf1b396796" />
 <img width="1502" height="672" alt="image" src="https://github.com/user-attachments/assets/d6604206-f185-436d-beb6-1c8f85a03e1d" />
-
+<img width="1514" height="498" alt="image" src="https://github.com/user-attachments/assets/271b2065-7fae-4ba3-ab15-9f45e7d2d49e" />
+<img width="1455" height="780" alt="image" src="https://github.com/user-attachments/assets/8980afc8-31f8-4ccf-b314-02f59a80546f" />
 
 
 ## About
