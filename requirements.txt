@@ -1,0 +1,18 @@
+# ScholarLens — Phase 1 Dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+anthropic>=0.40.0
+streamlit>=1.38.0
+
+# PDF parsing
+pdfplumber>=0.11.0
+
+# Vector store
+chromadb>=0.5.0
+
+# Embeddings (swap to API embeddings later for better quality)
+sentence-transformers>=3.0.0
+
+# Utilities
+python-dotenv>=1.0.0
