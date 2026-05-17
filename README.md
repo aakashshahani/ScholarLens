@@ -87,11 +87,11 @@ streamlit run app.py
 - Section-aware chunking with overlap
 - Semantic search across library
 - Per-paper Q&A
+- Contradiction detection across papers
+- Hypothesis generation from cross-paper patterns
 
 **Next:**
 - Multi-paper synthesis
-- Contradiction detection across papers
-- Hypothesis generation from cross-paper patterns
 - arXiv/PubMed auto-import
 - React + FastAPI frontend
 
@@ -101,6 +101,8 @@ First iteration:
 <img width="1443" height="761" alt="image" src="https://github.com/user-attachments/assets/2303cd6d-8125-4d35-b88b-4334c16e1d18" />
 <img width="1436" height="606" alt="image" src="https://github.com/user-attachments/assets/5ab67abf-2791-4c3a-aa2e-2b6f3af71ef5" />
 <img width="1515" height="785" alt="image" src="https://github.com/user-attachments/assets/77571015-1795-4566-a564-e3770eb3d4fa" />
+<img width="1543" height="434" alt="image" src="https://github.com/user-attachments/assets/01f2e632-5ab5-44f7-b7c9-3bbf1b396796" />
+<img width="1502" height="672" alt="image" src="https://github.com/user-attachments/assets/d6604206-f185-436d-beb6-1c8f85a03e1d" />
 
 
 
