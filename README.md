@@ -1,122 +1,97 @@
-# ScholarLens 🔬
+# ScholarLens
 
-**Agentic Research Intelligence Platform**
+**Research intelligence platform that actually reads your papers.**
 
-ScholarLens uses Claude with tool use to autonomously analyze, synthesize, and discover research papers. Upload a PDF and get structured analysis, semantic search across your library, and intelligent question answering — all powered by an agentic loop where Claude decides what to analyze and how.
+Researchers juggle Google Scholar, Zotero, NotebookLM, and spreadsheets just to stay on top of a single literature review. ScholarLens replaces that workflow. Upload a paper, and an AI agent extracts the methodology, findings, limitations, and open questions automatically. Search across your entire library by meaning, not keywords. Ask questions and get answers grounded in your papers.
 
-## What Makes This Agentic (Not Just a Pipeline)
+Not a wrapper around an LLM. The agent decides what to analyze, calls its own tools, and builds persistent knowledge that grows with your library.
 
-Most "AI paper analyzers" are pipelines: extract → summarize → done. ScholarLens is different:
+![Python](https://img.shields.io/badge/Python-3.12-blue) ![License](https://img.shields.io/badge/License-MIT-green)
 
-- **Claude drives the analysis.** The agent loop gives Claude tools and a goal. Claude decides which tools to call, in what order, and when it's done. It might call `extract_pdf_text`, realize the methods section is unclear, search for related chunks, and then produce a more nuanced analysis.
-- **Tool use, not prompt chaining.** Each tool (PDF extraction, semantic search, analysis storage) is a real function Claude can invoke. This is the same pattern used in production AI systems.
-- **Persistent knowledge.** Papers aren't just analyzed and forgotten — chunks are embedded and stored for cross-paper search and future synthesis.
+## How it works
 
-## Architecture
+The core is an agent loop with tool use. Instead of a fixed pipeline (extract > summarize > done), the agent gets a set of tools and a goal. It decides which tools to call, in what order, and when it's done.
 
-```
-┌─────────────────────────────────────────┐
-│            Streamlit Frontend            │
-│   Upload · Library · Search · Detail    │
-└──────────────────┬──────────────────────┘
-                   │
-┌──────────────────▼──────────────────────┐
-│           PDF Analysis Agent            │
-│  Claude + Tool Use (agentic loop)       │
-│  ┌─────────┐ ┌──────────┐ ┌─────────┐  │
-│  │ Extract  │ │  Search  │ │  Store  │  │
-│  │   PDF    │ │  Chunks  │ │Analysis │  │
-│  └─────────┘ └──────────┘ └─────────┘  │
-└──────────────────┬──────────────────────┘
-                   │
-┌──────────────────▼──────────────────────┐
-│             Data Layer                  │
-│  SQLite (papers, chunks, analyses)      │
-│  ChromaDB (embeddings, similarity)      │
-└─────────────────────────────────────────┘
-```
+For each paper, the agent produces six structured reports:
+- **Summary** with objective, approach, and key results
+- **Methods** breakdown (study design, sample, techniques, metrics)
+- **Findings** with supporting evidence
+- **Limitations** the authors admit, plus ones they missed
+- **Key claims** with confidence levels and evidence quality
+- **Research gaps** and follow-up questions
 
-## Quick Start
+Streamlit Frontend
+Upload / Library / Search / Detail
+|
+PDF Analysis Agent
+LLM + Tool Use (agentic loop)
+- Extract PDF text
+- Search stored passages
+- Store analysis results
+|
+Data Layer
+SQLite  (papers, metadata, analyses)
+ChromaDB (embeddings, similarity search)
+
+## Quick start
 
 ```bash
-# 1. Clone and enter the project
-cd scholarlens
+git clone https://github.com/aakashshahani/ScholarLens.git
+cd ScholarLens
 
-# 2. Create virtual environment
 python -m venv venv
-source venv/bin/activate  # or venv\Scripts\activate on Windows
+source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Set your API key
-cp .env.example .env
-# Edit .env and add your ANTHROPIC_API_KEY
-
-# 5. Run the app
 export ANTHROPIC_API_KEY=sk-ant-xxxxx
 streamlit run app.py
 ```
 
-## Project Structure
+The app opens at `localhost:8501`. Upload any research paper as a PDF.
 
-```
+## Project structure
 scholarlens/
-├── app.py                  # Streamlit frontend
-├── requirements.txt
-├── .env.example
-├── config/
-│   ├── __init__.py
-│   └── settings.py         # All configuration
-├── agents/
-│   ├── __init__.py
-│   └── pdf_analyst.py      # Core agent with tool use
-├── db/
-│   ├── __init__.py
-│   └── database.py         # SQLite schema + data models
-├── utils/
-│   ├── __init__.py
-│   ├── pdf_parser.py       # PDF extraction + chunking
-│   └── vector_store.py     # ChromaDB wrapper
-└── data/                   # Auto-created at runtime
-    ├── uploads/
-    ├── chroma/
-    └── scholarlens.db
-```
+app.py               Streamlit frontend
+requirements.txt
+.env.example
+config/
+settings.py         Configuration and env vars
+agents/
+pdf_analyst.py      Core agent with tool use
+db/
+database.py         SQLite schema and data models
+utils/
+pdf_parser.py       PDF extraction and chunking
+vector_store.py     ChromaDB wrapper
+data/                 Created at runtime
 
-## Phase Roadmap
+## Tech stack
 
-### Phase 1 ✅ (Current)
-- PDF upload and structured analysis
-- Section-aware chunking with embeddings
+| Component | Choice | Why |
+|-----------|--------|-----|
+| LLM | Claude (Anthropic API) | Tool use support, strong at structured extraction |
+| Embeddings | sentence-transformers (MiniLM) | Runs locally, no API cost |
+| Vector DB | ChromaDB | Zero setup, persistent, migrates to pgvector |
+| Database | SQLite | Single file, WAL mode, PostgreSQL-compatible schema |
+| Frontend | Streamlit | Fast prototyping (React migration planned) |
+| PDF parsing | pdfplumber | Best open-source option for academic papers |
+
+## Roadmap
+
+**Done:**
+- PDF upload and structured analysis (6 report types)
+- Section-aware chunking with overlap
 - Semantic search across library
-- Per-paper question answering
+- Per-paper Q&A
 
-### Phase 2 (Next)
-- Multi-paper synthesis agent
-- Contradiction detection (vector filter → Claude judge)
+**Next:**
+- Multi-paper synthesis
+- Contradiction detection across papers
 - Hypothesis generation from cross-paper patterns
+- arXiv/PubMed auto-import
+- React + FastAPI frontend
 
-### Phase 3
-- arXiv/PubMed/Semantic Scholar auto-import
-- Research gap identification
-- Daily monitoring agent (APScheduler)
+## About
 
-### Phase 4
-- Team collaboration
-- React frontend migration
-- PostgreSQL + pgvector migration
-
-## Key Technical Decisions
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Embedding model | sentence-transformers (MiniLM) | Zero cost, runs locally. Swap to API embeddings for production quality. |
-| Vector store | ChromaDB | Zero infrastructure, persists to disk, cosine similarity built in. Migrates to pgvector. |
-| Database | SQLite | Single file, zero setup, WAL mode for concurrency. Schema is PostgreSQL-compatible. |
-| Agent pattern | Claude tool use loop | Claude decides analysis strategy, not a hardcoded pipeline. More flexible, better results. |
-| Chunking | 500 tokens, 50 overlap, section-aware | Balances context size with granularity. Section breaks prevent cross-section contamination. |
-
-## Built By
-
-Built as a portfolio project demonstrating agentic AI, RAG systems, and research tooling.
+Built by Aakash Shahani, CS graduate from the University of South Florida (Dec 2025). Research assistant at the USF CSSAI lab studying whether LLMs can improve negotiation skills in humans. Started this project after spending weeks manually reading and comparing dozens of papers for that research. Figured the process of analyzing, searching, and cross-referencing papers should be automated.
