@@ -14,7 +14,7 @@ from datetime import datetime
 
 from config import settings, UPLOAD_DIR
 from db import Database
-from agents import PDFAnalysisAgent, ContradictionAgent
+from agents import PDFAnalysisAgent, ContradictionAgent, HypothesisAgent
 
 
 # ── Page Config ──────────────────────────────────────────────
@@ -413,9 +413,14 @@ def get_agent():
 def get_contradiction_agent():
     return ContradictionAgent()
 
+@st.cache_resource
+def get_hypothesis_agent():
+    return HypothesisAgent()
+
 db = get_db()
 agent = get_agent()
 contradiction_agent = get_contradiction_agent()
+hypothesis_agent = get_hypothesis_agent()
 
 
 # ── Sidebar ──────────────────────────────────────────────────
@@ -431,7 +436,7 @@ with st.sidebar:
     if "nav_page" not in st.session_state:
         st.session_state["nav_page"] = "◈ Upload"
 
-    nav_options = ["◈ Upload", "◇ Library", "◆ Search", "◇ Detail", "⚡ Contradictions"]
+    nav_options = ["◈ Upload", "◇ Library", "◆ Search", "◇ Detail", "⚡ Contradictions", "💡 Hypotheses"]
     page = st.radio(
         "Navigate",
         nav_options,
@@ -912,6 +917,116 @@ elif page == "⚡ Contradictions":
                     f'<div style="font-family:DM Sans,sans-serif; font-size:0.88rem; color:#94a3b8; line-height:1.6;">'
                     f'{r.explanation}</div>'
                     f'{"<div style=" + chr(34) + "font-family:DM Sans,sans-serif; font-size:0.82rem; color:#64748b; margin-top:8px; font-style:italic;" + chr(34) + ">Resolution: " + r.resolution + "</div>" if r.resolution else ""}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+
+# ── Page: Hypotheses ─────────────────────────────────────────
+
+elif page == "💡 Hypotheses":
+    st.markdown(
+        '<div class="sl-title">Hypothesis Generator</div>'
+        '<div class="sl-subtitle">Generate testable research hypotheses from patterns across your library.</div>',
+        unsafe_allow_html=True,
+    )
+
+    papers = db.list_papers(limit=50)
+
+    if len(papers) < 1:
+        st.markdown(
+            '<div class="sl-empty-state">'
+            '<div class="sl-empty-icon">💡</div>'
+            '<div class="sl-empty-text">Upload papers first</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        research_q = st.text_input(
+            "Research question (optional)",
+            placeholder="e.g., How can AI improve negotiation training outcomes?",
+            help="Leave empty to generate hypotheses from library-wide patterns",
+        )
+
+        selected_papers = st.multiselect(
+            "Focus on specific papers (leave empty for all)",
+            papers,
+            format_func=lambda p: p.title,
+            key="hyp_papers",
+        )
+
+        num_hypotheses = st.slider("Number of hypotheses", 3, 8, 5, key="hyp_count")
+
+        if st.button("💡 GENERATE HYPOTHESES", type="primary", use_container_width=True):
+            paper_ids = [p.id for p in selected_papers] if selected_papers else None
+
+            with st.spinner("💡 Analyzing patterns across papers..."):
+                hypotheses = hypothesis_agent.generate(
+                    research_question=research_q or None,
+                    paper_ids=paper_ids,
+                    num_hypotheses=num_hypotheses,
+                )
+
+            if not hypotheses:
+                st.error("Generation failed. Try again or check your API key.")
+            else:
+                st.session_state["hypotheses"] = hypotheses
+
+        if "hypotheses" in st.session_state:
+            hypotheses = st.session_state["hypotheses"]
+
+            for i, h in enumerate(hypotheses):
+                novelty_colors = {"high": "#10b981", "medium": "#f59e0b", "low": "#64748b"}
+                impact_colors = {"high": "#3b82f6", "medium": "#f59e0b", "low": "#64748b"}
+                n_color = novelty_colors.get(h.novelty, "#64748b")
+                i_color = impact_colors.get(h.impact, "#64748b")
+
+                papers_html = ""
+                for sp in h.supporting_papers:
+                    papers_html += (
+                        f'<div style="background:#0d132180; border-radius:6px; padding:8px 12px; margin-bottom:6px;">'
+                        f'<div style="font-family:DM Sans,sans-serif; font-size:0.82rem; color:#f1f5f9; font-weight:600;">{sp["title"][:70]}</div>'
+                        f'<div style="font-family:DM Sans,sans-serif; font-size:0.8rem; color:#94a3b8; margin-top:2px;">{sp["relevant_finding"]}</div>'
+                        f'</div>'
+                    )
+
+                challenges_html = ""
+                for ch in h.challenges:
+                    challenges_html += (
+                        f'<span style="display:inline-block; background:#f43f5e18; border:1px solid #f43f5e30; '
+                        f'border-radius:100px; padding:2px 10px; font-family:JetBrains Mono,monospace; '
+                        f'font-size:0.68rem; color:#f43f5e; margin-right:6px; margin-bottom:4px;">{ch}</span>'
+                    )
+
+                st.markdown(
+                    f'<div style="background:linear-gradient(145deg, #151d2e, #111827); '
+                    f'border:1px solid #1e293b; border-radius:12px; padding:1.5rem; margin-bottom:16px;">'
+                    f'<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">'
+                    f'<span style="font-family:JetBrains Mono,monospace; font-size:0.75rem; color:#64748b;">H{i+1}</span>'
+                    f'<div style="display:flex; gap:8px;">'
+                    f'<span style="font-family:JetBrains Mono,monospace; font-size:0.65rem; '
+                    f'color:{n_color}; background:{n_color}18; border:1px solid {n_color}30; '
+                    f'border-radius:100px; padding:2px 10px;">novelty: {h.novelty}</span>'
+                    f'<span style="font-family:JetBrains Mono,monospace; font-size:0.65rem; '
+                    f'color:{i_color}; background:{i_color}18; border:1px solid {i_color}30; '
+                    f'border-radius:100px; padding:2px 10px;">impact: {h.impact}</span>'
+                    f'</div></div>'
+                    f'<div style="font-family:DM Sans,sans-serif; font-size:1.05rem; '
+                    f'color:#f1f5f9; font-weight:600; line-height:1.5; margin-bottom:10px;">{h.statement}</div>'
+                    f'<div style="font-family:DM Sans,sans-serif; font-size:0.88rem; '
+                    f'color:#94a3b8; line-height:1.6; margin-bottom:14px;">{h.rationale}</div>'
+                    f'<div style="font-family:JetBrains Mono,monospace; font-size:0.68rem; '
+                    f'color:#64748b; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Grounded in</div>'
+                    f'{papers_html}'
+                    f'<div style="font-family:JetBrains Mono,monospace; font-size:0.68rem; '
+                    f'color:#64748b; text-transform:uppercase; letter-spacing:1px; margin-top:12px; margin-bottom:4px;">How to test</div>'
+                    f'<div style="font-family:DM Sans,sans-serif; font-size:0.85rem; '
+                    f'color:#94a3b8; line-height:1.6; margin-bottom:10px;">{h.methodology}</div>'
+                    f'<div style="font-family:JetBrains Mono,monospace; font-size:0.68rem; '
+                    f'color:#64748b; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Challenges</div>'
+                    f'<div>{challenges_html}</div>'
+                    f'<div style="font-family:DM Sans,sans-serif; font-size:0.8rem; '
+                    f'color:#64748b; margin-top:10px; font-style:italic;">{h.novelty_explanation}</div>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
