@@ -14,7 +14,7 @@ from datetime import datetime
 
 from config import settings, UPLOAD_DIR
 from db import Database
-from agents import PDFAnalysisAgent, ContradictionAgent, HypothesisAgent
+from agents import PDFAnalysisAgent, ContradictionAgent, HypothesisAgent, PaperImporter
 
 
 # ── Page Config ──────────────────────────────────────────────
@@ -417,10 +417,15 @@ def get_contradiction_agent():
 def get_hypothesis_agent():
     return HypothesisAgent()
 
+@st.cache_resource
+def get_importer():
+    return PaperImporter()
+
 db = get_db()
 agent = get_agent()
 contradiction_agent = get_contradiction_agent()
 hypothesis_agent = get_hypothesis_agent()
+importer = get_importer()
 
 
 # ── Sidebar ──────────────────────────────────────────────────
@@ -436,17 +441,26 @@ with st.sidebar:
     if "nav_page" not in st.session_state:
         st.session_state["nav_page"] = "◈ Upload"
 
-    nav_options = ["◈ Upload", "◇ Library", "◆ Search", "◇ Detail", "⚡ Contradictions", "💡 Hypotheses"]
+    nav_options = ["◈ Upload", "🔎 Import", "◇ Library", "◆ Search", "◇ Detail", "⚡ Contradictions", "💡 Hypotheses"]
+
+    # If a button changed the page, use that. Otherwise use the radio.
+    def _on_nav_change():
+        st.session_state["nav_page"] = st.session_state["_nav_radio"]
+
+    current_index = 0
+    if st.session_state["nav_page"] in nav_options:
+        current_index = nav_options.index(st.session_state["nav_page"])
+
     page = st.radio(
         "Navigate",
         nav_options,
-        index=nav_options.index(
-            st.session_state.get("nav_page", "◈ Upload")
-        ),
-        key="nav_radio",
+        index=current_index,
+        key="_nav_radio",
+        on_change=_on_nav_change,
         label_visibility="collapsed",
     )
-    st.session_state["nav_page"] = page
+    # Sync: if button set nav_page, use that; otherwise use radio selection
+    page = st.session_state["nav_page"]
 
     st.divider()
 
@@ -527,6 +541,133 @@ if page == "◈ Upload":
             '</div>',
             unsafe_allow_html=True,
         )
+
+
+# ── Page: Import ─────────────────────────────────────────────
+
+elif page == "🔎 Import":
+    st.markdown(
+        '<div class="sl-title">Import Papers</div>'
+        '<div class="sl-subtitle">Search arXiv and Semantic Scholar, or paste a DOI or arXiv ID.</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Quick lookup
+    lookup_id = st.text_input(
+        "Quick lookup",
+        placeholder="Paste an arXiv ID (2301.12345), DOI (10.1145/...), or arXiv URL",
+        key="import_lookup",
+    )
+
+    if lookup_id:
+        with st.spinner("Looking up paper..."):
+            result = importer.lookup(lookup_id)
+        if result:
+            st.session_state["import_results"] = [result]
+        else:
+            st.error("Paper not found. Check the ID and try again.")
+
+    st.divider()
+
+    # Search
+    search_query = st.text_input(
+        "Search",
+        placeholder="e.g., LLM negotiation coaching feedback",
+        key="import_search",
+    )
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        sources = st.multiselect(
+            "Sources",
+            ["arxiv", "semantic_scholar"],
+            default=["arxiv", "semantic_scholar"],
+            key="import_sources",
+        )
+    with col2:
+        max_results = st.slider("Results per source", 3, 10, 5, key="import_max")
+
+    if search_query and st.button("🔎 SEARCH", type="primary", use_container_width=True):
+        with st.spinner("Searching databases..."):
+            results = importer.search(search_query, sources=sources, max_per_source=max_results)
+        if results:
+            st.session_state["import_results"] = results
+        else:
+            st.warning("No results found. Try different keywords.")
+
+    # Display results
+    if "import_results" in st.session_state:
+        results = st.session_state["import_results"]
+        st.markdown(
+            f'<div class="sl-subtitle">{len(results)} papers found</div>',
+            unsafe_allow_html=True,
+        )
+
+        for i, r in enumerate(results):
+            authors_str = ", ".join(r.authors[:3])
+            if len(r.authors) > 3:
+                authors_str += f" +{len(r.authors) - 3}"
+
+            citations = f" · {r.citation_count} citations" if r.citation_count else ""
+            pdf_status = "PDF available" if r.pdf_url else "No PDF"
+
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                st.markdown(
+                    f'<div class="sl-paper-card">'
+                    f'<div class="sl-paper-title">{r.title}</div>'
+                    f'<div class="sl-paper-authors">{authors_str}</div>'
+                    f'<div class="sl-paper-meta">'
+                    f'<span>◇ {r.source.upper().replace("_", " ")}</span>'
+                    f'<span>◆ {r.year or "?"}</span>'
+                    f'<span>◇ {pdf_status}</span>'
+                    f'{f"<span>◆ {r.citation_count} cited</span>" if r.citation_count else ""}'
+                    f'</div>'
+                    f'<div style="font-family:DM Sans,sans-serif; font-size:0.82rem; '
+                    f'color:#64748b; line-height:1.5; margin-top:6px;">'
+                    f'{r.abstract[:250]}{"..." if len(r.abstract) > 250 else ""}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            with col2:
+                st.write("")
+                st.write("")
+                if r.pdf_url:
+                    if st.button("ADD →", key=f"import_{i}"):
+                        with st.spinner(f"Importing {r.title[:40]}..."):
+                            # Download PDF
+                            pdf_path = importer.download_pdf(r)
+                            if pdf_path:
+                                # Ingest into library
+                                paper = agent.ingest_pdf(pdf_path, filename=pdf_path.name)
+
+                                # Update with proper metadata from the source
+                                import sqlite3 as _sql
+                                import json as _json
+                                conn = _sql.connect(str(db.db_path))
+                                conn.execute(
+                                    "UPDATE papers SET title=?, authors=?, abstract=?, year=?, source=?, doi=?, arxiv_id=? WHERE id=?",
+                                    (r.title, _json.dumps(r.authors), r.abstract, r.year,
+                                     r.source, r.doi, r.source_id if r.source == "arxiv" else None,
+                                     paper.id),
+                                )
+                                conn.commit()
+                                conn.close()
+
+                                # Run analysis
+                                try:
+                                    agent.analyze_paper(paper.id)
+                                    st.success(f"Added and analyzed: {r.title[:60]}")
+                                except Exception as e:
+                                    st.warning(f"Added but analysis failed: {e}")
+                            else:
+                                st.error("PDF download failed.")
+                else:
+                    st.markdown(
+                        '<div style="font-family:JetBrains Mono,monospace; font-size:0.68rem; '
+                        'color:#64748b; padding-top:20px;">No PDF</div>',
+                        unsafe_allow_html=True,
+                    )
 
 
 # ── Page: Library ────────────────────────────────────────────
