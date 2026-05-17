@@ -20,18 +20,20 @@ For each paper, the agent produces six structured reports:
 - **Key claims** with confidence levels and evidence quality
 - **Research gaps** and follow-up questions
 
-Streamlit Frontend
-Upload / Library / Search / Detail
-|
-PDF Analysis Agent
-LLM + Tool Use (agentic loop)
-- Extract PDF text
-- Search stored passages
-- Store analysis results
-|
-Data Layer
-SQLite  (papers, metadata, analyses)
-ChromaDB (embeddings, similarity search)
+## Architecture
+
+    Streamlit Frontend
+      Upload / Library / Search / Detail
+              |
+      PDF Analysis Agent
+      LLM + Tool Use (agentic loop)
+        - Extract PDF text
+        - Search stored passages
+        - Store analysis results
+              |
+      Data Layer
+        SQLite  (papers, metadata, analyses)
+        ChromaDB (embeddings, similarity search)
 
 ## Quick start
 
@@ -51,20 +53,21 @@ streamlit run app.py
 The app opens at `localhost:8501`. Upload any research paper as a PDF.
 
 ## Project structure
-scholarlens/
-app.py               Streamlit frontend
-requirements.txt
-.env.example
-config/
-settings.py         Configuration and env vars
-agents/
-pdf_analyst.py      Core agent with tool use
-db/
-database.py         SQLite schema and data models
-utils/
-pdf_parser.py       PDF extraction and chunking
-vector_store.py     ChromaDB wrapper
-data/                 Created at runtime
+
+    scholarlens/
+      app.py               Streamlit frontend
+      requirements.txt
+      .env.example
+      config/
+        settings.py         Configuration and env vars
+      agents/
+        pdf_analyst.py      Core agent with tool use
+      db/
+        database.py         SQLite schema and data models
+      utils/
+        pdf_parser.py       PDF extraction and chunking
+        vector_store.py     ChromaDB wrapper
+      data/                 Created at runtime
 
 ## Tech stack
 
