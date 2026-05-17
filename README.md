@@ -50,7 +50,7 @@ export ANTHROPIC_API_KEY=sk-ant-xxxxx
 streamlit run app.py
 ```
 
-The app opens at `localhost:8501`. Upload any research paper as a PDF.
+
 
 ## Project structure
 
