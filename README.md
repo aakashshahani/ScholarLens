@@ -89,10 +89,9 @@ streamlit run app.py
 - Per-paper Q&A
 - Contradiction detection across papers
 - Hypothesis generation from cross-paper patterns
-
-**Next:**
 - Multi-paper synthesis
-- arXiv/PubMed auto-import
+- arXiv/PubMed/Semantic Scholar auto-import
+**Next:**
 - React + FastAPI frontend
 
 First iteration:
@@ -105,6 +104,8 @@ First iteration:
 <img width="1502" height="672" alt="image" src="https://github.com/user-attachments/assets/d6604206-f185-436d-beb6-1c8f85a03e1d" />
 <img width="1514" height="498" alt="image" src="https://github.com/user-attachments/assets/271b2065-7fae-4ba3-ab15-9f45e7d2d49e" />
 <img width="1455" height="780" alt="image" src="https://github.com/user-attachments/assets/8980afc8-31f8-4ccf-b314-02f59a80546f" />
+<img width="1231" height="741" alt="image" src="https://github.com/user-attachments/assets/add62e73-0203-41e4-ae44-43b0bc828d35" />
+
 
 
 ## About
