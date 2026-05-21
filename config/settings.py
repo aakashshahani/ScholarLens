@@ -7,7 +7,12 @@ import os
 from pathlib import Path
 from dataclasses import dataclass, field
 
+# Auto-load .env file if it exists
 BASE_DIR = Path(__file__).resolve().parent.parent
+_env_file = BASE_DIR / ".env"
+if _env_file.exists():
+    from dotenv import load_dotenv
+    load_dotenv(_env_file)
 DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 CHROMA_DIR = DATA_DIR / "chroma"

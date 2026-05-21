@@ -14,7 +14,7 @@ from datetime import datetime
 
 from config import settings, UPLOAD_DIR
 from db import Database
-from agents import PDFAnalysisAgent, ContradictionAgent, HypothesisAgent, PaperImporter
+from agents import PDFAnalysisAgent, ContradictionAgent, HypothesisAgent, PaperImporter, MonitoringAgent, MonitorTopic
 
 
 # ── Page Config ──────────────────────────────────────────────
@@ -421,11 +421,16 @@ def get_hypothesis_agent():
 def get_importer():
     return PaperImporter()
 
+@st.cache_resource
+def get_monitor():
+    return MonitoringAgent()
+
 db = get_db()
 agent = get_agent()
 contradiction_agent = get_contradiction_agent()
 hypothesis_agent = get_hypothesis_agent()
 importer = get_importer()
+monitor = get_monitor()
 
 
 # ── Sidebar ──────────────────────────────────────────────────
@@ -441,7 +446,7 @@ with st.sidebar:
     if "nav_page" not in st.session_state:
         st.session_state["nav_page"] = "◈ Upload"
 
-    nav_options = ["◈ Upload", "🔎 Import", "◇ Library", "◆ Search", "◇ Detail", "⚡ Contradictions", "💡 Hypotheses"]
+    nav_options = ["◈ Upload", "🔎 Import", "◇ Library", "◆ Search", "◇ Detail", "⚡ Contradictions", "💡 Hypotheses", "📡 Monitor"]
 
     # If a button changed the page, use that. Otherwise use the radio.
     def _on_nav_change():
@@ -1171,3 +1176,195 @@ elif page == "💡 Hypotheses":
                     f'</div>',
                     unsafe_allow_html=True,
                 )
+
+
+# ── Page: Monitor ────────────────────────────────────────────
+
+elif page == "📡 Monitor":
+    st.markdown(
+        '<div class="sl-title">Research Monitor</div>'
+        '<div class="sl-subtitle">Configure topics to watch. ScholarLens finds new papers, scores their relevance, and sends you a digest.</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Topic configuration
+    st.markdown(
+        '<div style="font-family:JetBrains Mono,monospace; font-size:0.7rem; '
+        'color:#64748b; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">Configure topics</div>',
+        unsafe_allow_html=True,
+    )
+
+    if "monitor_topics" not in st.session_state:
+        st.session_state["monitor_topics"] = []
+
+    topic_name = st.text_input(
+        "Topic name",
+        placeholder="e.g., AI Negotiation Training",
+        key="monitor_topic_name",
+    )
+    topic_keywords = st.text_input(
+        "Keywords (comma-separated)",
+        placeholder="e.g., LLM negotiation, AI coaching feedback, negotiation training",
+        key="monitor_keywords",
+    )
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        topic_sources = st.multiselect(
+            "Sources",
+            ["arxiv", "semantic_scholar"],
+            default=["arxiv", "semantic_scholar"],
+            key="monitor_sources",
+        )
+    with col2:
+        if st.button("+ ADD TOPIC", use_container_width=True):
+            if topic_name and topic_keywords:
+                keywords = [k.strip() for k in topic_keywords.split(",") if k.strip()]
+                st.session_state["monitor_topics"].append(
+                    MonitorTopic(name=topic_name, keywords=keywords, sources=topic_sources)
+                )
+                st.rerun()
+
+    # Show configured topics
+    if st.session_state["monitor_topics"]:
+        for i, topic in enumerate(st.session_state["monitor_topics"]):
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                kw_str = ", ".join(topic.keywords)
+                src_str = " + ".join(s.replace("_", " ").title() for s in topic.sources)
+                st.markdown(
+                    f'<div class="sl-paper-card">'
+                    f'<div class="sl-paper-title">{topic.name}</div>'
+                    f'<div class="sl-paper-meta">'
+                    f'<span>◇ {src_str}</span>'
+                    f'<span>◆ {len(topic.keywords)} keywords</span>'
+                    f'</div>'
+                    f'<div style="font-family:DM Sans,sans-serif; font-size:0.82rem; color:#64748b;">{kw_str}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            with col2:
+                st.write("")
+                if st.button("✕", key=f"rm_topic_{i}"):
+                    st.session_state["monitor_topics"].pop(i)
+                    st.rerun()
+
+    st.divider()
+
+    # Scan settings
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        relevance_thresh = st.slider(
+            "Relevance threshold",
+            0.1, 0.8, 0.3,
+            help="Lower = more papers. Higher = only very relevant ones.",
+            key="monitor_thresh",
+        )
+    with col2:
+        results_per = st.slider(
+            "Results per keyword",
+            3, 10, 5,
+            key="monitor_results",
+        )
+
+    # Email settings
+    email = st.text_input(
+        "Email for digest (optional)",
+        placeholder="your@email.com",
+        key="monitor_email",
+    )
+
+    # Run scan
+    if st.session_state["monitor_topics"]:
+        if st.button("📡 RUN SCAN", type="primary", use_container_width=True):
+            topics = st.session_state["monitor_topics"]
+
+            with st.status("📡 Scanning for new papers...", expanded=True) as status:
+                all_results = []
+                for topic in topics:
+                    st.write(f"⟐ Scanning: {topic.name}...")
+                    result = monitor.scan_topic(
+                        topic,
+                        max_per_source=results_per,
+                        relevance_threshold=relevance_thresh,
+                    )
+                    all_results.append(result)
+                    st.write(f"  ✓ Found {result.papers_found} papers, {result.papers_relevant} relevant")
+
+                # Generate summary and send email
+                if any(r.scored_papers for r in all_results):
+                    st.write("⟐ Generating digest summary...")
+                    summary = monitor.generate_digest_summary(all_results)
+
+                    if email:
+                        st.write("⟐ Sending email digest...")
+                        sent = monitor.send_digest_email(email, all_results, summary)
+                        if sent:
+                            st.write(f"  ✓ Digest sent to {email}")
+                        else:
+                            st.write("  ⚠ Email failed (check RESEND_API_KEY)")
+
+                    st.session_state["_monitor_results"] = all_results
+                    st.session_state["_monitor_summary"] = summary
+                    status.update(label="✓ Scan complete", state="complete")
+                else:
+                    st.session_state["_monitor_results"] = all_results
+                    st.session_state["_monitor_summary"] = "No new relevant papers found."
+                    status.update(label="✓ No new papers found", state="complete")
+
+    # Display results
+    if "_monitor_results" in st.session_state:
+        results = st.session_state["_monitor_results"]
+        if not isinstance(results, list):
+            results = []
+        summary = st.session_state.get("_monitor_summary", "")
+
+        if summary:
+            st.markdown(
+                f'<div style="background:linear-gradient(145deg, #151d2e, #111827); '
+                f'border:1px solid #1e293b; border-radius:12px; padding:1.5rem; margin:1rem 0;">'
+                f'<div style="font-family:JetBrains Mono,monospace; font-size:0.68rem; '
+                f'color:#06b6d4; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">Digest Summary</div>'
+                f'<div style="font-family:DM Sans,sans-serif; font-size:0.9rem; '
+                f'color:#94a3b8; line-height:1.7;">{summary}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        for result in results:
+            if result.scored_papers:
+                st.markdown(
+                    f'<div style="font-family:JetBrains Mono,monospace; font-size:0.75rem; '
+                    f'color:#f1f5f9; margin-top:1.5rem; margin-bottom:8px;">{result.topic}</div>',
+                    unsafe_allow_html=True,
+                )
+
+                for sp in result.scored_papers:
+                    relevance_pct = int(sp.relevance_score * 100)
+                    color = "#10b981" if relevance_pct >= 60 else "#f59e0b" if relevance_pct >= 40 else "#64748b"
+
+                    authors_str = ", ".join(sp.paper.authors[:3])
+                    if len(sp.paper.authors) > 3:
+                        authors_str += f" +{len(sp.paper.authors) - 3}"
+
+                    st.markdown(
+                        f'<div style="background:linear-gradient(145deg, #151d2e, #111827); '
+                        f'border:1px solid #1e293b; border-left:3px solid {color}; '
+                        f'border-radius:0 10px 10px 0; padding:1rem 1.25rem; margin-bottom:10px;">'
+                        f'<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">'
+                        f'<span style="font-family:JetBrains Mono,monospace; font-size:0.68rem; color:#64748b;">'
+                        f'{sp.paper.source.upper().replace("_", " ")}'
+                        f'{" · " + str(sp.paper.year) if sp.paper.year else ""}'
+                        f'{" · " + str(sp.paper.citation_count) + " cited" if sp.paper.citation_count else ""}'
+                        f'</span>'
+                        f'<span style="font-family:JetBrains Mono,monospace; font-size:0.7rem; color:{color};">relevance: {relevance_pct}%</span>'
+                        f'</div>'
+                        f'<div style="font-family:DM Sans,sans-serif; font-size:0.95rem; color:#f1f5f9; font-weight:600; margin-bottom:4px;">{sp.paper.title}</div>'
+                        f'<div style="font-family:DM Sans,sans-serif; font-size:0.82rem; color:#94a3b8; margin-bottom:6px;">{authors_str}</div>'
+                        f'<div style="font-family:DM Sans,sans-serif; font-size:0.82rem; color:#64748b; font-style:italic; margin-bottom:6px;">{sp.relevance_reason}</div>'
+                        f'<div style="font-family:DM Sans,sans-serif; font-size:0.82rem; color:#94a3b8; line-height:1.5;">'
+                        f'{sp.paper.abstract[:300]}{"..." if len(sp.paper.abstract) > 300 else ""}</div>'
+                        f'<a href="{sp.paper.url}" target="_blank" style="font-family:JetBrains Mono,monospace; font-size:0.72rem; color:#3b82f6; text-decoration:none; margin-top:8px; display:inline-block;">View paper →</a>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
