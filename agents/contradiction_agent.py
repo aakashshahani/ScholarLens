@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from anthropic import Anthropic
 
 from config import settings
-from db import Database, Paper, AnalysisResult
+from db import Database, Paper, AnalysisResult, StoredClaim
 from utils import VectorStore
 
 
@@ -67,10 +67,25 @@ class ContradictionAgent:
         Pull key claims from a paper's stored analyses.
         Uses the key_claims and findings analyses if available,
         falls back to summary.
+
+        Cache-aware: if claims were already extracted for this paper, return
+        them from the DB instead of calling the LLM again.
         """
         paper = self.db.get_paper(paper_id)
         if not paper:
             return []
+
+        # ── Cache hit: return stored claims ──
+        cached = self.db.get_claims_for_paper(paper_id)
+        if cached:
+            return [
+                Claim(
+                    id=sc.id, paper_id=sc.paper_id, paper_title=paper.title,
+                    text=sc.text, section=sc.section or "unknown",
+                    confidence=sc.confidence or "medium",
+                )
+                for sc in cached
+            ]
 
         analyses = self.db.get_analyses_for_paper(paper_id)
         if not analyses:
@@ -126,6 +141,20 @@ class ContradictionAgent:
                     section=item.get("section", "unknown"),
                     confidence=item.get("confidence", "medium"),
                 ))
+
+            # ── Persist to cache so we never re-extract for this paper ──
+            if claims:
+                try:
+                    self.db.insert_claims([
+                        StoredClaim(
+                            id=c.id, paper_id=c.paper_id, text=c.text,
+                            section=c.section, confidence=c.confidence,
+                        )
+                        for c in claims
+                    ])
+                except Exception as e:
+                    print(f"Claim cache write failed for {paper_id}: {e}")
+
             return claims
 
         except Exception as e:
@@ -186,7 +215,24 @@ class ContradictionAgent:
         """
         The LLM decides if two claims contradict, support, or are unrelated.
         This is the core of the two-stage pattern.
+
+        Cache-aware: if this exact claim pair was judged before, return the
+        stored verdict instead of calling the LLM again.
         """
+        # ── Cache hit ──
+        cached = self.db.get_relationship(pair.claim_a.id, pair.claim_b.id)
+        if cached:
+            return ContradictionResult(
+                id=cached.id,
+                claim_a=pair.claim_a,
+                claim_b=pair.claim_b,
+                relationship=cached.relationship,
+                category=cached.category or "findings",
+                explanation=cached.explanation or "",
+                stronger_evidence=cached.stronger_evidence or "neither",
+                resolution=cached.resolution or "",
+            )
+
         try:
             response = self.client.messages.create(
                 model=settings.anthropic_model,
@@ -221,7 +267,7 @@ class ContradictionAgent:
 
             parsed = json.loads(raw)
 
-            return ContradictionResult(
+            result = ContradictionResult(
                 id=str(uuid.uuid4()),
                 claim_a=pair.claim_a,
                 claim_b=pair.claim_b,
@@ -231,6 +277,22 @@ class ContradictionAgent:
                 stronger_evidence=parsed.get("stronger_evidence", "neither"),
                 resolution=parsed.get("resolution", ""),
             )
+
+            # ── Persist verdict so this pair is never re-judged ──
+            try:
+                from db import StoredRelationship
+                lo, hi = sorted([pair.claim_a.id, pair.claim_b.id])
+                self.db.upsert_relationship(StoredRelationship(
+                    id=result.id, claim_lo=lo, claim_hi=hi,
+                    paper_a=pair.claim_a.paper_id, paper_b=pair.claim_b.paper_id,
+                    relationship=result.relationship, category=result.category,
+                    explanation=result.explanation, stronger_evidence=result.stronger_evidence,
+                    resolution=result.resolution, similarity=pair.similarity,
+                ))
+            except Exception as e:
+                print(f"Relationship cache write failed: {e}")
+
+            return result
 
         except Exception as e:
             print(f"Judgment failed: {e}")
