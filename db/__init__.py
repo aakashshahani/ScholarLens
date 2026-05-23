@@ -1,1 +1,1 @@
-from .database import Database, Paper, Chunk, AnalysisResult
+from .database import Database, Paper, Chunk, AnalysisResult, StoredClaim, StoredRelationship

@@ -66,6 +66,42 @@ class AnalysisResult:
         return str(uuid.uuid4())
 
 
+@dataclass
+class StoredClaim:
+    """A cached, extracted claim from a paper."""
+    id: str
+    paper_id: str
+    text: str
+    section: str | None = None
+    confidence: str | None = None
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @staticmethod
+    def new_id() -> str:
+        return str(uuid.uuid4())
+
+
+@dataclass
+class StoredRelationship:
+    """A cached judgment between two claims."""
+    id: str
+    claim_lo: str
+    claim_hi: str
+    paper_a: str
+    paper_b: str
+    relationship: str
+    category: str | None = None
+    explanation: str | None = None
+    stronger_evidence: str | None = None
+    resolution: str | None = None
+    similarity: float | None = None
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @staticmethod
+    def new_id() -> str:
+        return str(uuid.uuid4())
+
+
 # ── Database Manager ─────────────────────────────────────────
 
 class Database:
@@ -116,9 +152,41 @@ class Database:
                 created_at      TEXT NOT NULL
             );
 
+            -- Cached extracted claims (avoids re-extracting on every scan/graph/feed)
+            CREATE TABLE IF NOT EXISTS claims (
+                id              TEXT PRIMARY KEY,
+                paper_id        TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+                text            TEXT NOT NULL,
+                section         TEXT,
+                confidence      TEXT,
+                created_at      TEXT NOT NULL
+            );
+
+            -- Cached judged relationships between two claims
+            -- claim_lo / claim_hi are the two claim IDs sorted lexically so each
+            -- unordered pair has exactly one row (idempotent upsert key).
+            CREATE TABLE IF NOT EXISTS relationships (
+                id              TEXT PRIMARY KEY,
+                claim_lo        TEXT NOT NULL,
+                claim_hi        TEXT NOT NULL,
+                paper_a         TEXT NOT NULL,
+                paper_b         TEXT NOT NULL,
+                relationship    TEXT NOT NULL,
+                category        TEXT,
+                explanation     TEXT,
+                stronger_evidence TEXT,
+                resolution      TEXT,
+                similarity      REAL,
+                created_at      TEXT NOT NULL,
+                UNIQUE(claim_lo, claim_hi)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_chunks_paper ON chunks(paper_id);
             CREATE INDEX IF NOT EXISTS idx_analysis_paper ON analysis_results(paper_id);
             CREATE INDEX IF NOT EXISTS idx_papers_source ON papers(source);
+            CREATE INDEX IF NOT EXISTS idx_claims_paper ON claims(paper_id);
+            CREATE INDEX IF NOT EXISTS idx_rel_lo ON relationships(claim_lo);
+            CREATE INDEX IF NOT EXISTS idx_rel_hi ON relationships(claim_hi);
         """)
         conn.commit()
         conn.close()
@@ -252,3 +320,126 @@ class Database:
             )
             for r in rows
         ]
+
+    # ── Dedup ────────────────────────────────────────────────
+
+    @staticmethod
+    def _title_key(title: str) -> str:
+        """Normalized key for duplicate detection — lowercased, alphanumeric only."""
+        import re
+        return re.sub(r"[^a-z0-9]", "", (title or "").lower())[:80]
+
+    def find_duplicate(self, title: str, doi: str | None = None,
+                       arxiv_id: str | None = None) -> Paper | None:
+        """
+        Return an existing paper that appears to be the same as the incoming one.
+        Matches on DOI, then arXiv ID, then a normalized title key.
+        """
+        import json
+        conn = self._get_conn()
+        try:
+            if doi:
+                row = conn.execute("SELECT * FROM papers WHERE doi = ?", (doi,)).fetchone()
+                if row:
+                    return self._row_to_paper(row, json)
+            if arxiv_id:
+                row = conn.execute("SELECT * FROM papers WHERE arxiv_id = ?", (arxiv_id,)).fetchone()
+                if row:
+                    return self._row_to_paper(row, json)
+            # Title-key fallback (compare normalized)
+            key = self._title_key(title)
+            if key:
+                rows = conn.execute("SELECT * FROM papers").fetchall()
+                for row in rows:
+                    if self._title_key(row["title"]) == key:
+                        return self._row_to_paper(row, json)
+            return None
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _row_to_paper(row, json) -> Paper:
+        return Paper(
+            id=row["id"], title=row["title"], authors=json.loads(row["authors"]),
+            abstract=row["abstract"], year=row["year"], source=row["source"],
+            doi=row["doi"], arxiv_id=row["arxiv_id"], filename=row["filename"],
+            full_text=row["full_text"], page_count=row["page_count"],
+            created_at=row["created_at"],
+        )
+
+    # ── Claims cache ─────────────────────────────────────────
+
+    def insert_claims(self, claims: list["StoredClaim"]):
+        conn = self._get_conn()
+        conn.executemany(
+            """INSERT INTO claims (id, paper_id, text, section, confidence, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [(c.id, c.paper_id, c.text, c.section, c.confidence, c.created_at) for c in claims],
+        )
+        conn.commit()
+        conn.close()
+
+    def get_claims_for_paper(self, paper_id: str) -> list["StoredClaim"]:
+        conn = self._get_conn()
+        rows = conn.execute("SELECT * FROM claims WHERE paper_id = ?", (paper_id,)).fetchall()
+        conn.close()
+        return [
+            StoredClaim(id=r["id"], paper_id=r["paper_id"], text=r["text"],
+                        section=r["section"], confidence=r["confidence"], created_at=r["created_at"])
+            for r in rows
+        ]
+
+    def delete_claims_for_paper(self, paper_id: str):
+        conn = self._get_conn()
+        conn.execute("DELETE FROM claims WHERE paper_id = ?", (paper_id,))
+        conn.commit()
+        conn.close()
+
+    # ── Relationships cache ──────────────────────────────────
+
+    def upsert_relationship(self, rel: "StoredRelationship"):
+        """Insert or replace a judged relationship (idempotent on the claim pair)."""
+        lo, hi = sorted([rel.claim_lo, rel.claim_hi])
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO relationships
+               (id, claim_lo, claim_hi, paper_a, paper_b, relationship, category,
+                explanation, stronger_evidence, resolution, similarity, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(claim_lo, claim_hi) DO UPDATE SET
+                 relationship=excluded.relationship, category=excluded.category,
+                 explanation=excluded.explanation, stronger_evidence=excluded.stronger_evidence,
+                 resolution=excluded.resolution, similarity=excluded.similarity,
+                 created_at=excluded.created_at""",
+            (rel.id, lo, hi, rel.paper_a, rel.paper_b, rel.relationship, rel.category,
+             rel.explanation, rel.stronger_evidence, rel.resolution, rel.similarity, rel.created_at),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_relationship(self, claim_a: str, claim_b: str) -> "StoredRelationship | None":
+        lo, hi = sorted([claim_a, claim_b])
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM relationships WHERE claim_lo = ? AND claim_hi = ?", (lo, hi)
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        return self._row_to_rel(row)
+
+    def list_relationships(self) -> list["StoredRelationship"]:
+        conn = self._get_conn()
+        rows = conn.execute("SELECT * FROM relationships ORDER BY created_at DESC").fetchall()
+        conn.close()
+        return [self._row_to_rel(r) for r in rows]
+
+    @staticmethod
+    def _row_to_rel(r) -> "StoredRelationship":
+        return StoredRelationship(
+            id=r["id"], claim_lo=r["claim_lo"], claim_hi=r["claim_hi"],
+            paper_a=r["paper_a"], paper_b=r["paper_b"], relationship=r["relationship"],
+            category=r["category"], explanation=r["explanation"],
+            stronger_evidence=r["stronger_evidence"], resolution=r["resolution"],
+            similarity=r["similarity"], created_at=r["created_at"],
+        )
