@@ -8,7 +8,7 @@ It's not a wrapper around an LLM. The analysis agent decides what to examine, ca
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue) ![Next.js](https://img.shields.io/badge/Next.js-16-black) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688) ![License](https://img.shields.io/badge/License-MIT-green)
 
-> **Live demo:** _add your deployed URL here_
+
 
 ---
 
