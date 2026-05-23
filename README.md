@@ -200,6 +200,20 @@ Full interactive docs at `/api/docs` when the server is running.
 - Deployed hosted demo
 - Auth and multi-user libraries
 
+  Demo Screenshots:
+  <img width="1545" height="847" alt="image" src="https://github.com/user-attachments/assets/b189bc55-00a7-4caa-8c27-6d2cc64fbb18" />
+  <img width="1549" height="769" alt="image" src="https://github.com/user-attachments/assets/b77a8218-947e-46f2-bd19-99340097c417" />
+<img width="1538" height="833" alt="image" src="https://github.com/user-attachments/assets/0c3be7f2-9f9b-4278-a810-64acaa398d24" />
+<img width="1589" height="770" alt="image" src="https://github.com/user-attachments/assets/2c5301b4-0400-4ee4-92e9-fcae883f97c9" />
+<img width="1355" height="834" alt="image" src="https://github.com/user-attachments/assets/749ad6a2-7092-4287-89d1-04d0ca192a6a" />
+<img width="1108" height="824" alt="image" src="https://github.com/user-attachments/assets/ade9c797-b98c-43b9-811b-96a82c24d331" />
+<img width="1020" height="786" alt="image" src="https://github.com/user-attachments/assets/f9b6f888-e0b2-4e9b-8e71-bb7ae834b5bd" />
+
+
+
+
+
+
 ## About
 
 Built by Aakash Shahani, CS graduate from the University of South Florida (Dec 2025). Research assistant at the USF CSSAI lab studying whether LLMs can improve negotiation skills in humans. ScholarLens started after spending weeks manually reading and comparing dozens of papers for that research — the work of analyzing, searching, and cross-referencing papers seemed like exactly the kind of thing that should be automated.
