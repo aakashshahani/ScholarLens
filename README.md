@@ -180,13 +180,26 @@ scholarlens/
 
 Full interactive docs at `/api/docs` when the server is running.
 
+## Evaluation
+
+The contradiction detection engine has a formal eval harness:
+
+- **Gold set:** 30 hand-labeled claim pairs from 5 real papers in negotiation AI
+  literature (Duddu et al. 2025, Shea et al. 2024, Ma et al. 2025,
+  Johnson et al. 2017, Shaikh et al. 2024)
+- **Metrics:** 4-way macro-F1, Cohen's kappa, binary tension F1
+  ({contradiction, nuance} vs {support, unrelated})
+- **Baseline:** macro-F1 0.690 · kappa 0.552 · binary tension F1 0.774
+- Eval bypasses production cache entirely (`use_cache=False`) and never
+  writes to the production DB — runs are fully isolated
+
 ## Roadmap
 
 **Done**
 - Agentic PDF analysis with six structured report types
 - Section-aware chunking with overlap
 - Semantic search and per-paper Q&A
-- Two-stage cross-paper contradiction detection
+- Two-stage cross-paper contradiction detection with formal eval harness
 - Hypothesis generation from cross-paper gaps
 - Knowledge graph of claims and relationships
 - Insight feed
@@ -195,8 +208,11 @@ Full interactive docs at `/api/docs` when the server is running.
 - Migration from Streamlit to a FastAPI + Next.js stack
 
 **Next**
-- Persisted, scheduled insight generation
-- Multi-paper synthesis reports
+- Evidence-grounded claim extraction from source text
+  (current extraction is summary-based; moving to passage-level with
+  evidence attached — effect size, sample size, conditions)
+- BGE-base embeddings replacing MiniLM, measured against eval set
+- Persisted scheduled insight generation
 - Deployed hosted demo
 - Auth and multi-user libraries
 
