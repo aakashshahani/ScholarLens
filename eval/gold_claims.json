@@ -1,0 +1,542 @@
+[
+  {
+    "id": "eval_001",
+    "claim_a": {
+      "text": "ACE's targeted turn-by-turn feedback significantly improved negotiation performance between trials (t=2.97, p=0.003, d=0.38), while zero-shot GPT-4 feedback produced no significant improvement",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Zero-shot GPT-4 feedback failed to improve human negotiator performance, with no significant difference from the no-feedback control condition",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "findings",
+    "notes": "Both from ACE. Both confirm the same conclusion: zero-shot GPT-4 feedback does not help humans, while structured ACE feedback does. Same direction."
+  },
+  {
+    "id": "eval_002",
+    "claim_a": {
+      "text": "AI negotiation coaching is most effective for psychological preparation outcomes like fear reduction and willingness to initiate, rather than tactical skill improvement",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "LLM-based coaching (ACE) produced significant objective improvement in negotiation deal outcomes (lower prices achieved) across transfer to a novel scenario, demonstrating tactical skill transfer",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "contradiction",
+    "category": "findings",
+    "notes": "Trucey vs. ACE. Trucey: AI coaching helps psychology not tactics. ACE: AI coaching improves objective deal prices. Opposite conclusions about whether AI coaching improves tactical skill."
+  },
+  {
+    "id": "eval_003",
+    "claim_a": {
+      "text": "Participants who trained with Rehearsal's simulated conflict practice reduced their use of competitive strategies by 67% and doubled cooperative strategies in a real unaided conflict",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Simulated conflict practice does not significantly improve strategy recognition or recall compared to a lecture control group",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "nuance",
+    "category": "findings",
+    "notes": "Both from Rehearsal. Practice improves application (behavior in real conflict) but not recognition/recall. Different DVs, both true."
+  },
+  {
+    "id": "eval_004",
+    "claim_a": {
+      "text": "Standard instruction-following LLMs produce simulated conflict responses that are too agreeable and quickly capitulate to user viewpoints, making them ineffective as practice partners",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "LLM negotiation agents tend to be overly agreeable and are not hardball bargainers, responding passively to users rather than driving the negotiation",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "limitations",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "findings",
+    "notes": "Rehearsal and ACE independently identify the same LLM failure mode: excessive agreeableness as a practice partner. Same conclusion, different domains."
+  },
+  {
+    "id": "eval_005",
+    "claim_a": {
+      "text": "The negotiation dataset was collected from 50 MBA students conducting used car negotiations, transcribed using OpenAI's Whisper API with manual edits",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "methods",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "A theory-driven AI coach achieved the largest reduction in negotiation-related fear among all conditions tested",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "unrelated",
+    "category": "scope",
+    "notes": "ACE dataset collection method vs. Trucey fear-reduction finding. No logical relationship - one is a data pipeline detail, the other a psychological outcome."
+  },
+  {
+    "id": "eval_006",
+    "claim_a": {
+      "text": "Frontline humanitarian negotiators found process-oriented AI tools that surfaced options and risks more effective than tools providing direct strategy recommendations",
+      "paper_title": "ChatGPT, Don't Tell Me What to Do: Designing AI for Context Analysis in Humanitarian Frontline Negotiations",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Feedback based on zero-shot GPT-4 prompting improved LLM negotiator performance in simulated bargaining but failed to improve human negotiator performance",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "findings",
+    "notes": "Ma et al. and ACE. Both converge on the insight that what works for AI does not transfer to humans - Ma qualitatively (humans prefer process support), ACE quantitatively (LLM feedback helps LLMs not humans)."
+  },
+  {
+    "id": "eval_007",
+    "claim_a": {
+      "text": "Experienced frontline humanitarian negotiators expressed tolerance for occasional LLM hallucinations, viewing AI errors as manageable with their expertise",
+      "paper_title": "ChatGPT, Don't Tell Me What to Do: Designing AI for Context Analysis in Humanitarian Frontline Negotiations",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Novice negotiators are at greater risk from LLM hallucinations because they lack the domain expertise to identify and counteract AI errors, leading to over-reliance",
+      "paper_title": "ChatGPT, Don't Tell Me What to Do: Designing AI for Context Analysis in Humanitarian Frontline Negotiations",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "nuance",
+    "category": "scope",
+    "notes": "Both from Ma et al. Expertise moderates AI error tolerance. Experts manage errors, novices cannot. Both true simultaneously - not a contradiction."
+  },
+  {
+    "id": "eval_008",
+    "claim_a": {
+      "text": "Making a high initial offer is positively correlated with negotiation earnings (r=0.47, p<0.001)",
+      "paper_title": "Towards An Autonomous Agent that Provides Automated Feedback on Students' Negotiation Skills",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "ACE's annotation scheme coaches users to state their opening price first to anchor the negotiation in a favorable position",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "findings",
+    "notes": "Johnson et al. empirically validates high initial offers correlate with earnings; ACE builds anchoring into its coaching. Both support the same negotiation principle."
+  },
+  {
+    "id": "eval_009",
+    "claim_a": {
+      "text": "Trucey's responses were 168% less verbose than ChatGPT's and scored significantly higher on readability (Flesch-Kincaid mean 80.00 vs 68.46)",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Participants under preparation stress rejected AI's incremental conversational delivery as imposing excessive cognitive load, preferring comprehensive immediately accessible content",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "nuance",
+    "category": "findings",
+    "notes": "Both from Trucey. Trucey more readable than ChatGPT (quantitative) but users still rejected conversational format (qualitative). Both true, different comparisons."
+  },
+  {
+    "id": "eval_010",
+    "claim_a": {
+      "text": "The IRP prompting pipeline uses an 8-strategy taxonomy from the Interests-Rights-Power framework to classify and score conflict resolution utterances",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "methods",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Making a high initial offer is positively correlated with negotiation earnings (r=0.47, p<0.001)",
+      "paper_title": "Towards An Autonomous Agent that Provides Automated Feedback on Students' Negotiation Skills",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "unrelated",
+    "category": "scope",
+    "notes": "Rehearsal's IRP taxonomy (a method detail) vs. Johnson's initial-offer correlation (a findings result). Different constructs, no relationship."
+  },
+  {
+    "id": "eval_011",
+    "claim_a": {
+      "text": "A theory-driven AI coach (Trucey) produced the largest reduction in negotiation-related fear compared to both generic AI and a static handbook (Cohen's d=-0.27 vs. ChatGPT)",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "The static negotiation handbook significantly outperformed both AI conditions on psychological empowerment (PEU), with a medium effect size versus Trucey (d=-0.40, p<0.05)",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "nuance",
+    "category": "findings",
+    "notes": "Trucey paper. AI wins on fear reduction, handbook wins on empowerment. Different DVs, both true."
+  },
+  {
+    "id": "eval_012",
+    "claim_a": {
+      "text": "Participants interacting with a theory-driven AI negotiation coach showed significantly higher willingness to initiate negotiations than those using generic AI (beta=12.65, p<0.05) in regression analysis",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "All three coaching interventions produced equivalent improvements in willingness to initiate negotiations, with no significant differences on the Kruskal-Wallis test",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "nuance",
+    "category": "methodological",
+    "notes": "Trucey paper. Adjusted regression vs. unadjusted group comparison. Both findings in the same paper - different analytical methods yield different answers without contradicting."
+  },
+  {
+    "id": "eval_013",
+    "claim_a": {
+      "text": "Simulated conflict practice with Rehearsal reduced participants' conflict self-efficacy after training, as they gained a realistic understanding of how difficult conflicts are",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "A theory-driven AI coach achieved the largest reduction in negotiation-related fear, suggesting AI coaching reduces anxiety and psychological barriers",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "contradiction",
+    "category": "findings",
+    "notes": "Rehearsal vs. Trucey. Rehearsal: self-efficacy decreased after AI practice. Trucey: fear decreased after AI coaching. Opposite directional conclusions on psychological effect of AI-assisted practice."
+  },
+  {
+    "id": "eval_014",
+    "claim_a": {
+      "text": "Theory-grounded LLM prompting (IRP) significantly outperforms standard instruction-following LLMs for generating realistic conflict simulations",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "A theory-driven AI coach built on Brett and Thompson's negotiation framework produced significantly better fear reduction than a generic ChatGPT condition using the same underlying model",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "findings",
+    "notes": "Rehearsal and Trucey. Both show theory grounding produces better outcomes than generic LLM use. Different mechanisms, same conclusion."
+  },
+  {
+    "id": "eval_015",
+    "claim_a": {
+      "text": "ACE achieved high error detection accuracy (above 0.90 for all categories) but lower F1 scores for qualitative categories like strategic closing (F1=0.54)",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Automatic metrics derived from negotiation dialogue annotations significantly correlated with negotiation outcomes including initial claim (r=0.47) and agreement time (r=0.59)",
+      "paper_title": "Towards An Autonomous Agent that Provides Automated Feedback on Students' Negotiation Skills",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "methodological",
+    "notes": "ACE and Johnson et al. Both validate automated negotiation assessment against ground truth using different approaches. Both support feasibility."
+  },
+  {
+    "id": "eval_016",
+    "claim_a": {
+      "text": "The Trucey experiment recruited 267 participants through Prolific and randomly assigned them to three conditions in a 2:1:1 ratio",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "methods",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Standard instruction-following LLMs are too agreeable to serve as effective conflict practice partners without theory grounding",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "unrelated",
+    "category": "scope",
+    "notes": "Trucey recruitment method vs. Rehearsal LLM-agreeableness finding. No logical relationship."
+  },
+  {
+    "id": "eval_017",
+    "claim_a": {
+      "text": "People do not learn negotiation tactics simply from the experience of bargaining; they require structured feedback and instruction to improve",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Even without feedback, autonomous agent systems improve negotiation ability, and people are more comfortable learning from automated agents than from other people",
+      "paper_title": "Towards An Autonomous Agent that Provides Automated Feedback on Students' Negotiation Skills",
+      "section": "findings",
+      "confidence": "medium"
+    },
+    "label": "nuance",
+    "category": "findings",
+    "notes": "ACE: experience alone insufficient without feedback. Johnson: practice with agents helps even without feedback. Differ in degree not direction - some improvement is not the same as sufficiency."
+  },
+  {
+    "id": "eval_018",
+    "claim_a": {
+      "text": "Current AI tools in negotiation primarily focus on outcomes and automation, neglecting the process-oriented support that frontline negotiators need",
+      "paper_title": "ChatGPT, Don't Tell Me What to Do: Designing AI for Context Analysis in Humanitarian Frontline Negotiations",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "The annotation scheme and feedback method built into ACE is based on American-style negotiation conventions and may not transfer to other cultural contexts",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "limitations",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "scope",
+    "notes": "Ma et al. and ACE. Both acknowledge current AI negotiation tools are context-narrow, from different angles. Same gap."
+  },
+  {
+    "id": "eval_019",
+    "claim_a": {
+      "text": "ACE used GPT-4 for its negotiation chat agent and GPT-4o for feedback generation, chosen for speed after expert evaluation",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "methods",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Participants who trained with Rehearsal improved their conflict resolution performance in a real unaided conflict after training",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "unrelated",
+    "category": "scope",
+    "notes": "ACE model selection (method) vs. Rehearsal transfer finding. No logical relationship."
+  },
+  {
+    "id": "eval_020",
+    "claim_a": {
+      "text": "Interactive AI coaching is more effective than static resources, as ACE's interactive feedback significantly improved outcomes over non-interactive baselines",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Participants preferred the static handbook over interactive AI, and it outperformed both AI conditions on usability and psychological empowerment",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "contradiction",
+    "category": "findings",
+    "notes": "ACE vs. Trucey. ACE: interactivity drives improvement. Trucey: static beats interactive. Opposite conclusions on the value of interactivity in negotiation tools."
+  },
+  {
+    "id": "eval_021",
+    "claim_a": {
+      "text": "Simulated practice with Rehearsal significantly improved cooperative strategy use compared to a lecture-only control group",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Passively reading or watching conflict resolution training material builds skills orthogonal to those built through active simulated practice",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "nuance",
+    "category": "findings",
+    "notes": "Both from Rehearsal. Practice beats lecture on application skills, but lecture builds different (orthogonal) skills. Both true - not a ranking contradiction."
+  },
+  {
+    "id": "eval_022",
+    "claim_a": {
+      "text": "The static handbook outperformed both AI conditions on usability (UMUX) and psychological empowerment in the Trucey study",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "ACE's interactive LLM coaching significantly outperformed both no-feedback and alternative-feedback conditions on objective negotiation outcomes",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "contradiction",
+    "category": "findings",
+    "notes": "Trucey vs. ACE. Trucey: static non-interactive resource beats interactive AI. ACE: interactive AI beats static/no-feedback. Opposite conclusions on whether interactivity helps."
+  },
+  {
+    "id": "eval_023",
+    "claim_a": {
+      "text": "Hallucinations in Rehearsal's conflict simulations were mitigated but not eliminated by IRP theory grounding, and simulations occasionally felt overly scripted",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "limitations",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Frontline negotiators tolerated occasional LLM hallucinations under time pressure, using expertise to triangulate and verify AI output",
+      "paper_title": "ChatGPT, Don't Tell Me What to Do: Designing AI for Context Analysis in Humanitarian Frontline Negotiations",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "nuance",
+    "category": "scope",
+    "notes": "Rehearsal and Ma et al. Hallucinations exist as a technical limitation AND expert users manage them. Both true, different angles."
+  },
+  {
+    "id": "eval_024",
+    "claim_a": {
+      "text": "The Rehearsal user study evaluated 40 participants in a between-subjects design where they engaged in an actual conflict with a confederate after training",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "methods",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "ACE coaching produced a significant performance improvement with a medium effect size (d=0.38) on objective deal prices",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "unrelated",
+    "category": "scope",
+    "notes": "Rehearsal study design (method) vs. ACE effect size (finding). No logical relationship."
+  },
+  {
+    "id": "eval_025",
+    "claim_a": {
+      "text": "Simulated AI practice transfers to real behavior, as Rehearsal participants improved conflict performance in an actual unaided conflict after training",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Many frontline negotiators fundamentally rejected AI-mediated rehearsal as inadequate, arguing simulation cannot reproduce the unpredictability and embodied pressure of real negotiations",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "contradiction",
+    "category": "findings",
+    "notes": "Rehearsal vs. Trucey interviews. Rehearsal: simulated practice transfers to real conflict. Trucey participants: simulation cannot capture real negotiation, rehearsal is inadequate. Opposite conclusions on whether AI simulation transfers."
+  },
+  {
+    "id": "eval_026",
+    "claim_a": {
+      "text": "Cultural background significantly moderated AI coaching effectiveness in negotiation, with outcomes varying across participant backgrounds",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "medium"
+    },
+    "claim_b": {
+      "text": "ACE's coaching scheme is based on American-style negotiation conventions and may not be as useful in other cultural contexts",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "limitations",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "scope",
+    "notes": "Trucey and ACE. Both point to culture as a constraint on AI negotiation tool effectiveness. Same conclusion from different angles."
+  },
+  {
+    "id": "eval_027",
+    "claim_a": {
+      "text": "Post-negotiation feedback is one of the most crucial parts of the learning experience, relating performance to fundamental negotiation principles",
+      "paper_title": "Towards An Autonomous Agent that Provides Automated Feedback on Students' Negotiation Skills",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Simulated practice builds application skills, while passive review of the same material builds orthogonal recognition and recall skills",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "nuance",
+    "category": "findings",
+    "notes": "Johnson et al. and Rehearsal. Feedback being crucial (Johnson) and passive review building different skills than practice (Rehearsal) can both be true. Different claims about different learning modes."
+  },
+  {
+    "id": "eval_028",
+    "claim_a": {
+      "text": "The ACE negotiation agent uses dynamic prompting with an adjustable subjective limit to avoid being a pushover and to give robust counteroffers",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "methods",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Cultural background significantly moderated the effectiveness of AI negotiation coaching across participant groups",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "medium"
+    },
+    "label": "unrelated",
+    "category": "scope",
+    "notes": "ACE prompting mechanism (method) vs. Trucey cultural moderation (finding). No logical relationship."
+  },
+  {
+    "id": "eval_029",
+    "claim_a": {
+      "text": "Structured feedback is necessary for learning negotiation, as people do not improve from bargaining experience alone without instruction",
+      "paper_title": "ACE: A LLM-based Negotiation Coaching System",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Autonomous agent systems improve negotiation ability even without any feedback provided to the learner",
+      "paper_title": "Towards An Autonomous Agent that Provides Automated Feedback on Students' Negotiation Skills",
+      "section": "findings",
+      "confidence": "medium"
+    },
+    "label": "contradiction",
+    "category": "findings",
+    "notes": "ACE vs. Johnson et al. (citing Lin). ACE: experience alone insufficient, feedback necessary. Johnson: practice with agents improves ability without feedback. Direct conflict on whether feedback is necessary for improvement. (Note: borderline with eval_017's nuance framing - this version states the claims more strongly to be a genuine contradiction.)"
+  },
+  {
+    "id": "eval_030",
+    "claim_a": {
+      "text": "Trucey reduced negotiation fear most among all conditions, but produced only negligible improvement in organizational self-efficacy (delta=+0.05)",
+      "paper_title": "Does AI Coaching Prepare us for Workplace Negotiations?",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Simulated conflict practice with Rehearsal reduced participants' self-efficacy after training as they confronted the real difficulty of conflict",
+      "paper_title": "Rehearsal: Simulating Conflict to Teach Conflict Resolution",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "findings",
+    "notes": "Trucey and Rehearsal. Both find AI-assisted practice does not boost self-efficacy - Trucey negligible, Rehearsal a decrease. Same directional conclusion that AI practice does not build confidence."
+  }
+]
