@@ -189,9 +189,22 @@ The contradiction detection engine has a formal eval harness:
   Johnson et al. 2017, Shaikh et al. 2024)
 - **Metrics:** 4-way macro-F1, Cohen's kappa, binary tension F1
   ({contradiction, nuance} vs {support, unrelated})
-- **Baseline:** macro-F1 0.690 · kappa 0.552 · binary tension F1 0.774
 - Eval bypasses production cache entirely (`use_cache=False`) and never
   writes to the production DB — runs are fully isolated
+
+### Results
+
+| Version | Macro-F1 | Kappa | Binary Tension F1 |
+|---------|----------|-------|-------------------|
+| Baseline (summary-based claims) | 0.690 | 0.552 | 0.774 |
+| Task 2 (grounded claims, evidence fields) | 0.648 | 0.513 | 0.733 |
+| Task 2b (nuance prompt v1) | 0.644 | 0.500 | 0.857 |
+| **Task 2c (nuance prompt v2, current)** | **0.788** | **0.683** | **0.857** |
+
+Key improvements in Task 2c:
+- Contradiction F1: 0.400 → 0.833 (decision tree + proxy-vs-orthogonal distinction)
+- Nuance F1: 0.286 → 0.696 (6 few-shot examples targeting boundary cases)
+- Kappa 0.683 = substantial agreement on a 4-class problem with genuinely ambiguous boundary cases
 
 ## Roadmap
 
@@ -206,11 +219,12 @@ The contradiction detection engine has a formal eval harness:
 - arXiv + Semantic Scholar import with deduplication
 - Claim and relationship caching for cost control
 - Migration from Streamlit to a FastAPI + Next.js stack
-
-**Next**
 - Evidence-grounded claim extraction from source text
   (current extraction is summary-based; moving to passage-level with
   evidence attached — effect size, sample size, conditions)
+- Prompt-engineered contradiction judge with formal eval: macro-F1 0.788,
+  kappa 0.683, binary tension F1 0.857
+**Next**
 - BGE-base embeddings replacing MiniLM, measured against eval set
 - Persisted scheduled insight generation
 - Deployed hosted demo
