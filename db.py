@@ -66,15 +66,29 @@ class AnalysisResult:
         return str(uuid.uuid4())
 
 
+# ── TASK 2 CHANGE: StoredClaim gains evidence/conditions/source_quote + grounded property
 @dataclass
 class StoredClaim:
-    """A cached, extracted claim from a paper."""
+    """A cached, extracted claim from a paper.
+
+    Grounded claims (Task 2) are extracted directly from source text and
+    have evidence populated. Legacy claims (extracted from summaries) have
+    evidence=None. Use the .grounded property to distinguish them.
+    """
     id: str
     paper_id: str
     text: str
     section: str | None = None
     confidence: str | None = None
+    evidence: str | None = None      # e.g. "n=142, p<0.01, between-subjects RCT"
+    conditions: str | None = None    # e.g. "MBA negotiation scenario, single-session"
+    source_quote: str | None = None  # short verbatim anchor from paper text
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @property
+    def grounded(self) -> bool:
+        """True iff this claim was extracted from source text with evidence."""
+        return self.evidence is not None
 
     @staticmethod
     def new_id() -> str:
@@ -152,13 +166,17 @@ class Database:
                 created_at      TEXT NOT NULL
             );
 
-            -- Cached extracted claims (avoids re-extracting on every scan/graph/feed)
+            -- TASK 2 CHANGE: claims table now includes evidence/conditions/source_quote
+            -- for fresh installs. Existing DBs get these columns via ALTER below.
             CREATE TABLE IF NOT EXISTS claims (
                 id              TEXT PRIMARY KEY,
                 paper_id        TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
                 text            TEXT NOT NULL,
                 section         TEXT,
                 confidence      TEXT,
+                evidence        TEXT,
+                conditions      TEXT,
+                source_quote    TEXT,
                 created_at      TEXT NOT NULL
             );
 
@@ -188,6 +206,18 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_rel_lo ON relationships(claim_lo);
             CREATE INDEX IF NOT EXISTS idx_rel_hi ON relationships(claim_hi);
         """)
+
+        # TASK 2 CHANGE: idempotent migration for existing DBs that have the old
+        # claims table without evidence/conditions/source_quote columns.
+        # ALTER TABLE is a no-op if the column already exists would error, so we
+        # check PRAGMA first. Safe to run on every startup.
+        existing_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
+        }
+        for col in ("evidence", "conditions", "source_quote"):
+            if col not in existing_cols:
+                conn.execute(f"ALTER TABLE claims ADD COLUMN {col} TEXT")
+
         conn.commit()
         conn.close()
 
@@ -369,23 +399,37 @@ class Database:
 
     # ── Claims cache ─────────────────────────────────────────
 
-    def insert_claims(self, claims: list["StoredClaim"]):
+    # TASK 2 CHANGE: insert_claims writes all 9 columns including evidence fields
+    def insert_claims(self, claims: list[StoredClaim]):
         conn = self._get_conn()
         conn.executemany(
-            """INSERT INTO claims (id, paper_id, text, section, confidence, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            [(c.id, c.paper_id, c.text, c.section, c.confidence, c.created_at) for c in claims],
+            """INSERT INTO claims
+               (id, paper_id, text, section, confidence,
+                evidence, conditions, source_quote, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (c.id, c.paper_id, c.text, c.section, c.confidence,
+                 c.evidence, c.conditions, c.source_quote, c.created_at)
+                for c in claims
+            ],
         )
         conn.commit()
         conn.close()
 
-    def get_claims_for_paper(self, paper_id: str) -> list["StoredClaim"]:
+    # TASK 2 CHANGE: get_claims_for_paper reads evidence fields and populates them
+    def get_claims_for_paper(self, paper_id: str) -> list[StoredClaim]:
         conn = self._get_conn()
-        rows = conn.execute("SELECT * FROM claims WHERE paper_id = ?", (paper_id,)).fetchall()
+        rows = conn.execute(
+            "SELECT * FROM claims WHERE paper_id = ?", (paper_id,)
+        ).fetchall()
         conn.close()
         return [
-            StoredClaim(id=r["id"], paper_id=r["paper_id"], text=r["text"],
-                        section=r["section"], confidence=r["confidence"], created_at=r["created_at"])
+            StoredClaim(
+                id=r["id"], paper_id=r["paper_id"], text=r["text"],
+                section=r["section"], confidence=r["confidence"],
+                evidence=r["evidence"], conditions=r["conditions"],
+                source_quote=r["source_quote"], created_at=r["created_at"],
+            )
             for r in rows
         ]
 

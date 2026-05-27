@@ -128,6 +128,14 @@ def _analyze_paper_bg(paper_id: str):
         print(f"Background analysis failed for {paper_id}: {e}")
 
 
+def _extract_claims_bg(paper_id: str, force: bool = False):
+    """Background task: extract grounded claims for a single paper."""
+    try:
+        agent.extract_grounded_claims(paper_id, force=force)
+    except Exception as e:
+        print(f"[bg] extract_grounded_claims failed for {paper_id}: {e}")
+
+
 # ── Health Check ─────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -304,6 +312,90 @@ def reanalyze_paper(paper_id: str, background_tasks: BackgroundTasks = Backgroun
         conn.close()
     background_tasks.add_task(_analyze_paper_bg, paper_id)
     return {"id": paper_id, "status": "analyzing"}
+
+
+
+# ── TASK 2: Grounded Claim Extraction ───────────────────────
+
+@app.post("/api/papers/{paper_id}/extract-claims")
+def extract_claims(
+    paper_id: str,
+    background_tasks: BackgroundTasks,
+    force: bool = Query(False, description="Re-extract even if grounded claims already exist."),
+):
+    """
+    Extract evidence-grounded claims directly from a paper's source text.
+
+    Unlike the old path (summary -> claim extraction), this goes to the raw
+    stored text so every claim carries: evidence (n, p-value, effect size,
+    design), conditions (scope), and a verbatim source_quote anchor.
+
+    Returns cached grounded claims immediately if they exist (force=False).
+    Pass force=True to delete existing claims and re-extract from scratch.
+    """
+    paper = db.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    if not paper.full_text:
+        raise HTTPException(
+            status_code=422,
+            detail="Paper has no stored text. Re-upload the PDF to ingest it first.",
+        )
+
+    claims = agent.extract_grounded_claims(paper_id, force=force)
+    grounded = [c for c in claims if c.evidence is not None]
+
+    return {
+        "paper_id": paper_id,
+        "total": len(claims),
+        "grounded": len(grounded),
+        "legacy": len(claims) - len(grounded),
+        "claims": [
+            {
+                "id": c.id,
+                "text": c.text,
+                "section": c.section,
+                "confidence": c.confidence,
+                "evidence": c.evidence,
+                "conditions": c.conditions,
+                "source_quote": c.source_quote,
+                "grounded": c.evidence is not None,
+            }
+            for c in claims
+        ],
+    }
+
+
+@app.post("/api/papers/backfill-claims")
+def backfill_claims(
+    background_tasks: BackgroundTasks,
+    force: bool = Query(False, description="Re-extract even papers that already have grounded claims."),
+    limit: int = Query(50, description="Max papers to backfill."),
+):
+    """
+    Queue grounded claim extraction for every paper in the library that
+    lacks grounded claims. Runs each paper as a background task.
+    Use after upgrading from legacy (summary-based) extraction, or after
+    a prompt change with force=True.
+    """
+    papers = db.list_papers(limit=limit)
+    queued = []
+
+    for paper in papers:
+        if not paper.full_text:
+            continue
+        existing = db.get_claims_for_paper(paper.id)
+        already_grounded = any(c.evidence is not None for c in existing)
+        if already_grounded and not force:
+            continue
+        background_tasks.add_task(_extract_claims_bg, paper.id, force)
+        queued.append(paper.id)
+
+    return {
+        "queued": len(queued),
+        "paper_ids": queued,
+        "message": f"Grounded extraction queued for {len(queued)} papers.",
+    }
 
 
 # ── Search & QA ──────────────────────────────────────────────

@@ -10,6 +10,9 @@ This agent uses Claude with tool use to:
 The agent pattern: Claude decides WHAT to analyze, tools do the work,
 Claude interprets the results. This is the loop that makes it agentic
 rather than just a pipeline.
+
+TASK 2: extract_grounded_claims() added — extracts claims directly from
+source text (not summaries) with evidence, conditions, source_quote fields.
 """
 
 import json
@@ -18,12 +21,11 @@ from pathlib import Path
 from anthropic import Anthropic
 
 from config import settings
-from db import Database, Paper, Chunk, AnalysisResult
+from db import Database, Paper, Chunk, AnalysisResult, StoredClaim
 from utils import extract_pdf, chunk_text, VectorStore
 
 
 # ── Tool Definitions ─────────────────────────────────────────
-# These are the tools Claude can call. Each maps to a real function.
 
 TOOLS = [
     {
@@ -149,7 +151,6 @@ class PDFAnalysisAgent:
         self.vector_store = VectorStore()
 
     def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
-        """Route a tool call to the right function and return a string result."""
         try:
             if tool_name == "extract_pdf_text":
                 return self._tool_extract_pdf(tool_input["file_path"])
@@ -175,10 +176,8 @@ class PDFAnalysisAgent:
             return json.dumps({"error": str(e)})
 
     def _tool_extract_pdf(self, file_path: str) -> str:
-        """Extract PDF and return text + metadata for Claude to analyze."""
         from config import UPLOAD_DIR
 
-        # If Claude passes a paper ID instead of a file path, look up the stored text
         paper = self.db.get_paper(file_path)
         if paper and paper.full_text:
             truncated_text = paper.full_text[:32000]
@@ -191,7 +190,6 @@ class PDFAnalysisAgent:
                 "total_chars": len(paper.full_text),
             })
 
-        # Try as a filename in uploads dir
         path = Path(file_path)
         if not path.exists():
             path = UPLOAD_DIR / Path(file_path).name
@@ -199,8 +197,6 @@ class PDFAnalysisAgent:
             return json.dumps({"error": f"File not found: {file_path}. Use get_paper_metadata to check stored paper data, or search_paper_chunks to find content."})
 
         extracted = extract_pdf(path)
-
-        # Truncate full text for Claude's context (keep first ~8000 tokens)
         truncated_text = extracted.full_text[:32000]
         if len(extracted.full_text) > 32000:
             truncated_text += "\n\n[... text truncated for analysis. Full text stored and searchable via chunks.]"
@@ -212,9 +208,7 @@ class PDFAnalysisAgent:
             "total_chars": len(extracted.full_text),
         })
 
-    def _tool_search_chunks(
-        self, query: str, paper_id: str | None, n_results: int
-    ) -> str:
+    def _tool_search_chunks(self, query: str, paper_id: str | None, n_results: int) -> str:
         results = self.vector_store.search(
             query=query, n_results=n_results, paper_id=paper_id,
         )
@@ -228,9 +222,7 @@ class PDFAnalysisAgent:
             for r in results
         ])
 
-    def _tool_store_analysis(
-        self, paper_id: str, analysis_type: str, content: str,
-    ) -> str:
+    def _tool_store_analysis(self, paper_id: str, analysis_type: str, content: str) -> str:
         result = AnalysisResult(
             id=AnalysisResult.new_id(),
             paper_id=paper_id,
@@ -238,11 +230,7 @@ class PDFAnalysisAgent:
             content=content,
         )
         self.db.insert_analysis(result)
-        return json.dumps({
-            "status": "stored",
-            "analysis_id": result.id,
-            "type": analysis_type,
-        })
+        return json.dumps({"status": "stored", "analysis_id": result.id, "type": analysis_type})
 
     def _tool_get_metadata(self, paper_id: str) -> str:
         paper = self.db.get_paper(paper_id)
@@ -266,20 +254,13 @@ class PDFAnalysisAgent:
     def _tool_list_library(self, limit: int) -> str:
         papers = self.db.list_papers(limit=limit)
         return json.dumps([
-            {
-                "id": p.id,
-                "title": p.title,
-                "authors": p.authors[:3],  # first 3
-                "year": p.year,
-                "source": p.source,
-            }
+            {"id": p.id, "title": p.title, "authors": p.authors[:3], "year": p.year, "source": p.source}
             for p in papers
         ])
 
-    # ── Metadata Extraction ────────────────────────────────────
+    # ── Metadata Extraction ──────────────────────────────────
 
     def _extract_metadata(self, first_pages_text: str) -> dict:
-        """Use Claude to extract title, authors, year, abstract from paper text."""
         try:
             response = self.client.messages.create(
                 model=settings.anthropic_model,
@@ -287,53 +268,34 @@ class PDFAnalysisAgent:
                 messages=[{
                     "role": "user",
                     "content": (
-                        "Extract metadata from this academic paper text. "
-                        "Return ONLY valid JSON with these fields:\n"
-                        '{"title": "...", "authors": ["First Last", ...], '
-                        '"year": 2024, "abstract": "..."}\n\n'
-                        "If you can't find a field, use null for year and "
-                        "empty string/array for others. Do NOT include any "
-                        "text outside the JSON object.\n\n"
-                        f"Paper text:\n{first_pages_text}"
+                        "Extract metadata from this research paper text. "
+                        "Return ONLY valid JSON with these fields: "
+                        '"title" (string), "authors" (list of strings), '
+                        '"year" (integer or null), "abstract" (string, first 500 chars max). '
+                        "No preamble, no markdown fences.\n\n"
+                        f"{first_pages_text}"
                     ),
                 }],
             )
             raw = response.content[0].text.strip()
-            # Strip markdown fences if present
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
                 if raw.endswith("```"):
                     raw = raw[:-3]
                 raw = raw.strip()
-            meta = json.loads(raw)
-            # Ensure correct types
-            if not isinstance(meta.get("authors"), list):
-                meta["authors"] = []
-            if isinstance(meta.get("year"), str):
-                try:
-                    meta["year"] = int(meta["year"])
-                except ValueError:
-                    meta["year"] = None
-            return meta
-        except Exception as e:
-            print(f"Metadata extraction failed: {e}")
-            return {"title": "", "authors": [], "year": None, "abstract": ""}
+            return json.loads(raw)
+        except Exception:
+            return {}
 
-    # ── Core Ingest Pipeline ─────────────────────────────────
+    # ── Paper Ingestion ──────────────────────────────────────
 
     def ingest_pdf(self, file_path: str | Path, filename: str | None = None) -> Paper:
         """
-        Full ingestion pipeline:
-        1. Extract text from PDF
-        2. Chunk text with section awareness
-        3. Embed and store chunks in ChromaDB
-        4. Create paper record in SQLite
+        Ingest a PDF: extract text, chunk, embed, store.
         Returns the Paper object with its ID.
         """
         file_path = Path(file_path)
         extracted = extract_pdf(file_path)
-
-        # Extract metadata (title, authors, year, abstract) using Claude
         meta = self._extract_metadata(extracted.full_text[:6000])
 
         paper = Paper(
@@ -349,7 +311,6 @@ class PDFAnalysisAgent:
         )
         self.db.insert_paper(paper)
 
-        # Chunk and embed
         text_chunks = chunk_text(
             extracted.pages,
             chunk_size=settings.chunk_size,
@@ -378,10 +339,7 @@ class PDFAnalysisAgent:
                 paper_ids.append(paper.id)
                 sections.append(tc.section)
 
-            # Store embeddings
             self.vector_store.add_chunks(chunk_ids, texts, paper_ids, sections)
-
-            # Update chunks with embedding IDs
             for chunk, cid in zip(db_chunks, chunk_ids):
                 chunk.embedding_id = cid
             self.db.insert_chunks(db_chunks)
@@ -391,13 +349,6 @@ class PDFAnalysisAgent:
     # ── Agentic Analysis Loop ────────────────────────────────
 
     def analyze_paper(self, paper_id: str) -> list[dict]:
-        """
-        Run Claude's agentic analysis on a paper.
-
-        Claude decides what to analyze, calls tools to extract and store
-        results, and continues until it's satisfied the analysis is complete.
-        This is the core agent loop — Claude is in the driver's seat.
-        """
         system_prompt = """You are ScholarLens, an expert research paper analyst.
 
 You have access to tools for extracting, searching, and storing paper analyses.
@@ -432,9 +383,8 @@ After storing all 6 analyses, provide a brief final summary to the user."""
             }
         ]
 
-        # Agent loop: keep going until Claude stops calling tools
         all_results = []
-        max_turns = 15  # safety limit
+        max_turns = 15
 
         for turn in range(max_turns):
             response = self.client.messages.create(
@@ -445,9 +395,8 @@ After storing all 6 analyses, provide a brief final summary to the user."""
                 messages=messages,
             )
 
-            # Process response blocks
             assistant_content = response.content
-            tool_results = {}  # keyed by tool_use_id to avoid double execution
+            tool_results = {}
 
             for block in assistant_content:
                 if block.type == "tool_use":
@@ -459,10 +408,8 @@ After storing all 6 analyses, provide a brief final summary to the user."""
                         "output": json.loads(result) if result.startswith("{") or result.startswith("[") else result,
                     })
 
-            # Add assistant message to conversation
             messages.append({"role": "assistant", "content": assistant_content})
 
-            # If there were tool calls, add cached results and continue
             if tool_results:
                 tool_result_content = [
                     {
@@ -475,7 +422,6 @@ After storing all 6 analyses, provide a brief final summary to the user."""
                 ]
                 messages.append({"role": "user", "content": tool_result_content})
             else:
-                # Claude is done — no more tool calls
                 break
 
             if response.stop_reason == "end_turn":
@@ -486,19 +432,12 @@ After storing all 6 analyses, provide a brief final summary to the user."""
     # ── Question Answering ───────────────────────────────────
 
     def ask(self, question: str, paper_id: str | None = None) -> str:
-        """
-        Answer a question using retrieved context from the paper library.
-
-        This is RAG: retrieve relevant chunks, pass to Claude with the question.
-        """
         system_prompt = """You are ScholarLens, a research assistant with access to
 a library of analyzed papers. Answer questions using the search tool to find
 relevant passages. Always cite which paper and section your answer comes from.
 If the evidence is insufficient, say so clearly."""
 
         messages = [{"role": "user", "content": question}]
-
-        # Let Claude use search tools to find relevant context
         max_turns = 5
 
         for turn in range(max_turns):
@@ -512,7 +451,6 @@ If the evidence is insufficient, say so clearly."""
 
             assistant_content = response.content
             has_tool_use = any(b.type == "tool_use" for b in assistant_content)
-
             messages.append({"role": "assistant", "content": assistant_content})
 
             if has_tool_use:
@@ -529,10 +467,152 @@ If the evidence is insufficient, say so clearly."""
             else:
                 break
 
-        # Extract final text response
         final_text = ""
         for block in response.content:
             if block.type == "text":
                 final_text += block.text
-
         return final_text
+
+    # ── TASK 2: Evidence-Grounded Claim Extraction ───────────
+
+    # Sections that contain empirical results, in priority order.
+    # Matches labels assigned by pdf_parser.py SECTION_PATTERNS.
+    _EVIDENCE_SECTIONS = ("results", "discussion", "conclusion", "methods")
+
+    def _select_evidence_text(
+        self, paper_id: str, full_text: str, max_chars: int = 24000
+    ) -> tuple[str, str]:
+        """
+        Pick the best source text to extract claims from.
+
+        Prefers stored chunks labelled results/discussion/conclusion/methods.
+        Falls back to truncated full_text when section labels are missing
+        (common with two-column or non-standard PDFs). Never returns empty.
+
+        Returns (text, mode) where mode is one of:
+          "section_targeted"           — used labelled sections
+          "section_targeted_truncated" — labelled sections, truncated to fit
+          "fulltext_fallback"          — no evidence sections found
+        """
+        chunks = self.db.get_chunks_for_paper(paper_id)
+        relevant = [c for c in chunks if (c.section or "") in self._EVIDENCE_SECTIONS]
+
+        if relevant:
+            order = {s: i for i, s in enumerate(self._EVIDENCE_SECTIONS)}
+            relevant.sort(key=lambda c: (order.get(c.section, 99), c.chunk_index))
+            assembled = "\n\n".join(f"[{c.section}]\n{c.text}" for c in relevant)
+            if len(assembled) <= max_chars:
+                return assembled, "section_targeted"
+            return assembled[:max_chars], "section_targeted_truncated"
+
+        return (full_text or "")[:max_chars], "fulltext_fallback"
+
+    def extract_grounded_claims(
+        self, paper_id: str, force: bool = False
+    ) -> list[StoredClaim]:
+        """
+        Extract evidence-grounded claims directly from a paper's source text.
+
+        Unlike the old path (summary -> claim extraction), this reads the raw
+        stored text so every claim carries concrete evidence: n, p-value,
+        effect size, study design, and boundary conditions.
+
+        Idempotent: returns cached grounded claims if they exist (force=False).
+        Pass force=True to delete all existing claims and re-extract — useful
+        after a prompt change or model swap.
+        """
+        paper = self.db.get_paper(paper_id)
+        if not paper:
+            return []
+
+        existing = self.db.get_claims_for_paper(paper_id)
+        already_grounded = [c for c in existing if c.evidence is not None]
+
+        if already_grounded and not force:
+            return already_grounded
+
+        if force and existing:
+            self.db.delete_claims_for_paper(paper_id)
+
+        source_text, mode = self._select_evidence_text(paper_id, paper.full_text or "")
+        if not source_text.strip():
+            print(f"[extract_grounded_claims] no source text for {paper_id}")
+            return []
+
+        print(f"[extract_grounded_claims] {paper_id[:8]}… mode={mode} chars={len(source_text)}")
+
+        prompt = (
+            "You are extracting evidence-grounded claims from a scientific paper.\n"
+            "Extract claims ONLY from the text provided — do not infer or synthesize.\n\n"
+            "For each claim produce exactly these fields:\n"
+            "  text         — ONE falsifiable assertion the paper makes (not a theme).\n"
+            "  evidence     — the specific empirical support: sample size (n), effect\n"
+            "                 size, p-value, study design, population. If the text gives\n"
+            "                 none for this claim, use an empty string.\n"
+            "  conditions   — scope/boundary conditions (domain, task, setting, population).\n"
+            "  source_quote — a SHORT phrase (<= 100 chars) copied VERBATIM from the text.\n"
+            "                 Empty string if you cannot find one.\n"
+            "  section      — results / discussion / conclusion / methods / unknown\n"
+            "  confidence   — high (stated conclusion), medium (implied), low (speculative)\n\n"
+            "Rules:\n"
+            "  - Return 5-8 claims, prioritising ones with concrete empirical evidence.\n"
+            "  - Any numeric result (n, p-value, %, effect size) near a claim MUST appear\n"
+            "    in that claim's evidence field.\n"
+            "  - Return ONLY valid JSON: a list of objects with exactly the six fields.\n"
+            "    No preamble, no markdown fences.\n\n"
+            f"Paper title: {paper.title}\n\n"
+            f"Source text:\n{source_text}"
+        )
+
+        try:
+            response = self.client.messages.create(
+                model=settings.anthropic_model,
+                max_tokens=3072,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+                if raw.endswith("```"):
+                    raw = raw[:-3]
+                raw = raw.strip()
+            parsed = json.loads(raw)
+        except Exception as e:
+            print(f"[extract_grounded_claims] failed for {paper_id} (mode={mode}): {e}")
+            return []
+
+        def _clean(v) -> str | None:
+            if v is None:
+                return None
+            s = str(v).strip()
+            return s if s else None
+
+        claims: list[StoredClaim] = []
+        for item in parsed:
+            text = _clean(item.get("text"))
+            if not text:
+                continue
+            sq = _clean(item.get("source_quote"))
+            # Drop source_quote if it's not a real substring (catches hallucinations)
+            if sq and sq not in source_text:
+                sq = None
+            claims.append(StoredClaim(
+                id=StoredClaim.new_id(),
+                paper_id=paper_id,
+                text=text,
+                section=_clean(item.get("section")) or "unknown",
+                confidence=_clean(item.get("confidence")) or "medium",
+                evidence=_clean(item.get("evidence")),
+                conditions=_clean(item.get("conditions")),
+                source_quote=sq,
+            ))
+
+        if claims:
+            try:
+                self.db.insert_claims(claims)
+            except Exception as e:
+                print(f"[extract_grounded_claims] DB write failed for {paper_id}: {e}")
+
+        grounded = sum(1 for c in claims if c.evidence is not None)
+        print(f"[extract_grounded_claims] {len(claims)} claims ({grounded} grounded) for {paper_id[:8]}…")
+        return claims

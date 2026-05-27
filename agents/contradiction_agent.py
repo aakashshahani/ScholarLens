@@ -7,6 +7,13 @@ Two-stage pattern used in production RAG systems:
 
 This is the most technically interesting feature in ScholarLens and the one
 most likely to generate conversation in an interview.
+
+TASK 2 changes:
+  - Claim dataclass gains an evidence field
+  - extract_claims() is now a pure cache read — no LLM call inside it.
+    Falls back to calling extract_grounded_claims() if nothing is cached.
+  - judge_pair() prompt includes evidence when present so stronger_evidence
+    is based on actual methodology, not guessed from claim text.
 """
 
 import hashlib
@@ -29,8 +36,9 @@ class Claim:
     paper_id: str
     paper_title: str
     text: str
-    section: str        # which analysis it came from
+    section: str        # which section it came from
     confidence: str     # "high", "medium", "low"
+    evidence: str | None = None  # TASK 2: empirical support from source text
 
 
 @dataclass
@@ -50,7 +58,7 @@ class ContradictionResult:
     relationship: str   # "contradiction", "support", "nuance", "unrelated"
     category: str       # "methodological", "findings", "theoretical", "scope"
     explanation: str
-    stronger_evidence: str  # paper_id of the one with better evidence, or "neither"
+    stronger_evidence: str  # "paper_a", "paper_b", or "neither"
     resolution: str     # how future research could resolve it
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -64,114 +72,87 @@ class ContradictionAgent:
 
     @staticmethod
     def _cache_key(claim_a_text: str, claim_b_text: str) -> str:
-        """
-        Deterministic cache key from two claim texts.
-        Sorted so (A,B) and (B,A) hit the same entry.
-        """
         texts = sorted([claim_a_text.strip(), claim_b_text.strip()])
         combined = f"{texts[0]}|||{texts[1]}"
         return hashlib.sha256(combined.encode()).hexdigest()[:16]
 
-    # ── Stage 1: Extract claims from stored analyses ─────────
+    # ── Stage 1: Retrieve claims from cache ──────────────────
 
     def extract_claims(self, paper_id: str) -> list[Claim]:
         """
-        Pull key claims from a paper's stored analyses.
-        Uses the key_claims and findings analyses if available,
-        falls back to summary.
+        Return claims for a paper. Pure cache read — no LLM call here.
+
+        Priority:
+          1. Grounded claims (evidence IS NOT NULL) — extracted from source text
+          2. Legacy ungrounded claims (evidence IS NULL) — extracted from summaries
+          3. Nothing cached → trigger extract_grounded_claims() now
+
+        This replaces the old path that called the LLM inside extract_claims
+        to pull claims out of stored summaries (the telephone-game problem).
         """
         paper = self.db.get_paper(paper_id)
         if not paper:
             return []
 
-        analyses = self.db.get_analyses_for_paper(paper_id)
-        if not analyses:
-            return []
+        stored = self.db.get_claims_for_paper(paper_id)
 
-        # Gather relevant analysis text
-        claim_sources = []
-        for a in analyses:
-            if a.analysis_type in ("key_claims", "findings", "summary"):
-                claim_sources.append((a.analysis_type, a.content))
+        # Prefer grounded claims
+        grounded = [c for c in stored if c.evidence is not None]
+        source = grounded if grounded else stored
 
-        if not claim_sources:
-            return []
-
-        # Ask the LLM to extract discrete claims
-        source_text = "\n\n".join(
-            f"[{atype}]\n{content}" for atype, content in claim_sources
-        )
-
-        try:
-            response = self.client.messages.create(
-                model=settings.anthropic_model,
-                max_tokens=2048,
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        "Extract specific, testable claims from this paper analysis. "
-                        "Each claim should be a single factual assertion the paper makes. "
-                        "Return ONLY valid JSON: a list of objects with fields: "
-                        '"text" (the claim), "section" (where it came from: key_claims/findings/summary), '
-                        '"confidence" (high/medium/low based on how strongly the paper states it).\n\n'
-                        "Return 5-10 of the most important claims. No preamble, no markdown fences.\n\n"
-                        f"Paper: {paper.title}\n\n{source_text}"
-                    ),
-                }],
-            )
-
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-                if raw.endswith("```"):
-                    raw = raw[:-3]
-                raw = raw.strip()
-
-            parsed = json.loads(raw)
-            claims = []
-            for item in parsed:
-                claims.append(Claim(
-                    id=str(uuid.uuid4()),
-                    paper_id=paper_id,
+        if source:
+            return [
+                Claim(
+                    id=sc.id,
+                    paper_id=sc.paper_id,
                     paper_title=paper.title,
-                    text=item.get("text", ""),
-                    section=item.get("section", "unknown"),
-                    confidence=item.get("confidence", "medium"),
-                ))
-            return claims
+                    text=sc.text,
+                    section=sc.section or "unknown",
+                    confidence=sc.confidence or "medium",
+                    evidence=sc.evidence,
+                )
+                for sc in source
+            ]
 
+        # Nothing cached — trigger grounded extraction
+        try:
+            from agents.pdf_analyst import PDFAnalysisAgent
+            new_claims = PDFAnalysisAgent().extract_grounded_claims(paper_id)
+            return [
+                Claim(
+                    id=sc.id,
+                    paper_id=sc.paper_id,
+                    paper_title=paper.title,
+                    text=sc.text,
+                    section=sc.section or "unknown",
+                    confidence=sc.confidence or "medium",
+                    evidence=sc.evidence,
+                )
+                for sc in new_claims
+            ]
         except Exception as e:
-            print(f"Claim extraction failed for {paper_id}: {e}")
+            print(f"[extract_claims] grounded extraction fallback failed for {paper_id}: {e}")
             return []
 
-    # ── Stage 1b: Find similar claims across papers ──────────
+    # ── Stage 1b: Find similar claims across papers ───────────
 
     def find_claim_pairs(
         self,
         all_claims: list[Claim],
         similarity_threshold: float = 0.6,
     ) -> list[ClaimPair]:
-        """
-        Compare claims across papers using vector similarity.
-        Only pairs from DIFFERENT papers are returned.
-        """
         if len(all_claims) < 2:
             return []
 
-        # Embed all claims
         texts = [c.text for c in all_claims]
         embeddings = self.vector_store.embed_texts(texts)
 
-        # Compute pairwise cosine similarity
         pairs = []
         for i in range(len(all_claims)):
             for j in range(i + 1, len(all_claims)):
-                # Skip same-paper comparisons
                 if all_claims[i].paper_id == all_claims[j].paper_id:
                     continue
-
                 sim = self._cosine_similarity(embeddings[i], embeddings[j])
-
                 if sim >= similarity_threshold:
                     pairs.append(ClaimPair(
                         claim_a=all_claims[i],
@@ -179,7 +160,6 @@ class ContradictionAgent:
                         similarity=sim,
                     ))
 
-        # Sort by similarity (highest first)
         pairs.sort(key=lambda p: p.similarity, reverse=True)
         return pairs
 
@@ -197,23 +177,42 @@ class ContradictionAgent:
     def judge_pair(self, pair: ClaimPair, use_cache: bool = True) -> ContradictionResult:
         """
         The LLM decides if two claims contradict, support, or are unrelated.
-        This is the core of the two-stage pattern.
 
-        Args:
-            pair: The two claims to compare.
-            use_cache: If True (default), check in-memory cache before calling
-                       the LLM, and store the result after. If False, always
-                       call the LLM and do NOT write back to cache. Eval uses
-                       False so it always exercises the real LLM path and never
-                       pollutes the production cache.
+        TASK 2 upgrade: when evidence is present on a claim it is included
+        in the prompt so stronger_evidence is based on actual methodology
+        (n, design, p-value) rather than guessed from claim text alone.
+        Legacy claims (evidence=None) are flagged so the model doesn't
+        fabricate methodology details.
         """
-        # ── Cache read (skip when use_cache=False) ───────────
         if use_cache:
             key = self._cache_key(pair.claim_a.text, pair.claim_b.text)
             if key in self._judgment_cache:
                 return self._judgment_cache[key]
 
-        # ── LLM call (always runs when use_cache=False) ──────
+        # Build claim blocks — include evidence when present
+        def _claim_block(label: str, claim: Claim) -> str:
+            lines = [
+                f"{label} (paper: \"{claim.paper_title}\")",
+                f"  Claim: {claim.text}",
+            ]
+            if claim.evidence:
+                lines.append(f"  Evidence: {claim.evidence}")
+            else:
+                lines.append(
+                    "  Evidence: not available (legacy claim — set stronger_evidence "
+                    "to \"neither\" unless one claim is clearly better supported)"
+                )
+            return "\n".join(lines)
+
+        both_grounded = pair.claim_a.evidence is not None and pair.claim_b.evidence is not None
+        evidence_instruction = (
+            "Both claims include empirical evidence. Use the evidence fields to "
+            "determine stronger_evidence — do not guess from claim text alone."
+            if both_grounded else
+            "One or both claims lack empirical evidence. Set stronger_evidence to "
+            "\"neither\" unless the available evidence clearly favours one side."
+        )
+
         try:
             response = self.client.messages.create(
                 model=settings.anthropic_model,
@@ -221,12 +220,11 @@ class ContradictionAgent:
                 messages=[{
                     "role": "user",
                     "content": (
-                        "You are analyzing two claims from different research papers. "
-                        "Determine their relationship.\n\n"
-                        f'Paper A: "{pair.claim_a.paper_title}"\n'
-                        f'Claim A: "{pair.claim_a.text}"\n\n'
-                        f'Paper B: "{pair.claim_b.paper_title}"\n'
-                        f'Claim B: "{pair.claim_b.text}"\n\n'
+                        "You are analyzing two claims from different research papers "
+                        "to determine their relationship.\n\n"
+                        f"{_claim_block('Claim A', pair.claim_a)}\n\n"
+                        f"{_claim_block('Claim B', pair.claim_b)}\n\n"
+                        f"{evidence_instruction}\n\n"
                         "Return ONLY valid JSON with these fields:\n"
                         '- "relationship": one of "contradiction", "support", "nuance", "unrelated"\n'
                         '  (use "nuance" when claims partially agree but differ in scope or conditions)\n'
@@ -247,7 +245,6 @@ class ContradictionAgent:
                 raw = raw.strip()
 
             parsed = json.loads(raw)
-
             result = ContradictionResult(
                 id=str(uuid.uuid4()),
                 claim_a=pair.claim_a,
@@ -272,7 +269,6 @@ class ContradictionAgent:
                 resolution="",
             )
 
-        # ── Cache write (skip when use_cache=False) ──────────
         if use_cache:
             self._judgment_cache[key] = result
 
@@ -286,16 +282,6 @@ class ContradictionAgent:
         similarity_threshold: float = 0.6,
         max_pairs: int = 20,
     ) -> list[ContradictionResult]:
-        """
-        Run the full contradiction detection pipeline:
-        1. Extract claims from all papers (or specified ones)
-        2. Find similar claim pairs across papers
-        3. Judge each pair
-
-        Returns a list of ContradictionResults sorted by relationship type
-        (contradictions first, then nuance, then support).
-        """
-        # Get papers to scan
         if paper_ids:
             papers = [self.db.get_paper(pid) for pid in paper_ids]
             papers = [p for p in papers if p is not None]
@@ -305,7 +291,6 @@ class ContradictionAgent:
         if len(papers) < 2:
             return []
 
-        # Stage 1a: Extract claims from each paper
         all_claims = []
         for paper in papers:
             claims = self.extract_claims(paper.id)
@@ -314,23 +299,17 @@ class ContradictionAgent:
         if len(all_claims) < 2:
             return []
 
-        # Stage 1b: Find similar pairs across papers
         pairs = self.find_claim_pairs(all_claims, similarity_threshold)
-
-        # Cap the number of pairs to judge (cost control)
         pairs = pairs[:max_pairs]
 
         if not pairs:
             return []
 
-        # Stage 2: Judge each pair
         results = []
         for pair in pairs:
             result = self.judge_pair(pair)
             results.append(result)
 
-        # Sort: contradictions first, then nuance, then support, then unrelated
         priority = {"contradiction": 0, "nuance": 1, "support": 2, "unrelated": 3, "error": 4}
         results.sort(key=lambda r: priority.get(r.relationship, 5))
-
         return results
