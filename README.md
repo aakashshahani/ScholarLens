@@ -192,6 +192,8 @@ The contradiction detection engine has a formal eval harness:
 - Eval bypasses production cache entirely (`use_cache=False`) and never
   writes to the production DB — runs are fully isolated
 
+-Evaluated BGE-base as a replacement for MiniLM-L6. BGE's retrieval tuning compresses similarity scores upward, reducing separation between related and unrelated pairs on narrow-domain text from +0.274 to +0.141. MiniLM's general-purpose similarity handles domain-specific vocabulary distinctions better at Stage 1. Kept MiniLM; the BGE infrastructure (embed_query/embed_texts split) remains for future model experiments
+
 ### Results
 
 | Version | Macro-F1 | Kappa | Binary Tension F1 |
