@@ -36,7 +36,9 @@ Most "chat with your PDF" tools treat the paper as the atomic unit. ScholarLens 
 
 ### The analysis agent
 
-The core is an agent loop with tool use. Instead of a fixed pipeline (extract → summarize → done), the agent is given a set of tools and a goal, and it decides which tools to call, in what order, and when it's finished:
+The analysis pipeline fires all six report types concurrently via a thread pool — each is a targeted single-turn LLM call with a specific prompt. Same API cost as sequential, ~5x faster wall-clock time. The agentic pattern is reserved for contradiction detection and Q&A, where the model genuinely needs to discover what to examine rather than execute a known set of tasks.
+
+
 
 ```
 extract_pdf_text     →  pull and structure the paper's text
@@ -56,6 +58,10 @@ Comparing every claim against every other claim with an LLM would be quadratic a
 2. **LLM judgment (expensive, but rare)** — only the surviving pairs are sent to the model, which classifies the relationship (contradiction / support / nuance / unrelated), assigns a category, judges which claim has stronger evidence, and proposes how future research could resolve the conflict.
 
 This is the pattern that makes the feature tractable: the embedding step throws away the irrelevant majority for almost nothing, so the model only reasons about pairs that actually matter.
+
+Extracted claims and judged relationships are persisted to SQLite with stable IDs on every scan. The hypothesis agent reads directly from these persisted conflicts as its grounding input — provenance is traceable to specific claim pairs, not inferred from raw paper text.
+
+
 
 ### Persistence & caching
 
@@ -221,13 +227,19 @@ Key improvements in Task 2c:
 - arXiv + Semantic Scholar import with deduplication
 - Claim and relationship caching for cost control
 - Migration from Streamlit to a FastAPI + Next.js stack
-- Evidence-grounded claim extraction from source text
-  (current extraction is summary-based; moving to passage-level with
+- Evidence-grounded claim extraction from source text (current extraction is summary-based; moving to passage-level with
   evidence attached — effect size, sample size, conditions)
-- Prompt-engineered contradiction judge with formal eval: macro-F1 0.788,
-  kappa 0.683, binary tension F1 0.857
+- Prompt-engineered contradiction judge with formal eval: macro-F1 0.788, kappa 0.683, binary tension F1 0.857
+- Parallel analysis pipeline (~5x faster upload experience, same API cost)
+- Contradiction agent wired to SQLite persistence (claims + relationships survive restarts)
+- Hypothesis grounding in detected conflicts with validated provenance (cited conflict IDs checked against DB)
+- Hypothesis output cache keyed on paper scope + relationships watermark + question hash
+- Novelty scoring via cosine distance to nearest library chunk (replaces LLM self-assessment)
+- Impact score removed (no reliable signal — citation data not persisted)
+- Semantic search relevance tiers (highly_relevant / related / tangential) replacing fake percentage
+- Insight feed in-process TTL cache (2hr), invalidated on any library write
+
 **Next**
-- BGE-base embeddings replacing MiniLM, measured against eval set
 - Persisted scheduled insight generation
 - Deployed hosted demo
 - Auth and multi-user libraries
