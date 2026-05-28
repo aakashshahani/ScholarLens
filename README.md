@@ -36,7 +36,9 @@ Most "chat with your PDF" tools treat the paper as the atomic unit. ScholarLens 
 
 ### The analysis agent
 
-The core is an agent loop with tool use. Instead of a fixed pipeline (extract → summarize → done), the agent is given a set of tools and a goal, and it decides which tools to call, in what order, and when it's finished:
+The analysis pipeline fires all six report types concurrently via a thread pool — each is a targeted single-turn LLM call with a specific prompt. Same API cost as sequential, ~5x faster wall-clock time. The agentic pattern is reserved for contradiction detection and Q&A, where the model genuinely needs to discover what to examine rather than execute a known set of tasks.
+
+
 
 ```
 extract_pdf_text     →  pull and structure the paper's text
@@ -56,6 +58,10 @@ Comparing every claim against every other claim with an LLM would be quadratic a
 2. **LLM judgment (expensive, but rare)** — only the surviving pairs are sent to the model, which classifies the relationship (contradiction / support / nuance / unrelated), assigns a category, judges which claim has stronger evidence, and proposes how future research could resolve the conflict.
 
 This is the pattern that makes the feature tractable: the embedding step throws away the irrelevant majority for almost nothing, so the model only reasons about pairs that actually matter.
+
+Extracted claims and judged relationships are persisted to SQLite with stable IDs on every scan. The hypothesis agent reads directly from these persisted conflicts as its grounding input — provenance is traceable to specific claim pairs, not inferred from raw paper text.
+
+
 
 ### Persistence & caching
 
@@ -189,9 +195,24 @@ The contradiction detection engine has a formal eval harness:
   Johnson et al. 2017, Shaikh et al. 2024)
 - **Metrics:** 4-way macro-F1, Cohen's kappa, binary tension F1
   ({contradiction, nuance} vs {support, unrelated})
-- **Baseline:** macro-F1 0.690 · kappa 0.552 · binary tension F1 0.774
 - Eval bypasses production cache entirely (`use_cache=False`) and never
   writes to the production DB — runs are fully isolated
+
+-Evaluated BGE-base as a replacement for MiniLM-L6. BGE's retrieval tuning compresses similarity scores upward, reducing separation between related and unrelated pairs on narrow-domain text from +0.274 to +0.141. MiniLM's general-purpose similarity handles domain-specific vocabulary distinctions better at Stage 1. Kept MiniLM; the BGE infrastructure (embed_query/embed_texts split) remains for future model experiments
+
+### Results
+
+| Version | Macro-F1 | Kappa | Binary Tension F1 |
+|---------|----------|-------|-------------------|
+| Baseline (summary-based claims) | 0.690 | 0.552 | 0.774 |
+| Task 2 (grounded claims, evidence fields) | 0.648 | 0.513 | 0.733 |
+| Task 2b (nuance prompt v1) | 0.644 | 0.500 | 0.857 |
+| **Task 2c (nuance prompt v2, current)** | **0.788** | **0.683** | **0.857** |
+
+Key improvements in Task 2c:
+- Contradiction F1: 0.400 → 0.833 (decision tree + proxy-vs-orthogonal distinction)
+- Nuance F1: 0.286 → 0.696 (6 few-shot examples targeting boundary cases)
+- Kappa 0.683 = substantial agreement on a 4-class problem with genuinely ambiguous boundary cases
 
 ## Roadmap
 
@@ -206,12 +227,19 @@ The contradiction detection engine has a formal eval harness:
 - arXiv + Semantic Scholar import with deduplication
 - Claim and relationship caching for cost control
 - Migration from Streamlit to a FastAPI + Next.js stack
+- Evidence-grounded claim extraction from source text (current extraction is summary-based; moving to passage-level with
+  evidence attached — effect size, sample size, conditions)
+- Prompt-engineered contradiction judge with formal eval: macro-F1 0.788, kappa 0.683, binary tension F1 0.857
+- Parallel analysis pipeline (~5x faster upload experience, same API cost)
+- Contradiction agent wired to SQLite persistence (claims + relationships survive restarts)
+- Hypothesis grounding in detected conflicts with validated provenance (cited conflict IDs checked against DB)
+- Hypothesis output cache keyed on paper scope + relationships watermark + question hash
+- Novelty scoring via cosine distance to nearest library chunk (replaces LLM self-assessment)
+- Impact score removed (no reliable signal — citation data not persisted)
+- Semantic search relevance tiers (highly_relevant / related / tangential) replacing fake percentage
+- Insight feed in-process TTL cache (2hr), invalidated on any library write
 
 **Next**
-- Evidence-grounded claim extraction from source text
-  (current extraction is summary-based; moving to passage-level with
-  evidence attached — effect size, sample size, conditions)
-- BGE-base embeddings replacing MiniLM, measured against eval set
 - Persisted scheduled insight generation
 - Deployed hosted demo
 - Auth and multi-user libraries
