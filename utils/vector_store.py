@@ -45,9 +45,27 @@ class VectorStore:
         return self._model
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for a batch of texts."""
+        """
+        Embed a batch of texts as DOCUMENTS (no instruction prefix).
+
+        Used for indexing chunks (add_chunks) and for claim-vs-claim
+        similarity in the contradiction agent, where every text is a
+        passage being compared, not a search query.
+        """
         embeddings = self.embedding_model.encode(texts, show_progress_bar=False)
         return embeddings.tolist()
+
+    def embed_query(self, query: str) -> list[float]:
+        """
+        Embed a single search QUERY.
+
+        BGE retrieval models expect an instruction prefix on the query side
+        only; documents are embedded bare. settings.embedding_query_prefix is
+        "" for models that don't need it, so this is safe for any model.
+        """
+        prefix = getattr(settings, "embedding_query_prefix", "")
+        embeddings = self.embedding_model.encode([prefix + query], show_progress_bar=False)
+        return embeddings[0].tolist()
 
     def add_chunks(
         self,
@@ -90,7 +108,7 @@ class VectorStore:
             paper_id: Filter to a specific paper
             section: Filter to a specific section type
         """
-        query_embedding = self.embed_texts([query])[0]
+        query_embedding = self.embed_query(query)
 
         where_filter = {}
         if paper_id and section:

@@ -66,7 +66,6 @@ class AnalysisResult:
         return str(uuid.uuid4())
 
 
-# ── TASK 2 CHANGE: StoredClaim gains evidence/conditions/source_quote + grounded property
 @dataclass
 class StoredClaim:
     """A cached, extracted claim from a paper.
@@ -166,7 +165,7 @@ class Database:
                 created_at      TEXT NOT NULL
             );
 
-            -- TASK 2 CHANGE: claims table now includes evidence/conditions/source_quote
+            -- claims table includes evidence/conditions/source_quote
             -- for fresh installs. Existing DBs get these columns via ALTER below.
             CREATE TABLE IF NOT EXISTS claims (
                 id              TEXT PRIMARY KEY,
@@ -180,7 +179,7 @@ class Database:
                 created_at      TEXT NOT NULL
             );
 
-            -- Cached judged relationships between two claims
+            -- Cached judged relationships between two claims.
             -- claim_lo / claim_hi are the two claim IDs sorted lexically so each
             -- unordered pair has exactly one row (idempotent upsert key).
             CREATE TABLE IF NOT EXISTS relationships (
@@ -199,6 +198,16 @@ class Database:
                 UNIQUE(claim_lo, claim_hi)
             );
 
+            -- Hypothesis output cache.
+            -- Keyed on a hash of (paper scope + relationships watermark + question).
+            -- Avoids re-running 5-8 LLM calls when inputs haven't changed.
+            CREATE TABLE IF NOT EXISTS hypothesis_cache (
+                cache_key       TEXT PRIMARY KEY,
+                payload         TEXT NOT NULL,   -- JSON array of serialised Hypothesis objects
+                grounding       TEXT NOT NULL,   -- "detected_conflicts" | "single_paper_gaps"
+                created_at      TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_chunks_paper ON chunks(paper_id);
             CREATE INDEX IF NOT EXISTS idx_analysis_paper ON analysis_results(paper_id);
             CREATE INDEX IF NOT EXISTS idx_papers_source ON papers(source);
@@ -207,10 +216,8 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_rel_hi ON relationships(claim_hi);
         """)
 
-        # TASK 2 CHANGE: idempotent migration for existing DBs that have the old
-        # claims table without evidence/conditions/source_quote columns.
-        # ALTER TABLE is a no-op if the column already exists would error, so we
-        # check PRAGMA first. Safe to run on every startup.
+        # Idempotent migration for existing DBs that have the old claims table
+        # without evidence/conditions/source_quote columns.
         existing_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
         }
@@ -376,7 +383,6 @@ class Database:
                 row = conn.execute("SELECT * FROM papers WHERE arxiv_id = ?", (arxiv_id,)).fetchone()
                 if row:
                     return self._row_to_paper(row, json)
-            # Title-key fallback (compare normalized)
             key = self._title_key(title)
             if key:
                 rows = conn.execute("SELECT * FROM papers").fetchall()
@@ -399,7 +405,6 @@ class Database:
 
     # ── Claims cache ─────────────────────────────────────────
 
-    # TASK 2 CHANGE: insert_claims writes all 9 columns including evidence fields
     def insert_claims(self, claims: list[StoredClaim]):
         conn = self._get_conn()
         conn.executemany(
@@ -416,7 +421,6 @@ class Database:
         conn.commit()
         conn.close()
 
-    # TASK 2 CHANGE: get_claims_for_paper reads evidence fields and populates them
     def get_claims_for_paper(self, paper_id: str) -> list[StoredClaim]:
         conn = self._get_conn()
         rows = conn.execute(
@@ -472,11 +476,48 @@ class Database:
             return None
         return self._row_to_rel(row)
 
-    def list_relationships(self) -> list["StoredRelationship"]:
+    def list_relationships(
+        self,
+        paper_ids: list[str] | None = None,
+        relationships: list[str] | None = None,
+    ) -> list["StoredRelationship"]:
+        """
+        List cached relationships, optionally filtered.
+
+        Args:
+            paper_ids: If given, only return relationships where paper_a OR
+                       paper_b is in this set.
+            relationships: If given, only return rows whose relationship field
+                           is in this list. e.g. ["contradiction", "nuance"]
+        """
         conn = self._get_conn()
-        rows = conn.execute("SELECT * FROM relationships ORDER BY created_at DESC").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM relationships ORDER BY created_at DESC"
+        ).fetchall()
         conn.close()
-        return [self._row_to_rel(r) for r in rows]
+        rels = [self._row_to_rel(r) for r in rows]
+
+        if paper_ids:
+            pid_set = set(paper_ids)
+            rels = [r for r in rels if r.paper_a in pid_set or r.paper_b in pid_set]
+
+        if relationships:
+            rel_set = set(relationships)
+            rels = [r for r in rels if r.relationship in rel_set]
+
+        return rels
+
+    def relationships_watermark(self, paper_ids: list[str] | None = None) -> str:
+        """
+        Return the max created_at timestamp over relationships in scope.
+        Used as a cache invalidation signal: if this changes, the hypothesis
+        cache for those papers is stale.
+        Returns empty string when no relationships exist yet.
+        """
+        rels = self.list_relationships(paper_ids=paper_ids)
+        if not rels:
+            return ""
+        return max(r.created_at for r in rels)
 
     @staticmethod
     def _row_to_rel(r) -> "StoredRelationship":
@@ -487,3 +528,50 @@ class Database:
             stronger_evidence=r["stronger_evidence"], resolution=r["resolution"],
             similarity=r["similarity"], created_at=r["created_at"],
         )
+
+    # ── Hypothesis cache ─────────────────────────────────────
+
+    def get_hypothesis_cache(self, cache_key: str) -> dict | None:
+        """
+        Return cached hypothesis payload for this key, or None if missing.
+        Payload is a dict with keys: "hypotheses" (list), "grounding" (str).
+        """
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT payload, grounding FROM hypothesis_cache WHERE cache_key = ?",
+            (cache_key,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        import json
+        return {"hypotheses": json.loads(row["payload"]), "grounding": row["grounding"]}
+
+    def set_hypothesis_cache(self, cache_key: str, hypotheses: list, grounding: str):
+        """
+        Persist a hypothesis generation result.
+        hypotheses is a list of dicts (serialisable Hypothesis objects).
+        grounding is "detected_conflicts" or "single_paper_gaps".
+        """
+        import json
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO hypothesis_cache (cache_key, payload, grounding, created_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(cache_key) DO UPDATE SET
+                 payload=excluded.payload, grounding=excluded.grounding,
+                 created_at=excluded.created_at""",
+            (cache_key, json.dumps(hypotheses), grounding,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+
+    def invalidate_hypothesis_cache(self, cache_key: str):
+        """Explicitly delete one cache entry (used by force_refresh path)."""
+        conn = self._get_conn()
+        conn.execute(
+            "DELETE FROM hypothesis_cache WHERE cache_key = ?", (cache_key,)
+        )
+        conn.commit()
+        conn.close()

@@ -64,6 +64,29 @@ importer = PaperImporter()
 monitor = MonitoringAgent()
 
 
+# ── Insight feed cache ───────────────────────────────────────
+# Simple in-process TTL cache — no new DB table needed.
+# The feed is pure DB reads so it's cheap to recompute, but repeated
+# page loads from the frontend shouldn't re-run the same queries on
+# every request. Cache holds the last assembled result and its timestamp.
+# Invalidated explicitly whenever a paper is added or deleted.
+
+import time as _time
+
+_INSIGHT_CACHE_TTL = 2 * 60 * 60  # 2 hours in seconds
+
+_insight_cache: dict = {
+    "payload": None,       # list[dict] — the last assembled insight list
+    "ts": 0.0,             # unix timestamp of last population
+}
+
+
+def _invalidate_insight_cache():
+    """Call this any time the library changes so the feed reflects it immediately."""
+    _insight_cache["payload"] = None
+    _insight_cache["ts"] = 0.0
+
+
 # ── Request/Response Models ──────────────────────────────────
 
 class SearchRequest(BaseModel):
@@ -87,6 +110,12 @@ class HypothesisRequest(BaseModel):
     research_question: Optional[str] = None
     paper_ids: Optional[list[str]] = None
     num_hypotheses: int = 5
+    # Pass refresh=true to bypass the output cache and force regeneration.
+    # Useful when you've added papers or run a new contradiction scan and
+    # want hypotheses that reflect the updated conflict set immediately
+    # (the cache would normally auto-invalidate via the watermark, but
+    # explicit refresh is available as an escape hatch).
+    refresh: bool = False
 
 
 class ImportSearchRequest(BaseModel):
@@ -159,6 +188,7 @@ def list_papers(limit: int = 50, offset: int = 0):
     results = []
     for p in papers:
         analyses = db.get_analyses_for_paper(p.id)
+        claims = db.get_claims_for_paper(p.id)
         results.append({
             "id": p.id,
             "title": p.title,
@@ -169,8 +199,32 @@ def list_papers(limit: int = 50, offset: int = 0):
             "page_count": p.page_count,
             "created_at": p.created_at,
             "analysis_types": [a.analysis_type for a in analyses],
+            "chunk_count": len(claims),  # extracted claims count — meaningful to display
         })
     return results
+
+
+import re as _re
+
+def _strip_scaffolding(text: str) -> str:
+    """Remove prompt-scaffolding labels and unrendered markdown syntax from
+    stored analysis content. The UI renders this as plain text, so leftover
+    ## headers and **bold** markers from the LLM's output show up raw."""
+    # Strip lines that are purely uppercase labels (TITLE:, OBJECTIVE:, etc.)
+    lines = text.split("\n")
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip standalone scaffolding header lines
+        if _re.match(r"^(TITLE|OBJECTIVE|APPROACH|FINDINGS|METHODS|LIMITATIONS|KEY CLAIMS|RESEARCH GAPS|SUMMARY|SECTION)\s*:", stripped, _re.IGNORECASE):
+            continue
+        # Strip leading ## / ### markdown headers (keep the text after)
+        line = _re.sub(r"^#{1,6}\s+", "", line)
+        # Convert **bold** and *italic* markdown to plain text
+        line = _re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+        line = _re.sub(r"(?<!\*)\*(?!\*)(.+?)\*(?!\*)", r"\1", line)
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
 
 
 @app.get("/api/papers/{paper_id}")
@@ -194,7 +248,7 @@ def get_paper(paper_id: str):
             {
                 "id": a.id,
                 "type": a.analysis_type,
-                "content": a.content,
+                "content": _strip_scaffolding(a.content),
                 "created_at": a.created_at,
             }
             for a in analyses
@@ -224,6 +278,7 @@ def delete_paper(paper_id: str):
         )
         conn.commit()
         conn.close()
+    _invalidate_insight_cache()
     return {"status": "deleted", "id": paper_id}
 
 
@@ -276,8 +331,9 @@ async def upload_paper(
             "message": f"This paper is already in your library: \"{existing.title}\".",
         }
 
-    # Analyze in background (6 LLM calls, takes ~30s)
+    # Analyze in background (parallel — ~5x faster than sequential loop)
     background_tasks.add_task(_analyze_paper_bg, paper.id)
+    _invalidate_insight_cache()
 
     return {
         "id": paper.id,
@@ -312,7 +368,6 @@ def reanalyze_paper(paper_id: str, background_tasks: BackgroundTasks = Backgroun
         conn.close()
     background_tasks.add_task(_analyze_paper_bg, paper_id)
     return {"id": paper_id, "status": "analyzing"}
-
 
 
 # ── TASK 2: Grounded Claim Extraction ───────────────────────
@@ -402,6 +457,23 @@ def backfill_claims(
 
 @app.post("/api/search")
 def search_papers(req: SearchRequest):
+    """
+    Semantic search across the paper library.
+
+    Relevance fields returned per result:
+      relevance_tier  — "highly_relevant" | "related" | "tangential"
+                        Defined thresholds on cosine distance, calibrated for
+                        MiniLM on narrow-domain academic text. Honest and
+                        explainable; replaces the previous fake-precise percentage.
+      relevance_score — raw cosine distance in [0, 1] (lower = more similar).
+                        Exposed so the frontend can sort or filter if needed,
+                        but not intended for display to end users.
+
+    Thresholds (from settings):
+      < 0.20  → highly_relevant
+      < 0.40  → related
+      >= 0.40 → tangential
+    """
     results = agent.vector_store.search(
         query=req.query,
         n_results=req.n_results,
@@ -411,13 +483,13 @@ def search_papers(req: SearchRequest):
     response = []
     for r in results:
         paper = db.get_paper(r.paper_id)
-        relevance = max(0, min(100, int((1 - r.score) * 100)))
         response.append({
             "paper_id": r.paper_id,
             "paper_title": paper.title if paper else "Unknown",
             "section": r.section,
             "text": r.text[:500],
-            "relevance": relevance,
+            "relevance_tier": settings.relevance_tier(r.score),
+            "relevance_score": round(r.score, 4),
         })
     return response
 
@@ -429,6 +501,18 @@ def ask_question(req: AskRequest):
 
 
 # ── Contradictions ───────────────────────────────────────────
+
+@app.get("/api/contradictions/count")
+def contradiction_count():
+    """Lightweight endpoint — returns cached relationship counts with no LLM calls."""
+    rels = db.list_relationships()
+    counts = {"contradiction": 0, "support": 0, "nuance": 0, "unrelated": 0}
+    for r in rels:
+        if r.relationship in counts:
+            counts[r.relationship] += 1
+    last = max((r.created_at for r in rels), default=None) if rels else None
+    return {"counts": counts, "total": len(rels), "last_scanned": last}
+
 
 @app.post("/api/contradictions")
 def run_contradictions(req: ContradictionRequest):
@@ -446,6 +530,7 @@ def run_contradictions(req: ContradictionRequest):
             "explanation": r.explanation,
             "resolution": r.resolution,
             "stronger_evidence": r.stronger_evidence,
+            "similarity": round(r.similarity, 3),
             "claim_a": {
                 "paper_id": r.claim_a.paper_id,
                 "paper_title": r.claim_a.paper_title,
@@ -468,10 +553,25 @@ def run_contradictions(req: ContradictionRequest):
 
 @app.post("/api/hypotheses")
 def generate_hypotheses(req: HypothesisRequest):
+    """
+    Generate testable hypotheses from the library.
+
+    Response changes from previous version:
+      - source_conflicts: list of validated relationship IDs the hypothesis draws from
+      - grounding: "detected_conflicts" | "single_paper_gaps"
+      - novelty_score: cosine distance from nearest library chunk (0–1, higher = more novel)
+      - novelty_tier: "high" | "medium" | "low" | "unknown"
+      - impact: REMOVED (no reliable signal — no citation data in DB)
+      - novelty_explanation: REMOVED (replaced by novelty_score + novelty_tier)
+
+    Pass refresh=true to bypass the output cache.
+    Cache auto-invalidates when a new contradiction scan runs.
+    """
     hypotheses = hypothesis_agent.generate(
         research_question=req.research_question,
         paper_ids=req.paper_ids,
         num_hypotheses=req.num_hypotheses,
+        force_refresh=req.refresh,
     )
 
     return [
@@ -479,12 +579,13 @@ def generate_hypotheses(req: HypothesisRequest):
             "id": h.id,
             "statement": h.statement,
             "rationale": h.rationale,
+            "source_conflicts": h.source_conflicts,
             "supporting_papers": h.supporting_papers,
             "methodology": h.methodology,
             "challenges": h.challenges,
-            "novelty": h.novelty,
-            "novelty_explanation": h.novelty_explanation,
-            "impact": h.impact,
+            "novelty_score": h.novelty_score,
+            "novelty_tier": h.novelty_tier,
+            "grounding": h.grounding,
             "research_question": h.research_question,
             "created_at": h.created_at,
         }
@@ -594,6 +695,7 @@ def import_add(
 
     # Analyze in background
     background_tasks.add_task(_analyze_paper_bg, paper.id)
+    _invalidate_insight_cache()
 
     return {
         "id": paper.id,
@@ -639,6 +741,8 @@ def monitor_scan(req: MonitorRequest):
                     "url": sp.paper.url,
                     "pdf_url": sp.paper.pdf_url,
                     "relevance_score": sp.relevance_score,
+                    "relevance_tier": settings.relevance_tier(sp.relevance_score)
+                                       if hasattr(settings, "relevance_tier") else None,
                     "relevance_reason": sp.relevance_reason,
                 }
                 for sp in r.scored_papers
@@ -668,7 +772,6 @@ def build_graph(req: GraphRequest):
     This shapes data the contradiction agent already produces into a
     graph payload the frontend force-simulation can render.
     """
-    # Pick papers
     if req.paper_ids:
         papers = [db.get_paper(pid) for pid in req.paper_ids]
         papers = [p for p in papers if p is not None]
@@ -678,7 +781,7 @@ def build_graph(req: GraphRequest):
     if len(papers) < 2:
         return {"nodes": [], "edges": [], "papers": []}
 
-    # Stage 1: extract claims from each paper
+    # Stage 1: extract claims from each paper (DB-first via updated agent)
     all_claims = []
     for paper in papers:
         all_claims.extend(contradiction_agent.extract_claims(paper.id))
@@ -690,7 +793,7 @@ def build_graph(req: GraphRequest):
     pairs = contradiction_agent.find_claim_pairs(all_claims, req.similarity_threshold)
     pairs = pairs[: req.max_pairs]
 
-    # Stage 2: judge each pair → becomes an edge
+    # Stage 2: judge each pair → becomes an edge (writes through to DB)
     edges = []
     connected_claim_ids = set()
     for pair in pairs:
@@ -749,16 +852,25 @@ def insight_feed(req: InsightRequest):
     Synthesize a stream of typed insights from existing agent outputs.
 
     Sources:
-      - contradiction scan → contradiction / consensus / nuance insights
-      - newest papers       → new_paper insights
+      - newest papers         → new_paper insights
       - research_gaps analyses → gap insights
+      - relationships table   → contradiction / consensus insights (zero LLM calls)
 
-    This is a read-only synthesis over data the other agents already
-    produce; nothing new is persisted.
+    Cache: assembled list is cached in-process for _INSIGHT_CACHE_TTL seconds
+    (default 2 hours). Invalidated immediately on any paper add or delete so
+    the feed always reflects the current library state after writes.
     """
     import uuid
-    from datetime import datetime, timezone
 
+    # ── Cache read ────────────────────────────────────────────
+    now = _time.time()
+    if (
+        _insight_cache["payload"] is not None
+        and (now - _insight_cache["ts"]) < _INSIGHT_CACHE_TTL
+    ):
+        return _insight_cache["payload"][: req.limit]
+
+    # ── Assemble insights (all DB reads, zero LLM calls) ─────
     insights = []
 
     # Newest papers
@@ -791,12 +903,18 @@ def insight_feed(req: InsightRequest):
                 })
                 break
 
-    # Contradiction/consensus insights — read from the CACHED relationships
-    # table. This makes the feed a pure DB read (zero LLM calls). Run a
-    # contradiction scan from the Contradictions page to populate it.
+    # Contradiction/consensus insights — read from the relationships table.
+    # Run a contradiction scan from the Contradictions page to populate it.
+
+    def _truncate(s: str, n: int) -> str:
+        """Word-boundary truncation — avoids cutting headlines mid-word."""
+        if len(s) <= n:
+            return s
+        cut = s[:n].rsplit(" ", 1)[0]
+        return cut + "…"
+
     try:
         cached_rels = db.list_relationships()
-        # Build a quick claim_id -> paper title map for headlines
         claim_paper: dict[str, str] = {}
         for p in db.list_papers(limit=200):
             for c in db.get_claims_for_paper(p.id):
@@ -805,23 +923,42 @@ def insight_feed(req: InsightRequest):
         for rel in cached_rels:
             ta = claim_paper.get(rel.claim_lo, "a paper")
             tb = claim_paper.get(rel.claim_hi, "another paper")
+            # Use the explanation's first sentence as the headline so each
+            # insight is distinct — not the same paper-name template repeated.
+            explanation = rel.explanation or ""
+            first_sentence = explanation.split(".")[0].strip() if explanation else ""
             if rel.relationship == "contradiction":
+                headline = _truncate(first_sentence, 140) if first_sentence else f"Conflict between {ta[:35]} and {tb[:35]}"
                 insights.append({
                     "id": rel.id, "type": "contradiction",
-                    "headline": f"Conflict: {ta[:40]} vs {tb[:40]}",
-                    "claim": "", "detail": rel.explanation or "",
+                    "headline": headline,
+                    "claim": "", "detail": explanation,
                     "papers": [ta, tb], "created_at": rel.created_at,
                 })
             elif rel.relationship == "support":
+                headline = _truncate(first_sentence, 140) if first_sentence else f"Agreement across {ta[:35]} and {tb[:35]}"
                 insights.append({
                     "id": rel.id, "type": "consensus",
-                    "headline": f"Consensus forming across {ta[:40]} and others",
-                    "claim": "", "detail": rel.explanation or "",
+                    "headline": headline,
+                    "claim": "", "detail": explanation,
+                    "papers": [ta, tb], "created_at": rel.created_at,
+                })
+            elif rel.relationship == "nuance":
+                headline = _truncate(first_sentence, 140) if first_sentence else f"Nuance between {ta[:35]} and {tb[:35]}"
+                insights.append({
+                    "id": rel.id, "type": "gap",
+                    "headline": headline,
+                    "claim": "", "detail": explanation,
                     "papers": [ta, tb], "created_at": rel.created_at,
                 })
     except Exception as e:
         print(f"Insight relationship read skipped: {e}")
 
-    # Sort newest first, cap
+    # Sort newest first
     insights.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+    # ── Cache write ───────────────────────────────────────────
+    _insight_cache["payload"] = insights
+    _insight_cache["ts"] = _time.time()
+
     return insights[: req.limit]

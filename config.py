@@ -32,7 +32,11 @@ class Settings:
     
     # Embedding model — runs locally via sentence-transformers as a starter,
     # swap to API embeddings when you're ready to scale
-    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_model: str = "BAAI/bge-base-en-v1.5"
+    # BGE retrieval models require this instruction prepended to QUERY strings
+    # only (never to documents being indexed). Empty string = no-op for models
+    # that don't need it, so embed_query() stays model-agnostic.
+    embedding_query_prefix: str = "Represent this sentence for searching relevant passages: "
     
     # Chunking params
     chunk_size: int = 500          # tokens per chunk

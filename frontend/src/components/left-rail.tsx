@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import {
-  LayoutDashboard, Library, Network, Zap, FlaskConical, Radio, Plus,
+  LayoutDashboard, Library, Network, Zap, FlaskConical, Radio, Radar, Plus,
 } from "lucide-react";
 
 const NAV = [
@@ -14,6 +14,7 @@ const NAV = [
   { href: "/contradictions", label: "Contradictions", icon: Zap },
   { href: "/hypotheses", label: "Hypotheses", icon: FlaskConical },
   { href: "/feed", label: "Insight Feed", icon: Radio },
+  { href: "/monitor", label: "Monitor", icon: Radar },
 ];
 
 export function LeftRail() {
