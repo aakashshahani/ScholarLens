@@ -12,7 +12,7 @@ interface CacheEntry<T> {
   version: number; // bump to bust old caches on schema changes
 }
 
-const VERSION = 2;
+const VERSION = 3;
 
 function write<T>(key: string, data: T): void {
   try {

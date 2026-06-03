@@ -10,11 +10,13 @@ const NOVELTY_COLOR = {
   high: "var(--support)", medium: "var(--nuance)", low: "var(--text-3)", unknown: "var(--text-4)"
 } as const;
 
-function NoveltyPill({ tier, score }: { tier: string; score?: number }) {
+// Tier-only pill — the raw cosine-distance number is intentionally not shown.
+// It implies a precision the score doesn't have and means nothing to a reader.
+function NoveltyPill({ tier }: { tier: string }) {
   const color = NOVELTY_COLOR[tier as keyof typeof NOVELTY_COLOR] || "var(--text-3)";
   return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[var(--surface-3)]" style={{ color }}>
-      novelty · {tier}{score !== undefined && score > 0 ? ` (${score.toFixed(2)})` : ""}
+      {tier} novelty
     </span>
   );
 }
@@ -54,8 +56,6 @@ export default function HypothesesPage() {
     } catch (e: any) { setError(e.message); }
     setLoading(false);
   };
-
-  const lvl = (s: string) => (s === "high" ? 0.85 : s === "medium" ? 0.5 : 0.2);
 
   return (
     <div>
@@ -141,7 +141,7 @@ export default function HypothesesPage() {
                       </div>
 
                       <div className="mb-3">
-                        <NoveltyPill tier={h.novelty_tier || h.novelty} score={h.novelty_score} />
+                        <NoveltyPill tier={h.novelty_tier || h.novelty} />
                       </div>
 
                       <div className="font-display text-[17px] text-[var(--text-1)] leading-[1.35] mb-2.5">{h.statement}</div>
@@ -184,17 +184,19 @@ export default function HypothesesPage() {
                 })}
               </div>
 
-              {/* Novelty plot — only novelty axis since impact is removed */}
+              {/* Novelty ranking — bars only, no raw scores or jargon.
+                  The cosine-distance value still drives bar width and ordering;
+                  it is just never shown as a number or explained in model terms. */}
               <div className="sticky top-6 self-start">
                 <Card>
                   <SectionLabel>Novelty ranking</SectionLabel>
                   <div className="text-[11px] text-[var(--text-3)] mb-4 leading-[1.5]">
-                    Measured as cosine distance from your corpus. Higher = more novel relative to what you've already read.
+                    How different each hypothesis is from what your library already covers. Longer bars sit in less-explored territory.
                   </div>
                   <div className="space-y-2.5">
                     {[...hypotheses]
                       .sort((a, b) => (b.novelty_score || 0) - (a.novelty_score || 0))
-                      .map((h, rank) => {
+                      .map((h) => {
                         const idx = hypotheses.indexOf(h);
                         const score = h.novelty_score || 0;
                         const color = score > 0.5 ? "var(--support)" : score > 0.3 ? "var(--nuance)" : "var(--text-3)";
@@ -204,7 +206,6 @@ export default function HypothesesPage() {
                             <div className="flex-1 h-[5px] bg-[var(--surface-3)] rounded-full overflow-hidden">
                               <div className="h-full rounded-full t-all" style={{ width: `${Math.min(score * 150, 100)}%`, background: color }} />
                             </div>
-                            <span className="mono text-[11px] tabular-nums w-8 text-right" style={{ color }}>{score.toFixed(2)}</span>
                           </div>
                         );
                       })}

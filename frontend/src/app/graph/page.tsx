@@ -1,79 +1,141 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { api, Paper, GraphPayload, GraphNode } from "@/lib/api";
-import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, Claim, REL } from "@/components/ui";
-import { Network, AlertCircle, Info } from "lucide-react";
+import { api, Paper, GraphPayload, GraphNode, GraphEdge } from "@/lib/api";
+import { PageHeader, EmptyState, Spinner, PrimaryButton, REL } from "@/components/ui";
+import { Network, AlertCircle, Info, Zap } from "lucide-react";
 import { cache } from "@/lib/cache";
+import Link from "next/link";
+
+const W = 820, H = 560;
+
+const PAPER_PALETTE = [
+  "#7C6FFF", "#3DD4A0", "#F5A623", "#FF5C5C",
+  "#5B9BE0", "#D86FB0", "#4ECDC4", "#FFE66D", "#A8E6CF", "#FF8B94",
+];
+
+function paperColor(paperId: string, data: GraphPayload | null): string {
+  if (!data) return PAPER_PALETTE[0];
+  const idx = data.papers.findIndex((p) => p.id === paperId);
+  return PAPER_PALETTE[Math.max(0, idx) % PAPER_PALETTE.length];
+}
+
+function nodeR(degree: number, emphasized: boolean): number {
+  const base = 12 + Math.min(degree, 6) * 1.6;
+  return emphasized ? base + 3 : base;
+}
+
+function centralityLabel(node: GraphNode, data: GraphPayload): string {
+  const rank = [...data.nodes].sort((a, b) => b.degree - a.degree)
+    .findIndex((n) => n.id === node.id) + 1;
+  if (rank === 1) return "Most connected claim";
+  if (rank <= 3) return `#${rank} most connected`;
+  return `${node.degree} connection${node.degree !== 1 ? "s" : ""}`;
+}
 
 interface Sim { id: string; x: number; y: number; vx: number; vy: number; node: GraphNode; }
-const W = 760, H = 520;
 
 export default function GraphPage() {
-  const [papers, setPapers] = useState<Paper[]>([]);
-  const [data, setData] = useState<GraphPayload | null>(null);
+  const [papers, setPapers]   = useState<Paper[]>([]);
+  const [data, setData]       = useState<GraphPayload | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [sel, setSel] = useState<GraphNode | null>(null);
-  const [active, setActive] = useState<Record<string, boolean>>({ contradiction: true, support: true, nuance: true, unrelated: false });
-  const [sims, setSims] = useState<Sim[]>([]);
-  const rafRef = useRef<number>(0);
-  const simsRef = useRef<Sim[]>([]);
+  const [error, setError]     = useState("");
+  const [sel, setSel]         = useState<GraphNode | null>(null);
+  const [hovered, setHovered] = useState<Sim | null>(null);
+  const [active, setActive]   = useState<Record<string, boolean>>({
+    contradiction: true, support: true, nuance: true,
+  });
+  const [sims, setSims]       = useState<Sim[]>([]);
+  const rafRef                = useRef<number>(0);
+  const simsRef               = useRef<Sim[]>([]);
 
   useEffect(() => {
     api.listPapers(50).then(setPapers);
     const cached = cache.read<GraphPayload>("graph");
-    if (cached && cached.nodes.length > 0) {
-      setData(cached);
-      seedPositions(cached);
-    }
+    if (cached?.nodes?.length) { setData(cached); seedPositions(cached); }
   }, []);
 
   const seedPositions = (g: GraphPayload) => {
     const connectedIds = new Set(g.edges.flatMap((e) => [e.source, e.target]));
     const connected = g.nodes.filter((n) => connectedIds.has(n.id));
+    const cx = W / 2, cy = H / 2;
+    const r = Math.min(W, H) * 0.34;
     const seeded: Sim[] = connected.map((n, i) => ({
       id: n.id, node: n,
-      x: W / 2 + Math.cos((i / Math.max(connected.length, 1)) * Math.PI * 2) * 160 + (Math.random() - 0.5) * 40,
-      y: H / 2 + Math.sin((i / Math.max(connected.length, 1)) * Math.PI * 2) * 160 + (Math.random() - 0.5) * 40,
+      x: cx + Math.cos((i / Math.max(connected.length, 1)) * Math.PI * 2) * r + (Math.random() - 0.5) * 24,
+      y: cy + Math.sin((i / Math.max(connected.length, 1)) * Math.PI * 2) * r + (Math.random() - 0.5) * 24,
       vx: 0, vy: 0,
     }));
     simsRef.current = seeded; setSims(seeded);
   };
 
+  // Read-only: pulls from persisted relationships table, zero LLM calls,
+  // never moves the watermark so it won't invalidate the hypothesis cache.
   const run = async () => {
-    setLoading(true); setSel(null); setError("");
+    setLoading(true); setSel(null); setHovered(null); setError("");
     try {
-      const g = await api.graph({ similarityThreshold: 0.45, maxPairs: 40 });
-      setData(g);
-      cache.write("graph", g);
-      seedPositions(g);
+      const g = await api.graph({ compute: false });
+      setData(g); cache.write("graph", g); seedPositions(g);
+    } catch (e: any) { setError(e.message); }
+    setLoading(false);
+  };
+
+  // Deliberate expansion: judges new pairs, writes through, costs credits.
+  // Gated behind a confirm so it can't fire by accident.
+  const expand = async () => {
+    const ok = window.confirm(
+      "Expand the relationship set?\n\nThis runs the contradiction pipeline on new claim pairs — it uses API credits and will refresh your hypotheses. Use this only when you've added papers or want deeper coverage."
+    );
+    if (!ok) return;
+    setLoading(true); setSel(null); setHovered(null); setError("");
+    try {
+      const g = await api.graph({ similarityThreshold: 0.40, maxPairs: 120, compute: true });
+      setData(g); cache.write("graph", g); seedPositions(g);
     } catch (e: any) { setError(e.message); }
     setLoading(false);
   };
 
   const tick = useCallback(() => {
     const nodes = simsRef.current;
-    if (!data || nodes.length === 0) return;
-    for (const n of nodes) { n.vx += (W / 2 - n.x) * 0.0025; n.vy += (H / 2 - n.y) * 0.0025; }
-    for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
-      const a = nodes[i], b = nodes[j];
-      let dx = a.x - b.x, dy = a.y - b.y;
-      const d = Math.hypot(dx, dy) || 1;
-      const rep = 900 / (d * d); dx /= d; dy /= d;
-      a.vx += dx * rep; a.vy += dy * rep; b.vx -= dx * rep; b.vy -= dy * rep;
+    if (!data || !nodes.length) return;
+    const cx = W / 2, cy = H / 2;
+
+    // Centering
+    for (const n of nodes) {
+      n.vx += (cx - n.x) * 0.016;
+      n.vy += (cy - n.y) * 0.016;
     }
+
+    // Repulsion
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        let dx = a.x - b.x, dy = a.y - b.y;
+        const d = Math.hypot(dx, dy) || 1;
+        const rep = 1700 / (d * d); dx /= d; dy /= d;
+        a.vx += dx * rep; a.vy += dy * rep;
+        b.vx -= dx * rep; b.vy -= dy * rep;
+      }
+    }
+
+    // Springs
     for (const e of data.edges) {
-      const a = nodes.find((n) => n.id === e.source), b = nodes.find((n) => n.id === e.target);
+      const a = nodes.find((n) => n.id === e.source);
+      const b = nodes.find((n) => n.id === e.target);
       if (!a || !b) continue;
       let dx = b.x - a.x, dy = b.y - a.y;
       const d = Math.hypot(dx, dy) || 1;
-      const f = (d - 120) * 0.008; dx /= d; dy /= d;
-      a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f;
+      const f = (d - 110) * 0.010; dx /= d; dy /= d;
+      a.vx += dx * f; a.vy += dy * f;
+      b.vx -= dx * f; b.vy -= dy * f;
     }
+
+    const pad = 30;
     for (const n of nodes) {
-      n.vx *= 0.82; n.vy *= 0.82; n.x += n.vx; n.y += n.vy;
-      n.x = Math.max(20, Math.min(W - 20, n.x)); n.y = Math.max(20, Math.min(H - 20, n.y));
+      n.vx *= 0.80; n.vy *= 0.80;
+      n.x += n.vx; n.y += n.vy;
+      n.x = Math.max(pad, Math.min(W - pad, n.x));
+      n.y = Math.max(pad, Math.min(H - pad, n.y));
     }
     setSims([...nodes]);
     rafRef.current = requestAnimationFrame(tick);
@@ -87,29 +149,40 @@ export default function GraphPage() {
   }, [data, tick]);
 
   const pos = (id: string) => sims.find((s) => s.id === id);
+
   const neighbors = sel && data
-    ? new Set(data.edges.filter((e) => e.source === sel.id || e.target === sel.id).flatMap((e) => [e.source, e.target]))
+    ? new Set(data.edges
+        .filter((e) => e.source === sel.id || e.target === sel.id)
+        .flatMap((e) => [e.source, e.target]))
     : null;
 
-  // Only count nodes that have edges — isolated ones are filtered out of the sim
-  const connectedCount = data ? new Set(data.edges.flatMap((e) => [e.source, e.target])).size : 0;
-  const isolatedCount = data ? data.nodes.length - connectedCount : 0;
-  const estimatedPairs = Math.min(40, Math.floor(papers.length * (papers.length - 1) / 2));
+  const otherNode = (e: GraphEdge, selfId: string) =>
+    data?.nodes.find((n) => n.id === (e.source === selfId ? e.target : e.source));
+
+  const coveredCount = data ? new Set(data.nodes.map((n) => n.paper_id)).size : 0;
 
   return (
     <div>
       <PageHeader
-        title="Knowledge field"
-        subtitle="Every claim a node. Every line a relationship."
+        title="Knowledge graph"
+        subtitle="Every extracted claim is a node. Every detected relationship is an edge. Node size reflects how connected a claim is across your library."
         action={data && (
-          <PrimaryButton onClick={run} full={false} disabled={loading}>
-            <Network size={15} /> Recompute
-          </PrimaryButton>
+          <div className="flex items-center gap-2">
+            <button onClick={run} disabled={loading}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)] disabled:opacity-40">
+              <Network size={14} /> Refresh
+            </button>
+            <PrimaryButton onClick={expand} full={false} disabled={loading}>
+              <Zap size={15} /> Expand
+            </PrimaryButton>
+          </div>
         )}
       />
 
       {papers.length < 2 ? (
-        <EmptyState icon={<Network size={20} />} title="Need at least 2 papers" hint="Add papers to map the knowledge field." />
+        <EmptyState icon={<Network size={20} />} title="Need at least 2 papers"
+          hint="Add papers to build the knowledge graph." />
+
       ) : !data ? (
         <div className="fade-up">
           <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-6">
@@ -118,13 +191,13 @@ export default function GraphPage() {
                 <Network size={18} className="text-[var(--gen)]" />
               </div>
               <div className="flex-1">
-                <div className="text-[15px] font-medium text-[var(--text-1)] mb-1">Build your knowledge graph</div>
+                <div className="text-[15px] font-medium text-[var(--text-1)] mb-1">Build the knowledge graph</div>
                 <div className="text-[13px] text-[var(--text-2)] mb-3 leading-[1.6]">
-                  Maps claims from {papers.length} papers into a force-directed graph. Nodes are claims; edges are detected relationships. Only claims that share a relationship appear connected — the graph shows confirmed connections, not exhaustive coverage.
+                  Visualises every claim from your {papers.length} papers as a node, with edges showing where claims support, nuance, or contradict each other. Reads from your existing contradiction scan — no extra API cost.
                 </div>
                 <div className="flex items-center gap-2 text-[12px] text-[var(--nuance)] mb-4">
                   <Info size={13} />
-                  Analyzes up to {estimatedPairs} claim pairs · takes 30–90 seconds · uses API credits
+                  Run a contradiction scan first if you haven&apos;t — the graph reads from those results.
                 </div>
                 <PrimaryButton onClick={run} disabled={loading} full={false}>
                   {loading ? <Spinner /> : <><Network size={15} /> Build graph</>}
@@ -133,15 +206,22 @@ export default function GraphPage() {
             </div>
           </div>
         </div>
+
       ) : (
-        <div className="grid grid-cols-[1fr_320px] gap-4 fade-up">
+        <div className="grid grid-cols-[1fr_300px] gap-4 fade-up">
+
+          {/* ── Graph canvas ── */}
           <div className="bg-[var(--surface-1)] border border-[var(--line)] rounded-[var(--r-lg)] overflow-hidden relative">
+
+            {/* Relationship filter chips */}
             <div className="absolute top-3 left-3 z-10 flex gap-1.5">
               {(["contradiction", "support", "nuance"] as const).map((t) => (
-                <button key={t} onClick={() => setActive((a) => ({ ...a, [t]: !a[t] }))}
+                <button key={t}
+                  onClick={() => setActive((a) => ({ ...a, [t]: !a[t] }))}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] border t-all ${active[t] ? "" : "opacity-30"}`}
                   style={{ background: REL[t].dim, color: REL[t].c, borderColor: REL[t].line }}>
-                  <span className="w-[5px] h-[5px] rounded-full" style={{ background: REL[t].c }} />{t}
+                  <span className="w-[4px] h-[4px] rounded-full" style={{ background: REL[t].c }} />
+                  {t}
                 </button>
               ))}
             </div>
@@ -153,72 +233,187 @@ export default function GraphPage() {
               </div>
             )}
 
-            <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 520 }}>
+            {/* Hover tooltip */}
+            {hovered && (() => {
+              const px = hovered.x / W, py = hovered.y / H;
+              const flipX = px > 0.60, flipY = py > 0.72;
+              return (
+                <div className="absolute z-20 pointer-events-none"
+                  style={{
+                    left: `${px * 100}%`, top: `${py * 100}%`,
+                    transform: `translate(${flipX ? "calc(-100% - 14px)" : "14px"}, ${flipY ? "-100%" : "-50%"})`,
+                  }}>
+                  <div className="bg-[var(--surface-3)] border border-[var(--line-2)] rounded-[var(--r-md)] p-3 shadow-xl w-[220px]">
+                    <div className="text-[9.5px] font-medium text-[var(--text-4)] uppercase tracking-wider mb-1.5 truncate">
+                      {hovered.node.paper_title}
+                    </div>
+                    <div className="text-[11.5px] text-[var(--text-1)] leading-snug line-clamp-4">
+                      {hovered.node.claim}
+                    </div>
+                    <div className="text-[9.5px] text-[var(--text-4)] mt-2">
+                      {hovered.node.degree} connection{hovered.node.degree !== 1 ? "s" : ""}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* SVG graph */}
+            <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }}>
+              {/* Edges */}
               {data.edges.filter((e) => active[e.relationship]).map((e, i) => {
                 const a = pos(e.source), b = pos(e.target);
                 if (!a || !b) return null;
-                const dim = sel && !(e.source === sel.id || e.target === sel.id);
+                const dim = neighbors && !(neighbors.has(e.source) && neighbors.has(e.target));
+                const w = e.relationship === "contradiction" ? 2 : e.relationship === "support" ? 1.5 : 1;
                 return (
                   <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                     stroke={REL[e.relationship].c}
-                    strokeWidth={e.relationship === "contradiction" ? 1.8 : 1.2}
-                    strokeOpacity={dim ? 0.04 : 0.4}
-                    className={e.relationship === "contradiction" && !dim ? "charged" : ""} />
+                    strokeWidth={w}
+                    strokeOpacity={dim ? 0.04 : neighbors ? 0.75 : 0.28}
+                    className={e.relationship === "contradiction" && !dim ? "charged" : ""}
+                  />
                 );
               })}
-              {/* Only render nodes that have edges — isolated nodes hidden */}
+
+              {/* Nodes */}
               {sims.map((s) => {
-                const dim = neighbors && !neighbors.has(s.id);
-                const isSel = sel?.id === s.id;
+                const dim    = neighbors && !neighbors.has(s.id);
+                const isSel  = sel?.id === s.id;
+                const isHov  = hovered?.id === s.id;
+                const r      = nodeR(s.node.degree, isSel || isHov);
+                const pColor = paperColor(s.node.paper_id, data);
                 return (
-                  <g key={s.id} onClick={() => setSel(s.node)} style={{ cursor: "pointer", opacity: dim ? 0.15 : 1 }} className="t-all">
-                    <circle cx={s.x} cy={s.y}
-                      r={isSel ? 8 : 5 + Math.min(s.node.degree, 4)}
+                  <g key={s.id}
+                    onClick={() => setSel(isSel ? null : s.node)}
+                    onMouseEnter={() => setHovered(s)}
+                    onMouseLeave={() => setHovered(null)}
+                    style={{ cursor: "pointer", opacity: dim ? 0.10 : 1 }}
+                    className="t-all">
+                    {/* Paper colour ring */}
+                    <circle cx={s.x} cy={s.y} r={r + 3} fill="none"
+                      stroke={pColor} strokeWidth={1.8}
+                      strokeOpacity={isSel ? 1 : isHov ? 0.8 : 0.45} />
+                    {/* Node body */}
+                    <circle cx={s.x} cy={s.y} r={r}
                       fill="var(--surface-3)"
                       stroke={isSel ? "var(--gen)" : "var(--line-3)"}
                       strokeWidth={isSel ? 2 : 1} />
-                    <circle cx={s.x} cy={s.y} r="2.5" fill={isSel ? "var(--gen)" : "var(--text-2)"} />
+                    {/* Centre dot */}
+                    <circle cx={s.x} cy={s.y} r={isSel ? 5 : 3.5}
+                      fill={isSel ? "var(--gen)" : pColor}
+                      fillOpacity={0.9} />
                   </g>
                 );
               })}
             </svg>
 
-            <div className="absolute bottom-3 left-3 flex items-center gap-3 text-[10px] text-[var(--text-4)] uppercase tracking-wider">
-              <span>{connectedCount} connected claims · {data.edges.length} relationships</span>
-              {isolatedCount > 0 && <span className="text-[var(--text-4)]">· {isolatedCount} claims with no detected relationships hidden</span>}
+            {/* Footer legend */}
+            <div className="border-t border-[var(--line)] px-3.5 py-2.5 flex flex-wrap gap-x-4 gap-y-1.5 items-center">
+              {data.papers.slice(0, 8).map((p, i) => (
+                <div key={p.id} className="flex items-center gap-1.5 min-w-0">
+                  <span className="w-[8px] h-[8px] rounded-full shrink-0"
+                    style={{ background: PAPER_PALETTE[i % PAPER_PALETTE.length] }} />
+                  <span className="text-[11px] text-[var(--text-2)] truncate max-w-[140px]">
+                    {p.title.length > 32 ? p.title.slice(0, 32) + "…" : p.title}
+                  </span>
+                </div>
+              ))}
+              {data.papers.length > 8 && (
+                <span className="text-[11px] text-[var(--text-4)]">+{data.papers.length - 8} more</span>
+              )}
+              <span className="ml-auto text-[10.5px] text-[var(--text-4)] mono shrink-0">
+                {coveredCount}/{papers.length} papers · {data.nodes.length} claims · {data.edges.length} links
+              </span>
             </div>
           </div>
 
+          {/* ── Inspector rail ── */}
           <div className="sticky top-6 self-start space-y-3">
             {sel ? (
-              <Card className="fade-up">
-                <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2">Claim</div>
-                <Claim className="block mb-4">{sel.claim}</Claim>
-                <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-1.5">From</div>
-                <div className="text-[12.5px] text-[var(--text-1)] mb-0.5 clamp-2">{sel.paper_title}</div>
-                <div className="text-[11px] text-[var(--text-3)] mb-4">{sel.section} · confidence {sel.confidence}</div>
-                <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2">
-                  Connections ({data.edges.filter((e) => e.source === sel.id || e.target === sel.id).length})
+              <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4 fade-up">
+                {/* Centrality badge */}
+                <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[var(--gen-dim)] text-[var(--gen)] text-[10.5px] font-medium mb-3">
+                  <span className="w-[3px] h-[3px] rounded-full bg-[var(--gen)]" />
+                  {centralityLabel(sel, data)}
                 </div>
-                <div className="space-y-1.5">
-                  {data.edges.filter((e) => e.source === sel.id || e.target === sel.id).slice(0, 6).map((e, i) => (
-                    <div key={i} className="flex items-center gap-2 text-[12px]">
-                      <span className="w-[6px] h-[6px] rounded-full shrink-0" style={{ background: REL[e.relationship].c }} />
-                      <span className="text-[var(--text-2)] capitalize">{e.relationship}</span>
-                      <span className="mono text-[10px] text-[var(--text-4)] ml-auto">{e.similarity.toFixed(2)}</span>
-                    </div>
-                  ))}
+
+                <div className="text-[10px] font-medium text-[var(--text-4)] uppercase tracking-wider mb-1.5">Claim</div>
+                <p className="text-[12.5px] text-[var(--text-1)] leading-[1.65] mb-3">{sel.claim}</p>
+
+                {/* Paper attribution */}
+                <div className="flex items-center gap-2 py-2.5 border-t border-b border-[var(--line)] mb-3">
+                  <span className="w-[7px] h-[7px] rounded-full shrink-0"
+                    style={{ background: paperColor(sel.paper_id, data) }} />
+                  <div className="min-w-0">
+                    <div className="text-[11.5px] text-[var(--text-1)] font-medium clamp-1">{sel.paper_title}</div>
+                    <div className="text-[10px] text-[var(--text-3)]">{sel.section} · {sel.confidence} confidence</div>
+                  </div>
                 </div>
-              </Card>
-            ) : (
-              <Card><div className="text-[13px] text-[var(--text-3)] text-center py-8">Click a node to inspect its claim and connections.</div></Card>
-            )}
-            <Card>
-              <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2">About this graph</div>
-              <div className="text-[12px] text-[var(--text-2)] leading-[1.6]">
-                Only claims sharing a detected relationship appear as connected nodes. Claims using different vocabulary for the same concept may not be linked — the graph shows confirmed connections, not exhaustive coverage.
+
+                {/* Connections */}
+                {(() => {
+                  const conns = data.edges
+                    .filter((e) => (e.source === sel.id || e.target === sel.id) && e.relationship !== "unrelated")
+                    .sort((a, b) => b.similarity - a.similarity)
+                    .slice(0, 6);
+                  if (!conns.length)
+                    return <p className="text-[12px] text-[var(--text-3)]">No detected relationships for this claim.</p>;
+                  return (
+                    <>
+                      <div className="text-[10px] font-medium text-[var(--text-4)] uppercase tracking-wider mb-2">
+                        Connections ({conns.length})
+                      </div>
+                      <div className="space-y-1.5">
+                        {conns.map((e, i) => {
+                          const other = otherNode(e, sel.id);
+                          const rk = e.relationship as keyof typeof REL;
+                          return (
+                            <div key={i}
+                              className="p-2.5 rounded-[var(--r-md)] bg-[var(--surface-1)] border border-[var(--line)] cursor-pointer hover:border-[var(--line-2)] t-all"
+                              onClick={() => { if (other) setSel(other); }}>
+                              <div className="flex items-center gap-1.5 mb-1">
+                                <span className="w-[5px] h-[5px] rounded-full shrink-0"
+                                  style={{ background: REL[rk].c }} />
+                                <span className="text-[10.5px] font-medium capitalize"
+                                  style={{ color: REL[rk].c }}>{e.relationship}</span>
+                                <span className="mono text-[9.5px] text-[var(--text-4)] ml-auto">
+                                  {e.similarity.toFixed(2)}
+                                </span>
+                              </div>
+                              {other && (
+                                <div className="text-[10.5px] text-[var(--text-3)] clamp-1">{other.paper_title}</div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
-            </Card>
+            ) : (
+              <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4">
+                <p className="text-[13px] text-[var(--text-3)] text-center py-4">
+                  Click any node to inspect its claim and connections.
+                </p>
+                <p className="text-[11px] text-[var(--text-4)] text-center">
+                  Larger node = more connections · Colour ring = paper
+                </p>
+              </div>
+            )}
+
+            {/* About card */}
+            <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4">
+              <div className="text-[10px] font-medium text-[var(--text-4)] uppercase tracking-wider mb-2">How it works</div>
+              <div className="text-[11.5px] text-[var(--text-2)] leading-[1.65]">
+                Each node is a claim extracted from a paper. Edges are relationships detected by the contradiction pipeline — support, nuance, or contradiction. Node size reflects how many relationships a claim participates in across the whole library.
+              </div>
+              <Link href="/contradictions"
+                className="mt-3 flex items-center gap-1.5 text-[11.5px] text-[var(--gen)] font-medium hover:gap-2 t-all">
+                View contradiction scan →
+              </Link>
+            </div>
           </div>
         </div>
       )}

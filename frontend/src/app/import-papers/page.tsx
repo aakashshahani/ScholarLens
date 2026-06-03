@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { api, ImportResult } from "@/lib/api";
 import { PageHeader, Card, Spinner, EmptyState } from "@/components/ui";
-import { Search, Plus, ExternalLink, CheckCircle2 } from "lucide-react";
+import { Search, Plus, ExternalLink, CheckCircle2, Download } from "lucide-react";
 
 export default function ImportPage() {
   const [lookupId, setLookupId] = useState("");
@@ -12,6 +12,7 @@ export default function ImportPage() {
   const [maxResults, setMaxResults] = useState(5);
   const [results, setResults] = useState<ImportResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [searched, setSearched] = useState(false); // distinguishes "no search yet" from "0 results"
   const [importing, setImporting] = useState<Record<number, string>>({}); // idx -> status
 
   const handleLookup = async () => {
@@ -24,6 +25,7 @@ export default function ImportPage() {
     } catch (e: any) {
       alert(e.message);
     }
+    setSearched(true);
     setLoading(false);
   };
 
@@ -37,6 +39,7 @@ export default function ImportPage() {
     } catch (e: any) {
       alert(e.message);
     }
+    setSearched(true);
     setLoading(false);
   };
 
@@ -138,15 +141,38 @@ export default function ImportPage() {
 
       {loading && <Spinner label="Searching databases..." />}
 
+      {/* Empty state before any search has run */}
+      {!loading && !searched && (
+        <EmptyState
+          icon={<Download size={20} />}
+          title="Find papers to add"
+          hint="Search arXiv and Semantic Scholar above, or paste an arXiv ID, DOI, or URL for a direct lookup."
+        />
+      )}
+
+      {/* No results after a search */}
+      {!loading && searched && results.length === 0 && (
+        <EmptyState
+          icon={<Search size={20} />}
+          title="No papers found"
+          hint="Try different keywords, or widen the sources you're searching."
+        />
+      )}
+
       {/* Results */}
       {results.length > 0 && (
         <div className="space-y-3">
-          <p className="font-mono text-xs text-slate-600">{results.length} papers found</p>
+          <p className="font-mono text-xs text-slate-600">
+            {results.length} paper{results.length !== 1 ? "s" : ""} found
+          </p>
           {results.map((r, i) => {
             const status = importing[i];
             const authorsStr = r.authors.length > 3
               ? r.authors.slice(0, 3).join(", ") + ` +${r.authors.length - 3}`
               : r.authors.join(", ");
+            const abstractStr = r.abstract && r.abstract.length > 280
+              ? r.abstract.slice(0, 280).trimEnd() + "…"
+              : r.abstract;
 
             return (
               <Card key={i}>
@@ -163,7 +189,7 @@ export default function ImportPage() {
                       {r.citation_count != null && <span>◆ {r.citation_count} cited</span>}
                     </div>
                     <div className="text-xs text-slate-500 leading-relaxed">
-                      {r.abstract}
+                      {abstractStr}
                     </div>
                   </div>
 

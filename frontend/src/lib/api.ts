@@ -273,13 +273,14 @@ export const api = {
       }),
     }),
 
-  graph: (opts?: { paperIds?: string[]; similarityThreshold?: number; maxPairs?: number }) =>
+  graph: (opts?: { paperIds?: string[]; similarityThreshold?: number; maxPairs?: number; compute?: boolean }) =>
     apiFetch<GraphPayload>("/api/graph", {
       method: "POST",
       body: JSON.stringify({
         paper_ids: opts?.paperIds || null,
         similarity_threshold: opts?.similarityThreshold ?? 0.5,
         max_pairs: opts?.maxPairs ?? 30,
+        compute: opts?.compute ?? false,
       }),
     }),
 

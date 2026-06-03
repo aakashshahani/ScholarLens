@@ -1,11 +1,31 @@
 import type { Metadata } from "next";
-import { Inter, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Fraunces } from "next/font/google";
 import "./globals.css";
 import { LeftRail } from "@/components/left-rail";
 import { CommandPalette } from "@/components/command-palette";
 
-const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
-const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono", display: "swap" });
+// All three fonts via next/font/google — self-hosted at build time, so no
+// external request and no Content-Security-Policy concerns. next/font also
+// injects the @font-face rules correctly relative to Tailwind, avoiding the
+// "@import must precede all rules" error that a raw @import url() triggers
+// against Tailwind v4's inlined import.
+const geist = Geist({
+  subsets: ["latin"],
+  weight: ["300", "400", "500", "600"],
+  variable: "--font-geist",
+  display: "swap",
+});
+const fraunces = Fraunces({
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  variable: "--font-fraunces",
+  display: "swap",
+});
+const geistMono = Geist_Mono({
+  subsets: ["latin"],
+  variable: "--font-geist-mono",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "ScholarLens — Research Intelligence",
@@ -14,7 +34,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`h-full ${inter.variable} ${geistMono.variable}`}>
+    <html lang="en" className={`h-full ${geist.variable} ${fraunces.variable} ${geistMono.variable}`}>
       <body className="min-h-full antialiased">
         <LeftRail />
         <CommandPalette />

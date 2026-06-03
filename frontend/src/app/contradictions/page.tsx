@@ -1,10 +1,63 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import { api, Paper, ContradictionResult } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, Claim, REL } from "@/components/ui";
-import { Zap, Settings2, AlertCircle, ChevronDown } from "lucide-react";
+import { Zap, Settings2, AlertCircle } from "lucide-react";
 import { cache } from "@/lib/cache";
+
+// ── Lightweight markdown renderer ────────────────────────────
+function MarkdownAnswer({ text }: { text: string }) {
+  const lines = text.split("\n");
+  const elements: React.ReactNode[] = [];
+  let listBuffer: string[] = [];
+
+  const inlineMd = (s: string) =>
+    s
+      .replace(/\*\*(.+?)\*\*/g, '<strong class="text-[var(--text-1)] font-semibold">$1</strong>')
+      .replace(/\*(.+?)\*/g, "<em>$1</em>")
+      .replace(/`(.+?)`/g, '<code class="mono text-[11px] bg-[var(--surface-3)] px-1 py-0.5 rounded text-[var(--gen)]">$1</code>');
+
+  const flushList = (key: string) => {
+    if (!listBuffer.length) return;
+    elements.push(
+      <ul key={key} className="space-y-1 mb-2 pl-0 list-none">
+        {listBuffer.map((item, i) => (
+          <li key={i} className="flex items-start gap-2 text-[13px] text-[var(--text-1)] leading-[1.6]">
+            <span className="mt-[7px] w-[3px] h-[3px] rounded-full bg-[var(--gen)] shrink-0" />
+            <span dangerouslySetInnerHTML={{ __html: inlineMd(item) }} />
+          </li>
+        ))}
+      </ul>
+    );
+    listBuffer = [];
+  };
+
+  lines.forEach((raw, idx) => {
+    const line = raw.trim();
+    if (!line) { flushList(`l${idx}`); return; }
+    if (line.startsWith("## ")) {
+      flushList(`l${idx}`);
+      elements.push(<h2 key={idx} className="text-[13px] font-semibold text-[var(--text-1)] mt-3 mb-1">{line.slice(3)}</h2>);
+      return;
+    }
+    if (line.startsWith("### ")) {
+      flushList(`l${idx}`);
+      elements.push(<h3 key={idx} className="text-[11.5px] font-semibold text-[var(--text-2)] uppercase tracking-wide mt-2 mb-0.5">{line.slice(4)}</h3>);
+      return;
+    }
+    if (line.startsWith("- ") || line.startsWith("* ")) { listBuffer.push(line.slice(2)); return; }
+    const numbered = line.match(/^\d+\.\s+(.+)/);
+    if (numbered) { listBuffer.push(numbered[1]); return; }
+    flushList(`l${idx}`);
+    elements.push(
+      <p key={idx} className="text-[13px] text-[var(--text-1)] leading-[1.65] mb-1.5"
+        dangerouslySetInnerHTML={{ __html: inlineMd(line) }} />
+    );
+  });
+  flushList("end");
+  return <div className="space-y-0">{elements}</div>;
+}
 
 const PRESETS = {
   quick:    { label: "Quick",    threshold: 0.55, maxPairs: 10, time: "~15s" },
@@ -24,25 +77,53 @@ export default function ContradictionsPage() {
   const [filter, setFilter] = useState<string | null>(null);
   const [selected, setSelected] = useState<ContradictionResult | null>(null);
   const [showConfig, setShowConfig] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [libraryChanged, setLibraryChanged] = useState(false);
 
   useEffect(() => {
     api.listPapers(50).then(setPapers);
-    // Restore cached results from previous scan
-    const cached = cache.read<ContradictionResult[]>("contradictions");
-    if (cached && cached.length > 0) {
-      setResults(cached);
-      const firstReal = cached.find((r) => r.relationship !== "unrelated");
-      if (firstReal) setSelected(firstReal);
-    } else {
-      setShowConfig(true);
-    }
+    api.health().then((h) => {
+      const fingerprint = (h as any).library_fingerprint || "default";
+      try {
+        const cached = cache.read<ContradictionResult[]>("contradictions");
+        const cachedFingerprint = localStorage.getItem("sl_contradictions_fp");
+        if (cached && Array.isArray(cached) && cached.length > 0) {
+          setResults(cached);
+          const firstReal = cached.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
+          if (firstReal) setSelected(firstReal);
+          // Show warning banner if library changed, but keep results visible
+          if (cachedFingerprint !== fingerprint) {
+            setLibraryChanged(true);
+          }
+        } else {
+          setShowConfig(true);
+        }
+      } catch {
+        cache.clear("contradictions");
+        localStorage.removeItem("sl_contradictions_fp");
+        setShowConfig(true);
+      }
+    }).catch(() => {
+      try {
+        const cached = cache.read<ContradictionResult[]>("contradictions");
+        if (cached && Array.isArray(cached) && cached.length > 0) {
+          setResults(cached);
+          const firstReal = cached.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
+          if (firstReal) setSelected(firstReal);
+        } else {
+          setShowConfig(true);
+        }
+      } catch {
+        cache.clear("contradictions");
+        setShowConfig(true);
+      }
+    });
   }, []);
 
   const p = PRESETS[preset];
 
   const runScan = async () => {
     setLoading(true); setResults([]); setFilter(null); setSelected(null); setError("");
+    setLibraryChanged(false);
     const stages = ["Extracting claims from papers", "Embedding & comparing claims", "Judging relationships"];
     let si = 0; setStage(stages[0]);
     const ticker = setInterval(() => { si = Math.min(si + 1, stages.length - 1); setStage(stages[si]); }, 3000);
@@ -54,8 +135,12 @@ export default function ContradictionsPage() {
       });
       setResults(res);
       cache.write("contradictions", res);
+      api.health().then((h) => {
+        const fp = (h as any).library_fingerprint || "default";
+        localStorage.setItem("sl_contradictions_fp", fp);
+      }).catch(() => {});
       setShowConfig(false);
-      const firstReal = res.find((r) => r.relationship !== "unrelated");
+      const firstReal = res.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
       if (firstReal) setSelected(firstReal);
     } catch (e: any) { setError(e.message); }
     clearInterval(ticker); setLoading(false);
@@ -63,7 +148,8 @@ export default function ContradictionsPage() {
 
   const counts: Record<string, number> = {};
   results.forEach((r) => { counts[r.relationship] = (counts[r.relationship] || 0) + 1; });
-  const filtered = filter ? results.filter((r) => r.relationship === filter) : results;
+  const displayResults = results.filter((r) => r.relationship !== "error");
+  const filtered = filter ? displayResults.filter((r) => r.relationship === filter) : displayResults;
 
   return (
     <div>
@@ -82,9 +168,24 @@ export default function ContradictionsPage() {
         <EmptyState icon={<Zap size={20} />} title="Need at least 2 papers" hint="Add more papers to surface conflicts." />
       ) : (
         <>
+          {/* Library changed banner — shows without forcing config */}
+          {libraryChanged && !showConfig && (
+            <div className="bg-[var(--nuance-dim)] border border-[var(--nuance-line)] rounded-[var(--r-lg)] p-4 mb-4 flex items-center gap-3">
+              <AlertCircle size={15} className="text-[var(--nuance)] shrink-0" />
+              <div className="flex-1 text-[13px] text-[var(--text-2)]">
+                Your library has changed — these results may be outdated.
+              </div>
+              <button
+                onClick={() => { setShowConfig(true); setLibraryChanged(false); }}
+                className="text-[12px] text-[var(--gen)] font-medium hover:underline shrink-0 t-all"
+              >
+                Run new scan
+              </button>
+            </div>
+          )}
+
           {showConfig && (
             <Card className="mb-6 fade-up">
-              {/* Preset selector */}
               <div className="mb-5">
                 <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2.5">Scan depth</div>
                 <div className="grid grid-cols-3 gap-2">
@@ -103,7 +204,6 @@ export default function ContradictionsPage() {
                 </div>
               </div>
 
-              {/* Paper selection */}
               <div className="mb-5">
                 <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2.5">Papers · leave empty to scan all</div>
                 <div className="flex flex-wrap gap-1.5">
@@ -170,7 +270,7 @@ export default function ContradictionsPage() {
                     return (
                       <button key={r.id} onClick={() => setSelected(r)}
                         className={`w-full text-left bg-[var(--surface-2)] border rounded-[var(--r-lg)] p-4 t-all ${isSel ? "border-[var(--line-3)]" : "border-[var(--line)] hover:border-[var(--line-2)]"}`}
-                        style={isSel ? { boxShadow: `0 0 24px -10px ${REL[r.relationship].c}` } : {}}>
+                        style={isSel ? { boxShadow: `0 0 24px -10px ${(REL[r.relationship] ?? REL["unrelated"]).c}` } : {}}>
                         <TensionPair r={r} />
                       </button>
                     );
@@ -191,7 +291,7 @@ export default function ContradictionsPage() {
 }
 
 function TensionPair({ r }: { r: ContradictionResult }) {
-  const s = REL[r.relationship];
+  const s = REL[r.relationship] ?? REL["unrelated"];
   return (
     <div>
       <div className="flex items-center gap-2 mb-3">
@@ -219,22 +319,7 @@ function TensionPair({ r }: { r: ContradictionResult }) {
 }
 
 function Adjudication({ r }: { r: ContradictionResult }) {
-  const s = REL[r.relationship];
-  const [shown, setShown] = useState("");
-  const full = r.explanation || "";
-  const idxRef = useRef(0);
-
-  useEffect(() => {
-    setShown(""); idxRef.current = 0;
-    const t = setInterval(() => {
-      idxRef.current += 2;
-      setShown(full.slice(0, idxRef.current));
-      if (idxRef.current >= full.length) clearInterval(t);
-    }, 16);
-    return () => clearInterval(t);
-  }, [r.id, full]);
-
-  const streaming = shown.length < full.length;
+  const s = REL[r.relationship] ?? REL["unrelated"];
   const stronger = r.stronger_evidence === "paper_a" ? r.claim_a.paper_title
     : r.stronger_evidence === "paper_b" ? r.claim_b.paper_title : null;
 
@@ -246,7 +331,7 @@ function Adjudication({ r }: { r: ContradictionResult }) {
         <span className="ml-auto text-[10px] text-[var(--text-4)] uppercase tracking-wider">{r.category}</span>
       </div>
       <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2">Adjudication</div>
-      <p className={`text-[13px] text-[var(--text-1)] leading-[1.65] ${streaming ? "caret" : ""}`}>{shown}</p>
+      <MarkdownAnswer text={r.explanation || ""} />
       {stronger && (
         <div className="mt-4 pt-4 border-t border-[var(--line)]">
           <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-1.5">Stronger evidence</div>

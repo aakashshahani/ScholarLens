@@ -98,16 +98,26 @@ class VectorStore:
         n_results: int = 10,
         paper_id: str | None = None,
         section: str | None = None,
+        exclude_sections: list[str] | None = None,
     ) -> list[SearchResult]:
         """
         Semantic search across stored chunks.
 
         Args:
-            query: Natural language search query
-            n_results: Max results to return
-            paper_id: Filter to a specific paper
-            section: Filter to a specific section type
+            query:            Natural language search query
+            n_results:        Max results to return
+            paper_id:         Filter to a specific paper
+            section:          Filter to a specific section type
+            exclude_sections: Section names to exclude from results.
+                              Defaults to ["references", "appendix"] — these
+                              sections contain bibliography entries and
+                              supplementary material, not substantive claims.
+                              They score high on keyword overlap but carry no
+                              useful information for Q&A or contradiction detection.
         """
+        if exclude_sections is None:
+            exclude_sections = ["references", "appendix"]
+
         query_embedding = self.embed_query(query)
 
         where_filter = {}
@@ -123,9 +133,13 @@ class VectorStore:
         elif section:
             where_filter = {"section": section}
 
+        # Fetch more candidates than requested so we have headroom after
+        # filtering out excluded sections. 3× is enough for typical corpora.
+        fetch_n = n_results * 3
+
         results = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=n_results,
+            n_results=fetch_n,
             where=where_filter if where_filter else None,
             include=["documents", "metadatas", "distances"],
         )
@@ -133,13 +147,23 @@ class VectorStore:
         search_results = []
         if results["ids"] and results["ids"][0]:
             for i, chunk_id in enumerate(results["ids"][0]):
+                sec = results["metadatas"][0][i].get("section")
+
+                # Skip excluded sections — bibliography entries and appendix
+                # material match on keywords but contain no useful claims.
+                if sec in exclude_sections:
+                    continue
+
                 search_results.append(SearchResult(
                     chunk_id=chunk_id,
                     paper_id=results["metadatas"][0][i]["paper_id"],
                     text=results["documents"][0][i],
-                    section=results["metadatas"][0][i].get("section"),
+                    section=sec,
                     score=results["distances"][0][i],
                 ))
+
+                if len(search_results) >= n_results:
+                    break
 
         return search_results
 

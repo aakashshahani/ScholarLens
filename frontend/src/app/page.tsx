@@ -1,221 +1,478 @@
 "use client";
 
-import { useEffect, useState } from "react";
+/**
+ * Dashboard — "command center" layout.
+ *
+ * DATA HONESTY: every number is real. No invented deltas, scores, or trends.
+ * See previous version comments for endpoint mapping.
+ *
+ * Visual upgrades in this version:
+ *  - Animated gradient mesh background (CSS keyframes, zero JS cost)
+ *  - SVG grain overlay at 3% opacity for material depth
+ *  - Staggered card entrance animations on mount
+ *  - Stat numbers count up on mount
+ *  - Per-accent hover glows on spotlight + action cards
+ *  - # markdown strip on all insight headlines
+ *  - Icon size 18px, spotlight min-height 160px
+ *  - "View all highlights" border upgraded to var(--line-2)
+ *  - Rotating left-border colors on recent papers
+ */
+
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { api, HealthStatus, Paper, Insight } from "@/lib/api";
-import { PageHeader, MetricCard, Spinner, EmptyState, SkeletonCard, RelDot } from "@/components/ui";
-import { FileStack, CheckCircle2, Zap, Radio, ArrowRight, BookOpen, Plus } from "lucide-react";
+import { api, HealthStatus, Paper, Insight, Hypothesis, GraphPayload } from "@/lib/api";
+import { cache } from "@/lib/cache";
+import {
+  FileStack, CheckCircle2, Zap, Link2, TrendingUp, ArrowRight, ArrowUpRight,
+  Sparkles, FlaskConical, Upload, AlertTriangle, Network, Lightbulb,
+} from "lucide-react";
+
+const API = "http://localhost:8000";
+
+interface RelCounts { contradiction: number; support: number; nuance: number; unrelated: number; }
+interface TopContra { explanation: string; paper_a: string; paper_b: string; }
+
+// Strip leading markdown heading chars from insight headlines
+function cleanHeadline(s: string): string {
+  return s.replace(/^#+\s*/, "").trim();
+}
+
+// Animated count-up hook
+function useCountUp(target: number, duration = 900): number {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    if (target === 0) { setValue(0); return; }
+    const start = performance.now();
+    const tick = (now: number) => {
+      const p = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - p, 3); // ease-out-cubic
+      setValue(Math.round(eased * target));
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, [target, duration]);
+  return value;
+}
+
+// Rotating accent colors for recent papers left borders
+const PAPER_ACCENTS = ["var(--gen)", "var(--support)", "var(--nuance)", "var(--contra)"];
 
 export default function Dashboard() {
-  const [health, setHealth] = useState<HealthStatus | null>(null);
-  const [papers, setPapers] = useState<Paper[]>([]);
-  const [insights, setInsights] = useState<Insight[]>([]);
-  const [relCounts, setRelCounts] = useState<Record<string, number>>({});
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [health, setHealth]       = useState<HealthStatus | null>(null);
+  const [papers, setPapers]       = useState<Paper[]>([]);
+  const [insights, setInsights]   = useState<Insight[]>([]);
+  const [relCounts, setRelCounts] = useState<RelCounts | null>(null);
+  const [topContra, setTopContra] = useState<TopContra | null>(null);
+  const [topHypo, setTopHypo]     = useState<Hypothesis | null>(null);
+  const [topics, setTopics]       = useState<{ title: string; links: number }[]>([]);
+  const [error, setError]         = useState("");
+  const [mounted, setMounted]     = useState(false);
 
   useEffect(() => {
+    setMounted(true);
     api.health().then(setHealth).catch((e) => setError(e.message));
-    api.listPapers(8).then((p) => { setPapers(p); setLoading(false); }).catch(() => setLoading(false));
-    api.insights({ limit: 6 }).then(setInsights).catch(() => {});
-    // Lightweight count — no LLM calls
-    fetch("http://localhost:8000/api/contradictions/count")
+    api.listPapers(50).then(setPapers).catch(() => {});
+    api.insights({ limit: 8 }).then(setInsights).catch(() => {});
+
+    fetch(`${API}/api/contradictions/count`)
       .then((r) => r.json())
-      .then((d) => setRelCounts(d.counts || {}))
+      .then((d) => setRelCounts(d.counts || null))
       .catch(() => {});
+
+    api.insights({ limit: 30 })
+      .then((rows) => {
+        const contra = rows.find((i) => i.type === "contradiction");
+        if (contra) setTopContra({
+          explanation: cleanHeadline(contra.detail || contra.headline),
+          paper_a: contra.papers?.[0] || "",
+          paper_b: contra.papers?.[1] || "",
+        });
+      })
+      .catch(() => {});
+
+    const cachedHypos = cache.read<Hypothesis[]>("hypotheses");
+    if (cachedHypos?.length) setTopHypo(cachedHypos[0]);
+
+    const cachedGraph = cache.read<GraphPayload>("graph");
+    if (cachedGraph?.nodes?.length) {
+      const byPaper: Record<string, number> = {};
+      cachedGraph.nodes.forEach((n) => {
+        byPaper[n.paper_title] = (byPaper[n.paper_title] || 0) + (n.degree || 0);
+      });
+      setTopics(
+        Object.entries(byPaper)
+          .map(([title, links]) => ({ title, links }))
+          .sort((a, b) => b.links - a.links)
+          .slice(0, 5)
+      );
+    }
   }, []);
 
-  const analyzed = papers.filter((p) => (p.analysis_types?.length || 0) >= 6).length;
-  const contradictionCount = relCounts.contradiction || 0;
-  const totalRelationships = Object.values(relCounts).reduce((a, b) => a + b, 0);
-  const hasInsights = insights.length > 0;
+  // A paper is "fully analyzed" only when all six analysis types are present —
+  // counting length >= 6 would wrongly pass a paper with a duplicate type and a
+  // missing one. This matches the backend /status definition.
+  const REQUIRED = ["summary", "methods", "findings", "limitations", "key_claims", "research_gaps"];
+  const analyzed = papers.filter((p) => {
+    const types = new Set(p.analysis_types || []);
+    return REQUIRED.every((t) => types.has(t));
+  }).length;
+  const paperCount         = papers.length || (health?.papers ?? 0);
+  const coverage           = paperCount > 0 ? Math.round((analyzed / paperCount) * 100) : 0;
+  const contradictionCount = relCounts?.contradiction ?? 0;
+  const crossLinks         = relCounts
+    ? relCounts.contradiction + relCounts.support + relCounts.nuance : 0;
+
+  // Dedup so one dominant paper doesn't headline every cell. We track which
+  // papers have already been "spent" on the spotlight cells, then build the
+  // highlights list from insights whose papers haven't all been shown yet.
+  const usedPaperTitles = new Set<string>();
+  if (topContra) { usedPaperTitles.add(topContra.paper_a); usedPaperTitles.add(topContra.paper_b); }
+
+  const gapInsight = insights.find(
+    (i) => i.type === "gap" && !(i.papers || []).some((t) => usedPaperTitles.has(t))
+  ) || insights.find((i) => i.type === "gap") || null;
+  if (gapInsight) (gapInsight.papers || []).forEach((t) => usedPaperTitles.add(t));
+
+  // Highlights: prefer insights about not-yet-shown papers, dedup by paper,
+  // and never repeat the same headline.
+  const seenHighlightPapers = new Set<string>();
+  const seenHeadlines = new Set<string>();
+  const highlights = insights
+    .filter((i) => i.type !== "new_paper")
+    .map((i) => ({ ...i, headline: cleanHeadline(i.headline) }))
+    .filter((i) => {
+      const key = i.headline.toLowerCase().slice(0, 60);
+      if (seenHeadlines.has(key)) return false;
+      const primaryPaper = i.papers?.[0] || "";
+      if (primaryPaper && seenHighlightPapers.has(primaryPaper)) return false;
+      seenHeadlines.add(key);
+      if (primaryPaper) seenHighlightPapers.add(primaryPaper);
+      return true;
+    })
+    .slice(0, 4);
+
+  if (error) return (
+    <div className="bg-[var(--contra-dim)] border border-[var(--contra-line)] rounded-[var(--r-lg)] p-5">
+      <p className="text-[var(--contra)] text-[13px] font-medium">Backend not reachable — {error}</p>
+      <p className="text-[var(--text-2)] text-[12px] mt-1.5">
+        Start it with{" "}
+        <code className="mono text-[11px] bg-[var(--surface-3)] px-1.5 py-0.5 rounded">
+          uvicorn api:app --reload --port 8000
+        </code>
+      </p>
+    </div>
+  );
 
   return (
-    <div>
-      <PageHeader title="Situation room" subtitle="Your knowledge base — and where the tension is." />
+    <div className="relative min-h-screen">
 
-      {error ? (
-        <div className="bg-[var(--contra-dim)] border border-[var(--contra-line)] rounded-[var(--r-lg)] p-5 mb-6">
-          <p className="text-[var(--contra)] text-[13px] font-medium">Backend not reachable — {error}</p>
-          <p className="text-[var(--text-2)] text-[12px] mt-1.5">
-            Start it with <code className="mono text-[11px] bg-[var(--surface-3)] px-1.5 py-0.5 rounded">uvicorn api:app --reload --port 8000</code>
-          </p>
+      {/* ── Animated gradient mesh background ───────────── */}
+      <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
+        {/* Three slow-orbiting radial blobs */}
+        <div className="db-blob db-blob-1" />
+        <div className="db-blob db-blob-2" />
+        <div className="db-blob db-blob-3" />
+        {/* SVG grain overlay */}
+        <svg className="absolute inset-0 w-full h-full opacity-[0.032]" xmlns="http://www.w3.org/2000/svg">
+          <filter id="grain">
+            <feTurbulence type="fractalNoise" baseFrequency="0.72" numOctaves="4" stitchTiles="stitch" />
+            <feColorMatrix type="saturate" values="0" />
+          </filter>
+          <rect width="100%" height="100%" filter="url(#grain)" />
+        </svg>
+      </div>
+
+      <div className={mounted ? "fade-up" : "opacity-0"}>
+
+        {/* ── Header ─────────────────────────────────────── */}
+        <div className="flex items-start justify-between mb-7">
+          <div>
+            <h1 className="font-display text-[28px] text-[var(--text-1)] flex items-center gap-2.5 leading-tight">
+              Situation room
+              <Sparkles size={18} className="text-[var(--gen)] animate-pulse" />
+            </h1>
+            <p className="text-[13px] text-[var(--text-3)] mt-1.5 tracking-wide">
+              Your knowledge base — and where the tension is.
+            </p>
+          </div>
+          <Link href="/import-papers"
+            className="flex items-center gap-1.5 px-4 py-2.5 rounded-[var(--r-md)] bg-[var(--gen)] text-white text-[12.5px] font-medium hover:opacity-90 hover:shadow-[0_0_20px_-4px_var(--gen-glow)] t-all">
+            <Upload size={14} /> Import paper
+          </Link>
         </div>
-      ) : !health ? (
-        <Spinner label="Connecting to backend…" />
-      ) : (
-        <>
-          <div className="grid grid-cols-4 gap-3 mb-6 fade-up">
-            <MetricCard value={health.papers} label="Papers" color="var(--gen)" icon={<FileStack size={18} />} />
-            <MetricCard value={analyzed} label="Fully analyzed" color="var(--support)"
-              barPercent={health.papers > 0 ? (analyzed / health.papers) * 100 : 0} icon={<CheckCircle2 size={18} />} />
-            <MetricCard
-              value={contradictionCount > 0 ? contradictionCount : "—"}
-              label="Contradictions detected"
-              color="var(--contra)"
-              icon={<Zap size={18} />} />
-            <MetricCard
-              value={totalRelationships > 0 ? totalRelationships : "—"}
-              label="Cross-paper links"
-              color="var(--nuance)"
-              icon={<Radio size={18} />} />
-          </div>
 
-          <div className="grid grid-cols-3 gap-3 mb-8">
-            <Link href="/contradictions" className="group">
-              <div className="h-full bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-5 t-all lift">
-                <div className="flex items-center gap-2 mb-3">
-                  <Zap size={15} className="text-[var(--contra)]" />
-                  <span className="text-[13px] font-medium text-[var(--text-1)]">Conflict map</span>
-                  <ArrowRight size={13} className="ml-auto text-[var(--text-4)] group-hover:text-[var(--text-2)] group-hover:translate-x-0.5 t-all" />
-                </div>
-                {contradictionCount > 0 ? (
-                  <>
-                    <div className="font-display text-[32px] text-[var(--contra)] leading-none mb-1 tabular-nums">{contradictionCount}</div>
-                    <div className="text-[12px] text-[var(--text-3)]">
-                      {relCounts.nuance ? `+ ${relCounts.nuance} nuanced disagreement${relCounts.nuance > 1 ? "s" : ""}` : "contradictions detected across papers"}
-                    </div>
-                  </>
-                ) : totalRelationships > 0 ? (
-                  <>
-                    <div className="font-display text-[32px] text-[var(--support)] leading-none mb-1 tabular-nums">{totalRelationships}</div>
-                    <div className="text-[12px] text-[var(--text-3)]">relationships mapped — no direct contradictions</div>
-                  </>
-                ) : (
-                  <>
-                    <div className="font-display text-[32px] text-[var(--text-4)] leading-none mb-1">—</div>
-                    <div className="text-[12px] text-[var(--text-3)]">Run a scan to surface conflicts.</div>
-                  </>
-                )}
-              </div>
-            </Link>
+        {/* ── Stat row ───────────────────────────────────── */}
+        <div className="grid grid-cols-5 gap-3 mb-5">
+          {[
+            { icon: <FileStack size={18} />,    value: paperCount,         label: "Papers",            color: "var(--gen)",     delay: 0   },
+            { icon: <CheckCircle2 size={18} />, value: analyzed,           label: "Fully analyzed",    color: "var(--support)", delay: 60  },
+            { icon: <AlertTriangle size={18} />,value: contradictionCount, label: "Contradictions",    color: "var(--contra)",  delay: 120 },
+            { icon: <Link2 size={18} />,        value: crossLinks,         label: "Cross-paper links", color: "var(--nuance)",  delay: 180 },
+          ].map(({ icon, value, label, color, delay }) => (
+            <StatCard key={label} icon={icon} value={value} label={label} color={color} delay={delay} />
+          ))}
+          <StatCard
+            icon={<TrendingUp size={18} />}
+            value={coverage}
+            label="Analysis coverage"
+            color="var(--support)"
+            ring={coverage}
+            suffix="%"
+            sub={`${analyzed} / ${paperCount} papers`}
+            delay={240}
+          />
+        </div>
 
-            <Link href="/feed" className="group">
-              <div className="h-full bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-5 t-all lift">
-                <div className="flex items-center gap-2 mb-3">
-                  <Radio size={15} className="text-[var(--gen)]" />
-                  <span className="text-[13px] font-medium text-[var(--text-1)]">Research wire</span>
-                  <ArrowRight size={13} className="ml-auto text-[var(--text-4)] group-hover:text-[var(--text-2)] group-hover:translate-x-0.5 t-all" />
-                </div>
-                {hasInsights ? (
-                  <div className="space-y-2">
-                    {insights.slice(0, 3).map((ins) => (
-                      <div key={ins.id} className="flex items-start gap-2">
-                        <RelDot type={ins.type === "consensus" ? "support" : ins.type === "gap" ? "nuance" : ins.type} />
-                        <span className="text-[12px] text-[var(--text-2)] leading-[1.4] clamp-1">{ins.headline}</span>
+        {/* ── Spotlight row ──────────────────────────────── */}
+        <div className="grid grid-cols-4 gap-3 mb-5">
+          <SpotlightCard title="Top contradiction" accent="var(--contra)" glow="rgba(255,92,92,0.15)">
+            {topContra ? (
+              <>
+                <p className="text-[12.5px] text-[var(--text-2)] leading-snug clamp-4">
+                  {topContra.explanation}
+                </p>
+                <Link href="/contradictions" className="cardlink">
+                  View contradiction <ArrowRight size={12} />
+                </Link>
+              </>
+            ) : (
+              <EmptyCell text="No contradictions yet. Run a scan to surface them." href="/contradictions" cta="Run a scan" />
+            )}
+          </SpotlightCard>
+
+          <SpotlightCard title="Research gap" accent="var(--nuance)" glow="rgba(245,166,35,0.12)">
+            {gapInsight ? (
+              <>
+                <p className="text-[12.5px] text-[var(--text-2)] leading-snug clamp-4">
+                  {cleanHeadline(gapInsight.headline)}
+                </p>
+                <Link href="/feed" className="cardlink">
+                  Explore gaps <ArrowRight size={12} />
+                </Link>
+              </>
+            ) : (
+              <EmptyCell text="Gaps appear once papers are analyzed." href="/import-papers" cta="Add papers" />
+            )}
+          </SpotlightCard>
+
+          <SpotlightCard title="Suggested hypothesis" accent="var(--gen)" glow="rgba(124,111,255,0.15)">
+            {topHypo ? (
+              <>
+                <p className="text-[12.5px] text-[var(--text-2)] leading-snug clamp-4">
+                  {topHypo.statement}
+                </p>
+                <Link href="/hypotheses" className="cardlink">
+                  Generate more <ArrowRight size={12} />
+                </Link>
+              </>
+            ) : (
+              <EmptyCell text="Generate hypotheses from your paper relationships." href="/hypotheses" cta="Generate" />
+            )}
+          </SpotlightCard>
+
+          <SpotlightCard title="Most-connected topics" accent="var(--support)" glow="rgba(61,212,160,0.12)">
+            {topics.length ? (
+              <div className="space-y-2.5 flex-1">
+                {topics.map((t, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[11.5px] text-[var(--text-2)] clamp-1">{t.title}</div>
+                      <div className="mt-1 h-[3px] rounded-full bg-[var(--surface-3)] overflow-hidden">
+                        <div className="h-full rounded-full bg-[var(--support)] t-all"
+                          style={{ width: `${Math.min((t.links / (topics[0]?.links || 1)) * 100, 100)}%` }} />
                       </div>
-                    ))}
+                    </div>
+                    <span className="mono text-[10px] text-[var(--text-4)] shrink-0">{t.links}</span>
                   </div>
-                ) : (
-                  <div className="text-[12px] text-[var(--text-3)] leading-[1.6]">Run a contradiction scan to populate the wire.</div>
-                )}
+                ))}
               </div>
-            </Link>
+            ) : (
+              <EmptyCell text="Connections appear after a contradiction scan." href="/contradictions" cta="Run a scan" />
+            )}
+          </SpotlightCard>
+        </div>
 
-            <Link href="/library" className="group">
-              <div className="h-full bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-5 t-all lift">
-                <div className="flex items-center gap-2 mb-3">
-                  <BookOpen size={15} className="text-[var(--support)]" />
-                  <span className="text-[13px] font-medium text-[var(--text-1)]">Analysis status</span>
-                  <ArrowRight size={13} className="ml-auto text-[var(--text-4)] group-hover:text-[var(--text-2)] group-hover:translate-x-0.5 t-all" />
-                </div>
-                <div className="space-y-2 text-[12px]">
-                  <div className="flex justify-between">
-                    <span className="text-[var(--text-3)]">Papers analyzed</span>
-                    <span className="text-[var(--text-1)] tabular-nums">{analyzed} / {health.papers}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-[var(--text-3)]">Coverage</span>
-                    <span className="text-[var(--support)] tabular-nums font-medium">
-                      {health.papers > 0 ? Math.round((analyzed / health.papers) * 100) : 0}%
+        {/* ── Two-column: highlights + recent papers ─────── */}
+        <div className="grid grid-cols-[1fr_360px] gap-4 mb-5">
+
+          {/* Research highlights */}
+          <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-5">
+            <div className="flex items-end justify-between mb-4">
+              <div>
+                <h2 className="font-display text-[16px] text-[var(--text-1)]">Research highlights</h2>
+                <p className="text-[11.5px] text-[var(--text-3)] mt-0.5">Drawn from the analyzed claims in your library.</p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              {highlights.length ? highlights.map((h, idx) => {
+                const meta = HIGHLIGHT_META[h.type] || HIGHLIGHT_META.gap;
+                return (
+                  <div key={h.id}
+                    className="group flex items-start gap-3 p-3 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-1)] hover:border-[var(--line-2)] t-all"
+                    style={{ animationDelay: `${idx * 60}ms` }}>
+                    <span className="w-8 h-8 rounded-[var(--r-md)] flex items-center justify-center shrink-0"
+                      style={{ background: meta.bg, color: meta.color }}>
+                      {meta.icon}
                     </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-[var(--text-3)]">Conflicts found</span>
-                    <span className="text-[var(--text-1)] tabular-nums">{contradictionCount > 0 ? contradictionCount : "—"}</span>
-                  </div>
-                </div>
-              </div>
-            </Link>
-          </div>
-
-          {/* Adaptive next-step banner — what should the user do right now? */}
-          {(() => {
-            const fewPapers = health.papers < 2;
-            const noScan = health.papers >= 2 && totalRelationships === 0;
-            const ready = health.papers >= 2 && totalRelationships > 0;
-            if (fewPapers) {
-              return (
-                <div className="bg-[var(--surface-2)] border border-[var(--gen-line)] rounded-[var(--r-lg)] p-4 mb-7 fade-up flex items-center gap-4">
-                  <span className="text-[11px] font-medium text-[var(--gen)] uppercase tracking-wider shrink-0">Step 1</span>
-                  <div className="text-[13px] text-[var(--text-2)] flex-1">
-                    Add at least 2 papers to start mapping conflicts and consensus.
-                  </div>
-                  <Link href="/add-papers" className="flex items-center gap-1.5 px-3.5 py-2 rounded-[var(--r-md)] bg-[var(--gen)] text-white text-[12.5px] font-medium t-all hover:opacity-90 shrink-0">
-                    <Plus size={14} /> Add papers
-                  </Link>
-                </div>
-              );
-            }
-            if (noScan) {
-              return (
-                <div className="bg-[var(--surface-2)] border border-[var(--gen-line)] rounded-[var(--r-lg)] p-4 mb-7 fade-up flex items-center gap-4">
-                  <span className="text-[11px] font-medium text-[var(--gen)] uppercase tracking-wider shrink-0">Next</span>
-                  <div className="text-[13px] text-[var(--text-2)] flex-1">
-                    Run your first contradiction scan to surface conflicts and consensus across {health.papers} papers.
-                  </div>
-                  <Link href="/contradictions" className="flex items-center gap-1.5 px-3.5 py-2 rounded-[var(--r-md)] bg-[var(--gen)] text-white text-[12.5px] font-medium t-all hover:opacity-90 shrink-0">
-                    <Zap size={14} /> Run scan
-                  </Link>
-                </div>
-              );
-            }
-            if (ready) {
-              return (
-                <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4 mb-7 fade-up flex items-center gap-4">
-                  <span className="text-[11px] font-medium text-[var(--support)] uppercase tracking-wider shrink-0">Try next</span>
-                  <div className="text-[13px] text-[var(--text-2)] flex-1">
-                    Generate hypotheses grounded in the {contradictionCount > 0 ? `${contradictionCount} conflicts` : "relationships"} you've found.
-                  </div>
-                  <Link href="/hypotheses" className="flex items-center gap-1.5 px-3.5 py-2 rounded-[var(--r-md)] border border-[var(--line-2)] bg-[var(--surface-1)] text-[var(--text-1)] text-[12.5px] font-medium t-all hover:border-[var(--gen-line)] hover:text-[var(--gen)] shrink-0">
-                    Generate hypotheses <ArrowRight size={13} />
-                  </Link>
-                </div>
-              );
-            }
-            return null;
-          })()}
-
-          <div className="flex items-center justify-between mb-3.5">
-            <h2 className="font-display text-[19px] text-[var(--text-1)]">Recent papers</h2>
-            <Link href="/library" className="flex items-center gap-1 text-[13px] text-[var(--gen)] font-medium hover:gap-1.5 t-all">
-              View all <ArrowRight size={13} />
-            </Link>
-          </div>
-
-          {loading ? (
-            <div className="space-y-2.5">{[1, 2, 3].map((i) => <SkeletonCard key={i} />)}</div>
-          ) : papers.length === 0 ? (
-            <EmptyState icon={<BookOpen size={20} />} title="No papers yet" hint="Upload a paper or import from arXiv to get started" />
-          ) : (
-            <div className="space-y-2.5">
-              {papers.slice(0, 4).map((p, i) => (
-                <Link key={p.id} href={`/paper/${p.id}`} className="block group">
-                  <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] flex overflow-hidden t-all group-hover:border-[var(--line-2)] group-hover:bg-[var(--surface-3)]">
-                    <div className="w-[3px] shrink-0" style={{ background: ["var(--support)", "var(--gen)", "var(--nuance)", "#5B9BE0"][i % 4] }} />
-                    <div className="p-4 pl-[18px] flex-1 min-w-0">
-                      <div className="text-[15px] font-medium text-[var(--text-1)] leading-[1.35] mb-1.5 clamp-1 group-hover:text-white t-all">{p.title}</div>
-                      <div className="text-[12.5px] text-[var(--text-3)]">
-                        {(p.authors || []).slice(0, 3).join(", ")} · {p.year || "?"} · {(p.analysis_types?.length || 0)}/6 analyses
-                      </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[12.5px] text-[var(--text-1)] font-medium leading-snug mb-0.5 clamp-2">
+                        {h.headline}
+                      </p>
+                      {h.papers?.length > 0 && (
+                        <p className="text-[10.5px] text-[var(--text-4)] clamp-1">{h.papers.join(" · ")}</p>
+                      )}
                     </div>
+                    <Link href="/feed"
+                      className="text-[11px] text-[var(--gen)] font-medium opacity-0 group-hover:opacity-100 t-all shrink-0 self-center">
+                      View →
+                    </Link>
                   </div>
+                );
+              }) : (
+                <p className="text-[12.5px] text-[var(--text-3)] py-8 text-center">
+                  Add papers and run a scan to surface highlights.
+                </p>
+              )}
+            </div>
+
+            {highlights.length > 0 && (
+              <Link href="/feed"
+                className="flex items-center justify-center gap-1.5 mt-4 py-2.5 rounded-[var(--r-md)] border border-[var(--line-2)] text-[12px] text-[var(--text-2)] hover:border-[var(--line-3)] hover:text-[var(--text-1)] t-all">
+                View all highlights <ArrowRight size={12} />
+              </Link>
+            )}
+          </div>
+
+          {/* Recent papers */}
+          <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-display text-[16px] text-[var(--text-1)]">Recent papers</h2>
+              <Link href="/library" className="text-[11.5px] text-[var(--gen)] font-medium hover:underline flex items-center gap-1">
+                View all <ArrowUpRight size={11} />
+              </Link>
+            </div>
+            <div className="space-y-2">
+              {papers.slice(0, 4).map((p, i) => (
+                <Link key={p.id} href={`/paper/${p.id}`}
+                  className="block p-3 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-1)] hover:border-[var(--line-2)] t-all border-l-[2.5px]"
+                  style={{ borderLeftColor: PAPER_ACCENTS[i % PAPER_ACCENTS.length] }}>
+                  <p className="text-[12.5px] text-[var(--text-1)] font-medium leading-snug mb-1 clamp-2">{p.title}</p>
+                  <p className="text-[10.5px] text-[var(--text-4)]">
+                    {(p.authors || []).slice(0, 2).join(", ")}
+                    {p.year ? ` · ${p.year}` : ""}
+                    {" · "}{p.analysis_types?.length || 0}/6 analyses
+                  </p>
                 </Link>
               ))}
             </div>
-          )}
-        </>
-      )}
+          </div>
+        </div>
+
+        {/* ── Continue your research ──────────────────────── */}
+        <div>
+          <h2 className="font-display text-[15px] text-[var(--text-2)] mb-3 uppercase tracking-widest">
+            Continue your research
+          </h2>
+          <div className="grid grid-cols-4 gap-3">
+            <ActionCard href="/hypotheses"   icon={<FlaskConical size={17} />}  accent="var(--gen)"     title="Generate hypotheses"    desc="Create novel hypotheses from paper relationships." />
+            <ActionCard href="/graph"        icon={<Network size={17} />}        accent="var(--support)" title="Explore knowledge graph" desc="Visualize connections between claims and papers." />
+            <ActionCard href="/contradictions" icon={<AlertTriangle size={17} />} accent="var(--contra)"  title="Find contradictions"    desc="Scan for conflicts across your collection." />
+            <ActionCard href="/import-papers" icon={<Upload size={17} />}        accent="var(--nuance)"  title="Analyze new paper"      desc="Import a paper and run full analysis." />
+          </div>
+        </div>
+
+      </div>
     </div>
+  );
+}
+
+// ── Highlight meta ────────────────────────────────────────────
+const HIGHLIGHT_META: Record<string, { icon: React.ReactNode; color: string; bg: string }> = {
+  contradiction: { icon: <Zap size={14} />,         color: "var(--contra)",  bg: "var(--contra-dim)"  },
+  consensus:     { icon: <CheckCircle2 size={14} />, color: "var(--support)", bg: "var(--support-dim)" },
+  gap:           { icon: <Lightbulb size={14} />,    color: "var(--nuance)",  bg: "var(--nuance-dim)"  },
+  hypothesis:    { icon: <FlaskConical size={14} />, color: "var(--gen)",     bg: "var(--gen-dim)"     },
+};
+
+// ── StatCard ──────────────────────────────────────────────────
+function StatCard({ icon, value, label, color, ring, suffix = "", sub, delay = 0 }: {
+  icon: React.ReactNode; value: number; label: string; color: string;
+  ring?: number; suffix?: string; sub?: string; delay?: number;
+}) {
+  const displayed = useCountUp(value);
+  return (
+    <div className="db-stat-card bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4 relative overflow-hidden"
+      style={{ animationDelay: `${delay}ms` }}>
+      {/* Subtle corner glow matching accent */}
+      <div className="absolute top-0 right-0 w-16 h-16 rounded-bl-full opacity-[0.07]"
+        style={{ background: color }} />
+      <div className="flex items-start justify-between mb-3">
+        <span style={{ color }}>{icon}</span>
+        {ring !== undefined && (
+          <svg width="28" height="28" viewBox="0 0 28 28">
+            <circle cx="14" cy="14" r="11" fill="none" stroke="var(--surface-3)" strokeWidth="3" />
+            <circle cx="14" cy="14" r="11" fill="none" stroke={color} strokeWidth="3"
+              strokeDasharray={`${(ring / 100) * 69.1} 69.1`} strokeLinecap="round"
+              transform="rotate(-90 14 14)" style={{ transition: "stroke-dasharray 1s ease" }} />
+          </svg>
+        )}
+      </div>
+      <div className="font-display text-[28px] text-[var(--text-1)] leading-none mb-1 tabular-nums">
+        {displayed}{suffix}
+      </div>
+      <div className="text-[11.5px] text-[var(--text-3)]">{label}</div>
+      {sub && <div className="text-[10px] text-[var(--text-4)] mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+// ── SpotlightCard ─────────────────────────────────────────────
+function SpotlightCard({ title, accent, glow, children }: {
+  title: string; accent: string; glow: string; children: React.ReactNode;
+}) {
+  return (
+    <div className="group bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] overflow-hidden flex flex-col min-h-[168px] t-all hover:border-[var(--line-2)]"
+      style={{ ["--card-glow" as any]: glow }}
+      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.boxShadow = `0 0 28px -6px ${glow}`; }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.boxShadow = "none"; }}>
+      <div className="h-[2px]" style={{ background: accent }} />
+      <div className="p-4 flex flex-col flex-1">
+        <div className="text-[10px] font-semibold text-[var(--text-3)] uppercase tracking-[0.12em] mb-3">{title}</div>
+        <div className="flex-1 flex flex-col justify-between">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── EmptyCell ─────────────────────────────────────────────────
+function EmptyCell({ text, href, cta }: { text: string; href: string; cta: string }) {
+  return (
+    <div className="flex flex-col flex-1 justify-between">
+      <p className="text-[11.5px] text-[var(--text-4)] leading-snug mb-3">{text}</p>
+      <Link href={href} className="cardlink"><span>{cta}</span> <ArrowRight size={12} /></Link>
+    </div>
+  );
+}
+
+// ── ActionCard ────────────────────────────────────────────────
+function ActionCard({ href, icon, accent, title, desc }: {
+  href: string; icon: React.ReactNode; accent: string; title: string; desc: string;
+}) {
+  return (
+    <Link href={href}
+      className="group bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4 flex flex-col t-all hover:border-[var(--line-2)]"
+      onMouseEnter={(e: React.MouseEvent<HTMLAnchorElement>) => { e.currentTarget.style.boxShadow = `0 4px 24px -6px ${accent}33`; }}
+      onMouseLeave={(e: React.MouseEvent<HTMLAnchorElement>) => { e.currentTarget.style.boxShadow = "none"; }}>
+      <div className="flex items-center justify-between mb-3">
+        <span className="w-9 h-9 rounded-[var(--r-md)] flex items-center justify-center t-all"
+          style={{ background: `color-mix(in srgb, ${accent} 14%, transparent)`, color: accent }}>
+          {icon}
+        </span>
+        <ArrowRight size={14} className="text-[var(--text-4)] group-hover:text-[var(--text-2)] group-hover:translate-x-0.5 t-all" />
+      </div>
+      <div className="text-[13px] text-[var(--text-1)] font-medium mb-1">{title}</div>
+      <div className="text-[11px] text-[var(--text-3)] leading-snug">{desc}</div>
+    </Link>
   );
 }

@@ -170,14 +170,79 @@ def _extract_claims_bg(paper_id: str, force: bool = False):
 @app.get("/api/health")
 def health():
     errors = settings.validate()
-    paper_count = len(db.list_papers(limit=1000))
+    papers = db.list_papers(limit=1000)
+    paper_count = len(papers)
     embedding_count = agent.vector_store.count()
+    # Library fingerprint: changes whenever papers are added or removed.
+    # Frontend uses this as a cache-bust key for contradiction results.
+    latest_paper = papers[0].created_at if papers else ""
+    fingerprint = f"{paper_count}:{latest_paper}"
     return {
         "status": "ok" if not errors else "degraded",
         "errors": errors,
         "papers": paper_count,
         "embeddings": embedding_count,
+        "library_fingerprint": fingerprint,
     }
+
+
+@app.post("/api/admin/fix-abstracts")
+def fix_abstracts():
+    """
+    Re-fetch full abstracts for arXiv papers whose stored abstract is short
+    (under 400 chars) — these were truncated at import time by the [:300] slice
+    that previously existed in the search/lookup response serializers.
+
+    Safe to run multiple times — only updates papers where the new abstract
+    is longer than what's stored.
+    """
+    import sqlite3
+    papers = db.list_papers(limit=200)
+    updated = 0
+    for p in papers:
+        if p.source != "arxiv":
+            continue
+        if p.abstract and len(p.abstract) >= 400:
+            continue
+        # Re-fetch from arXiv using the stored arxiv_id or title lookup
+        try:
+            result = importer.lookup(p.title)
+            if result and result.abstract and len(result.abstract) > len(p.abstract or ""):
+                clean = _normalize_abstract(result.abstract)
+                conn = sqlite3.connect(str(db.db_path))
+                conn.execute("UPDATE papers SET abstract=? WHERE id=?", (clean, p.id))
+                conn.commit()
+                conn.close()
+                updated += 1
+                print(f"Fixed abstract for: {p.title[:60]}")
+        except Exception as e:
+            print(f"Failed to fix abstract for {p.title[:40]}: {e}")
+    return {"updated": updated, "checked": sum(1 for p in papers if p.source == "arxiv")}
+
+
+
+def normalize_abstracts():
+    """
+    One-time migration: normalize abstracts already in the DB.
+
+    arXiv and Semantic Scholar return abstracts with embedded newlines
+    (line-wrapped at ~80 chars). This cleans all existing records so
+    the UI truncates at sentence boundaries rather than mid-word.
+
+    Safe to run multiple times — idempotent.
+    """
+    import sqlite3
+    conn = sqlite3.connect(str(db.db_path))
+    papers = conn.execute("SELECT id, abstract FROM papers WHERE abstract IS NOT NULL").fetchall()
+    updated = 0
+    for paper_id, abstract in papers:
+        cleaned = _normalize_abstract(abstract)
+        if cleaned != abstract:
+            conn.execute("UPDATE papers SET abstract=? WHERE id=?", (cleaned, paper_id))
+            updated += 1
+    conn.commit()
+    conn.close()
+    return {"updated": updated, "total": len(papers)}
 
 
 # ── Papers ───────────────────────────────────────────────────
@@ -193,7 +258,7 @@ def list_papers(limit: int = 50, offset: int = 0):
             "id": p.id,
             "title": p.title,
             "authors": p.authors,
-            "abstract": p.abstract[:300] if p.abstract else "",
+            "abstract": p.abstract or "",
             "year": p.year,
             "source": p.source,
             "page_count": p.page_count,
@@ -487,7 +552,7 @@ def search_papers(req: SearchRequest):
             "paper_id": r.paper_id,
             "paper_title": paper.title if paper else "Unknown",
             "section": r.section,
-            "text": r.text[:500],
+            "text": r.text[:800],
             "relevance_tier": settings.relevance_tier(r.score),
             "relevance_score": round(r.score, 4),
         })
@@ -521,6 +586,8 @@ def run_contradictions(req: ContradictionRequest):
         similarity_threshold=req.similarity_threshold,
         max_pairs=req.max_pairs,
     )
+    # Invalidate insight cache so research wire reflects new relationships immediately
+    _invalidate_insight_cache()
 
     return [
         {
@@ -607,7 +674,7 @@ def import_search(req: ImportSearchRequest):
         {
             "title": r.title,
             "authors": r.authors,
-            "abstract": r.abstract[:300] if r.abstract else "",
+            "abstract": r.abstract or "",
             "year": r.year,
             "source": r.source,
             "source_id": r.source_id,
@@ -629,7 +696,7 @@ def import_lookup(req: ImportLookupRequest):
     return {
         "title": result.title,
         "authors": result.authors,
-        "abstract": result.abstract[:300] if result.abstract else "",
+        "abstract": result.abstract or "",
         "year": result.year,
         "source": result.source,
         "source_id": result.source_id,
@@ -638,6 +705,27 @@ def import_lookup(req: ImportLookupRequest):
         "citation_count": result.citation_count,
         "url": result.url,
     }
+
+
+def _normalize_abstract(text: str | None) -> str:
+    """
+    Clean abstracts from arXiv / Semantic Scholar before storing.
+
+    External APIs return abstracts with:
+    - Embedded newlines mid-sentence (arXiv wraps at ~80 chars)
+    - Multiple consecutive spaces
+    - Leading/trailing whitespace
+
+    We replace newlines with spaces and collapse runs so the abstract reads
+    as a single clean paragraph. This fixes mid-word truncation in the UI
+    that occurred when the truncation point landed on a newline.
+    """
+    if not text:
+        return ""
+    import re as _re
+    text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    text = _re.sub(r"[ \t]+", " ", text)
+    return text.strip()
 
 
 @app.post("/api/import/add")
@@ -687,7 +775,7 @@ def import_add(
     conn = sqlite3.connect(str(db.db_path))
     conn.execute(
         "UPDATE papers SET title=?, authors=?, abstract=?, year=?, source=?, doi=?, arxiv_id=? WHERE id=?",
-        (req.title, json.dumps(req.authors), req.abstract, req.year,
+        (req.title, json.dumps(req.authors), _normalize_abstract(req.abstract), req.year,
          req.source, req.doi, arxiv_id, paper.id),
     )
     conn.commit()
@@ -737,7 +825,7 @@ def monitor_scan(req: MonitorRequest):
                     "authors": sp.paper.authors,
                     "year": sp.paper.year,
                     "source": sp.paper.source,
-                    "abstract": sp.paper.abstract[:300] if sp.paper.abstract else "",
+                    "abstract": sp.paper.abstract or "",
                     "url": sp.paper.url,
                     "pdf_url": sp.paper.pdf_url,
                     "relevance_score": sp.relevance_score,
@@ -756,32 +844,95 @@ def monitor_scan(req: MonitorRequest):
 
 class GraphRequest(BaseModel):
     paper_ids: Optional[list[str]] = None
-    similarity_threshold: float = 0.5
-    max_pairs: int = 30
+    similarity_threshold: float = 0.40
+    max_pairs: int = 120
+    # Default False = read-only. Edges are read straight from the persisted
+    # `relationships` table (zero LLM calls, no new writes, watermark stays
+    # put so viewing the graph never invalidates the hypothesis cache).
+    # Pass True to run the live two-stage pipeline, which judges new pairs
+    # and writes them through — use only to deliberately expand coverage.
+    compute: bool = False
 
 
-@app.post("/api/graph")
-def build_graph(req: GraphRequest):
+def _build_graph_readonly(papers):
     """
-    Assemble a claim-level knowledge graph.
+    Assemble the graph from the persisted relationships table — no agent
+    calls, no LLM, no writes. This is the same data the conflict map and
+    hypothesis grounding read, so all three stay consistent.
 
-    Nodes  = claims extracted from papers (the atomic unit).
-    Edges  = relationships between claims (contradiction/support/nuance),
-             reusing the contradiction agent's two-stage pipeline.
-
-    This shapes data the contradiction agent already produces into a
-    graph payload the frontend force-simulation can render.
+    Claims come from db.get_claims_for_paper (pure DB read). Edges come from
+    db.list_relationships scoped to the selected papers. Every paper that has
+    a relationship is represented; papers with no detected relationships
+    simply have no nodes (same as before — isolated claims are hidden).
     """
-    if req.paper_ids:
-        papers = [db.get_paper(pid) for pid in req.paper_ids]
-        papers = [p for p in papers if p is not None]
-    else:
-        papers = db.list_papers(limit=50)
+    scope_ids = [p.id for p in papers]
 
-    if len(papers) < 2:
-        return {"nodes": [], "edges": [], "papers": []}
+    # Claim lookup: id -> (claim object, paper title). Pure DB read.
+    claim_by_id = {}
+    for p in papers:
+        for c in db.get_claims_for_paper(p.id):
+            claim_by_id[c.id] = (c, p.title)
 
-    # Stage 1: extract claims from each paper (DB-first via updated agent)
+    rels = db.list_relationships(paper_ids=scope_ids)
+
+    edges = []
+    connected_claim_ids = set()
+    for r in rels:
+        if r.relationship in ("error", "unrelated"):
+            continue
+        # Both endpoints must resolve to claims inside our scope.
+        if r.claim_lo not in claim_by_id or r.claim_hi not in claim_by_id:
+            continue
+        edges.append({
+            "source": r.claim_lo,
+            "target": r.claim_hi,
+            "relationship": r.relationship,
+            "category": r.category,
+            "similarity": round(r.similarity, 3),
+            "explanation": r.explanation,
+        })
+        connected_claim_ids.add(r.claim_lo)
+        connected_claim_ids.add(r.claim_hi)
+
+    degree: dict[str, int] = {}
+    for e in edges:
+        degree[e["source"]] = degree.get(e["source"], 0) + 1
+        degree[e["target"]] = degree.get(e["target"], 0) + 1
+
+    nodes = []
+    for cid in connected_claim_ids:
+        c, title = claim_by_id[cid]
+        nodes.append({
+            "id": c.id,
+            "claim": c.text,
+            "paper_id": c.paper_id,
+            "paper_title": title,
+            "section": c.section,
+            "confidence": c.confidence,
+            "degree": degree.get(c.id, 0),
+        })
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "papers": [{"id": p.id, "title": p.title} for p in papers],
+    }
+
+
+def _build_graph_compute(req, papers):
+    """
+    Live pipeline: judge pairs and write them through to the relationships
+    table. This is the original behaviour, preserved behind compute=true.
+
+    Coverage guarantee: after selecting the top-N pairs by similarity, we
+    check which papers have zero representation and inject their single best
+    pair regardless of score, so every paper with claims appears.
+
+    Cost note: judge_pair() reads from the DB cache first. Pairs already
+    judged by a previous scan are cache hits; only genuinely new pairs fire
+    the LLM judge (and get persisted, moving the relationships watermark).
+    """
+    # Extract claims (DB-first, zero LLM if already cached)
     all_claims = []
     for paper in papers:
         all_claims.extend(contradiction_agent.extract_claims(paper.id))
@@ -789,16 +940,41 @@ def build_graph(req: GraphRequest):
     if len(all_claims) < 2:
         return {"nodes": [], "edges": [], "papers": [{"id": p.id, "title": p.title} for p in papers]}
 
-    # Stage 1b: find similar pairs across papers
-    pairs = contradiction_agent.find_claim_pairs(all_claims, req.similarity_threshold)
-    pairs = pairs[: req.max_pairs]
+    # Find cross-paper pairs sorted by similarity descending
+    all_pairs = contradiction_agent.find_claim_pairs(all_claims, req.similarity_threshold)
 
-    # Stage 2: judge each pair → becomes an edge (writes through to DB)
+    # Select top-N pairs, then apply per-paper fairness guarantee:
+    # any paper not yet represented gets its single best pair added back in.
+    selected = list(all_pairs[: req.max_pairs])
+    represented_papers = set()
+    for pair in selected:
+        represented_papers.add(pair.claim_a.paper_id)
+        represented_papers.add(pair.claim_b.paper_id)
+
+    # All pairs sorted by similarity (best first) for fairness injection
+    all_pairs_by_paper: dict[str, list] = {}
+    for pair in all_pairs:
+        for pid in [pair.claim_a.paper_id, pair.claim_b.paper_id]:
+            all_pairs_by_paper.setdefault(pid, []).append(pair)
+
+    # Inject the best pair for any unrepresented paper — only if a cross-paper
+    # pair exists for it at all (some papers may have no similar claims to others)
+    for paper in papers:
+        if paper.id not in represented_papers:
+            candidates = all_pairs_by_paper.get(paper.id, [])
+            if candidates:
+                best = candidates[0]
+                if best not in selected:
+                    selected.append(best)
+                    represented_papers.add(best.claim_a.paper_id)
+                    represented_papers.add(best.claim_b.paper_id)
+
+    # Judge each selected pair (DB cache hit for most; LLM only for new pairs)
     edges = []
     connected_claim_ids = set()
-    for pair in pairs:
+    for pair in selected:
         result = contradiction_agent.judge_pair(pair)
-        if result.relationship in ("error",):
+        if result.relationship == "error":
             continue
         edges.append({
             "source": pair.claim_a.id,
@@ -817,7 +993,6 @@ def build_graph(req: GraphRequest):
         degree[e["source"]] = degree.get(e["source"], 0) + 1
         degree[e["target"]] = degree.get(e["target"], 0) + 1
 
-    # Only include claims that ended up connected (keeps the graph legible)
     nodes = [
         {
             "id": c.id,
@@ -837,6 +1012,38 @@ def build_graph(req: GraphRequest):
         "edges": edges,
         "papers": [{"id": p.id, "title": p.title} for p in papers],
     }
+
+
+@app.post("/api/graph")
+def build_graph(req: GraphRequest):
+    """
+    Assemble a claim-level knowledge graph.
+
+    Nodes  = claims extracted from papers (the atomic unit).
+    Edges  = relationships between claims (contradiction/support/nuance).
+
+    Read-only by default (compute=false): edges come straight from the
+    persisted relationships table — zero LLM calls, no writes, and the
+    relationships watermark never moves, so viewing the graph will not
+    invalidate the hypothesis cache. This keeps the graph, the conflict
+    map, and the hypothesis grounding consistent with one another.
+
+    Pass compute=true to run the live two-stage pipeline (judges new pairs,
+    writes them through, applies the per-paper fairness guarantee). Use that
+    only when deliberately expanding coverage.
+    """
+    if req.paper_ids:
+        papers = [db.get_paper(pid) for pid in req.paper_ids]
+        papers = [p for p in papers if p is not None]
+    else:
+        papers = db.list_papers(limit=50)
+
+    if len(papers) < 2:
+        return {"nodes": [], "edges": [], "papers": []}
+
+    if req.compute:
+        return _build_graph_compute(req, papers)
+    return _build_graph_readonly(papers)
 
 
 # ── Insight Feed ─────────────────────────────────────────────
@@ -879,32 +1086,12 @@ def insight_feed(req: InsightRequest):
         insights.append({
             "id": str(uuid.uuid4()),
             "type": "new_paper",
-            "headline": f"Added to library: {p.title}",
+            "headline": p.title,
             "claim": "",
-            "detail": (p.abstract or "")[:280],
+            "detail": (p.abstract or "")[:400],
             "papers": [p.title],
             "created_at": p.created_at,
         })
-
-    # Gap insights from stored research_gaps analyses
-    for p in papers[:8]:
-        analyses = db.get_analyses_for_paper(p.id)
-        for a in analyses:
-            if a.analysis_type == "research_gaps" and a.content:
-                first = a.content.strip().split("\n")[0][:200]
-                insights.append({
-                    "id": str(uuid.uuid4()),
-                    "type": "gap",
-                    "headline": f"Open question in {p.title[:60]}",
-                    "claim": first,
-                    "detail": a.content[:400],
-                    "papers": [p.title],
-                    "created_at": p.created_at,
-                })
-                break
-
-    # Contradiction/consensus insights — read from the relationships table.
-    # Run a contradiction scan from the Contradictions page to populate it.
 
     def _truncate(s: str, n: int) -> str:
         """Word-boundary truncation — avoids cutting headlines mid-word."""
@@ -913,6 +1100,13 @@ def insight_feed(req: InsightRequest):
         cut = s[:n].rsplit(" ", 1)[0]
         return cut + "…"
 
+    # Track papers already surfaced by a cross-paper relationship insight, so a
+    # single dominant paper does not headline both a contradiction AND a gap.
+    # Cross-paper relationships are higher-value signal than single-paper gaps,
+    # so they claim their papers first and gaps fill in only what is left.
+    papers_in_relationships: set[str] = set()
+
+    # Contradiction / consensus / nuance insights — from the relationships table.
     try:
         cached_rels = db.list_relationships()
         claim_paper: dict[str, str] = {}
@@ -921,38 +1115,63 @@ def insight_feed(req: InsightRequest):
                 claim_paper[c.id] = p.title
 
         for rel in cached_rels:
-            ta = claim_paper.get(rel.claim_lo, "a paper")
-            tb = claim_paper.get(rel.claim_hi, "another paper")
-            # Use the explanation's first sentence as the headline so each
-            # insight is distinct — not the same paper-name template repeated.
+            if rel.relationship in ("error", "unrelated"):
+                continue
+
+            ta = claim_paper.get(rel.claim_lo, "Unknown paper")
+            tb = claim_paper.get(rel.claim_hi, "Unknown paper")
             explanation = rel.explanation or ""
             first_sentence = explanation.split(".")[0].strip() if explanation else ""
+
             if rel.relationship == "contradiction":
-                headline = _truncate(first_sentence, 140) if first_sentence else f"Conflict between {ta[:35]} and {tb[:35]}"
+                headline = _truncate(first_sentence, 120) if first_sentence else f"Conflicting findings between {ta[:40]} and {tb[:40]}"
                 insights.append({
-                    "id": rel.id, "type": "contradiction",
-                    "headline": headline,
+                    "id": rel.id, "type": "contradiction", "headline": headline,
                     "claim": "", "detail": explanation,
                     "papers": [ta, tb], "created_at": rel.created_at,
                 })
+                papers_in_relationships.add(ta); papers_in_relationships.add(tb)
             elif rel.relationship == "support":
-                headline = _truncate(first_sentence, 140) if first_sentence else f"Agreement across {ta[:35]} and {tb[:35]}"
+                headline = _truncate(first_sentence, 120) if first_sentence else f"Converging evidence across {ta[:40]} and {tb[:40]}"
                 insights.append({
-                    "id": rel.id, "type": "consensus",
-                    "headline": headline,
+                    "id": rel.id, "type": "consensus", "headline": headline,
                     "claim": "", "detail": explanation,
                     "papers": [ta, tb], "created_at": rel.created_at,
                 })
+                papers_in_relationships.add(ta); papers_in_relationships.add(tb)
             elif rel.relationship == "nuance":
-                headline = _truncate(first_sentence, 140) if first_sentence else f"Nuance between {ta[:35]} and {tb[:35]}"
-                insights.append({
-                    "id": rel.id, "type": "gap",
-                    "headline": headline,
-                    "claim": "", "detail": explanation,
-                    "papers": [ta, tb], "created_at": rel.created_at,
-                })
+                if len(explanation) > 80:
+                    headline = _truncate(first_sentence, 120) if first_sentence else f"Boundary condition between {ta[:40]} and {tb[:40]}"
+                    insights.append({
+                        "id": rel.id, "type": "gap", "headline": headline,
+                        "claim": "", "detail": explanation,
+                        "papers": [ta, tb], "created_at": rel.created_at,
+                    })
+                    papers_in_relationships.add(ta); papers_in_relationships.add(tb)
     except Exception as e:
         print(f"Insight relationship read skipped: {e}")
+
+    # Gap insights from research_gaps analyses — but ONLY for papers that aren't
+    # already represented by a relationship insight above. This is the dedup
+    # that stops one paper from headlining multiple cells on the dashboard.
+    for p in papers[:8]:
+        if p.title in papers_in_relationships:
+            continue
+        analyses = db.get_analyses_for_paper(p.id)
+        for a in analyses:
+            if a.analysis_type == "research_gaps" and a.content:
+                lines = [l.strip() for l in a.content.strip().split("\n") if l.strip()]
+                first = lines[0][:180] if lines else ""
+                insights.append({
+                    "id": str(uuid.uuid4()),
+                    "type": "gap",
+                    "headline": first,
+                    "claim": "",
+                    "detail": a.content[:600],
+                    "papers": [p.title],
+                    "created_at": p.created_at,
+                })
+                break
 
     # Sort newest first
     insights.sort(key=lambda x: x.get("created_at", ""), reverse=True)

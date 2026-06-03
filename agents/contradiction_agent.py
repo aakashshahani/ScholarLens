@@ -17,6 +17,16 @@ Persistence notes (session change):
   within a single scan batch — the DB is the durable source of truth.
 - This makes the insight feed and hypothesis agent read real, persisted data
   rather than an always-empty relationships table.
+
+Stage 1 hybrid retrieval (added):
+  find_claim_pairs now runs two passes and takes their union:
+  1. Dense pass  — cosine similarity via MiniLM embeddings (existing behaviour)
+  2. BM25 pass   — keyword overlap via rank_bm25 (new)
+  BM25 catches vocabulary-distant pairs that dense retrieval misses: two claims
+  can describe the same finding with completely different words but share rare
+  terms (dataset names, metric names, method abbreviations, numbers) that BM25
+  scores highly. The union of both passes reaches the LLM judge; duplicates
+  are collapsed and pairs are sorted by their best score across both passes.
 """
 
 import hashlib
@@ -30,6 +40,7 @@ from anthropic import Anthropic
 from config import settings
 from db import Database, StoredClaim, StoredRelationship
 from utils import VectorStore
+from utils.bm25_index import BM25Index
 
 
 @dataclass
@@ -49,6 +60,7 @@ class ClaimPair:
     claim_a: Claim
     claim_b: Claim
     similarity: float
+    retrieval_source: str = "dense"  # "dense" | "bm25" | "both"
 
 
 @dataclass
@@ -62,7 +74,8 @@ class ContradictionResult:
     explanation: str
     stronger_evidence: str  # "paper_a", "paper_b", or "neither"
     resolution: str     # how future research could resolve it
-    similarity: float = 0.0  # cosine similarity from Stage 1 (carried through for display)
+    similarity: float = 0.0  # best similarity score from Stage 1
+    retrieval_source: str = "dense"  # which retrieval pass surfaced this pair
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -142,12 +155,39 @@ class ContradictionAgent:
                 messages=[{
                     "role": "user",
                     "content": (
-                        "Extract specific, testable claims from this paper analysis. "
-                        "Each claim should be a single factual assertion the paper makes. "
-                        "Return ONLY valid JSON: a list of objects with fields: "
-                        '"text" (the claim), "section" (where it came from: key_claims/findings/summary), '
-                        '"confidence" (high/medium/low based on how strongly the paper states it).\n\n'
-                        "Return 5-10 of the most important claims. No preamble, no markdown fences.\n\n"
+                        "Extract specific, falsifiable claims from this paper analysis. "
+                        "Each claim must be narrow enough that another paper could plausibly disagree with it.\n\n"
+                        "HARD RULES — violating any of these makes a claim useless:\n"
+                        "1. Name the exact system/method (never 'it', 'the approach', 'the authors')\n"
+                        "2. Name the exact outcome variable or metric being measured\n"
+                        "3. Include numbers where they exist (accuracy, effect size, p-value, sample size, "
+                        "percentage change). If no numbers, state the direction and magnitude qualitatively.\n"
+                        "4. State the population, task, or conditions the result holds under\n"
+                        "5. Claims must be about SPECIFIC findings, not general capabilities. "
+                        "'System X can do Y' is too broad. "
+                        "'System X achieved Z% accuracy on task T in condition C' is correct.\n\n"
+                        "CLAIM TYPES TO PRIORITIZE (roughly in order):\n"
+                        "- Measurement claims: what metric was used and what it found\n"
+                        "- Causal claims: what intervention produced what effect and under what conditions\n"
+                        "- Comparative claims: how this approach differs from baseline or prior work in measurable terms\n"
+                        "- Scope/boundary claims: where the method works and where it breaks down\n\n"
+                        "REJECT these as too vague to be useful:\n"
+                        "- 'Paper X demonstrates that automated systems can measure Y' (topic description, not a claim)\n"
+                        "- 'The results show the approach is effective' (no specifics)\n"
+                        "- 'This work contributes to the field of Z' (meta-statement)\n\n"
+                        "BAD: 'ACE improves negotiation outcomes.'\n"
+                        "GOOD: 'ACE feedback produced significantly greater deal prices than human or no feedback "
+                        "(F(2,371)=10.79, p<0.001) in a 374-participant two-used-car negotiation task.'\n\n"
+                        "BAD: 'The system uses automated metrics to evaluate negotiation.'\n"
+                        "GOOD: 'Dialogue-annotation-based metrics predicted actual negotiation outcomes with r=0.67 "
+                        "in the Johnson et al. dataset, outperforming human rater agreement on the same task.'\n\n"
+                        "Return ONLY valid JSON: a list of objects with fields:\n"
+                        '"text" (the self-contained claim — must satisfy all 5 rules above),\n'
+                        '"section" (key_claims/findings/summary),\n'
+                        '"confidence" (high=quantitative evidence, medium=qualitative with clear direction, '
+                        'low=speculative or indirect).\n\n'
+                        "Return 6-10 claims. Fewer high-quality claims beat many vague ones. "
+                        "No preamble, no markdown fences.\n\n"
                         f"Paper: {paper.title}\n\n{source_text}"
                     ),
                 }],
@@ -184,39 +224,121 @@ class ContradictionAgent:
             print(f"Claim extraction failed for {paper_id}: {e}")
             return []
 
-    # ── Stage 1b: Find similar claims across papers ──────────
+    # ── Stage 1b: Find similar claim pairs — hybrid retrieval ─
 
     def find_claim_pairs(
         self,
         all_claims: list[Claim],
         similarity_threshold: float = 0.6,
+        bm25_top_k: int = 5,
+        bm25_min_score: float = 0.25,
     ) -> list[ClaimPair]:
         """
-        Compare claims across papers using vector similarity.
-        Only pairs from DIFFERENT papers are returned.
+        Find cross-paper claim pairs using hybrid retrieval: dense + BM25.
+
+        Two passes are run and their results are unioned:
+
+        Dense pass (existing):
+            Embed all claims with MiniLM, compute pairwise cosine similarity.
+            Pairs above similarity_threshold are kept.
+            Good at: semantic similarity regardless of vocabulary.
+            Misses: claims describing the same finding with different words.
+
+        BM25 pass (new):
+            Build a BM25 index over all claim texts. For each claim, retrieve
+            top-k matches from other papers by keyword overlap. Pairs above
+            bm25_min_score are kept.
+            Good at: shared rare terms — dataset names, metric names, method
+            abbreviations, numbers — that appear verbatim in both claims.
+            Misses: paraphrased claims with no shared keywords.
+
+        Union + dedup:
+            A pair already found by the dense pass keeps its cosine similarity.
+            A pair found only by BM25 carries the normalised BM25 score as its
+            similarity value (so Stage 2 always has a usable score).
+            A pair found by both is tagged "both" and keeps the cosine score
+            (cosine is better calibrated for display).
+
+        Args:
+            all_claims:          flat list of claims from all papers in scope
+            similarity_threshold: cosine threshold for dense pass
+            bm25_top_k:          how many BM25 candidates to retrieve per claim
+            bm25_min_score:      minimum normalised BM25 score (0-1) to keep a pair
+
+        Returns:
+            List of ClaimPair sorted descending by similarity score.
+            Only cross-paper pairs are returned.
         """
         if len(all_claims) < 2:
             return []
 
         texts = [c.text for c in all_claims]
+
+        # ── Dense pass ────────────────────────────────────────
         embeddings = self.vector_store.embed_texts(texts)
 
-        pairs = []
+        # pair_key → ClaimPair; used for dedup across passes
+        pair_map: dict[tuple[str, str], ClaimPair] = {}
+
         for i in range(len(all_claims)):
             for j in range(i + 1, len(all_claims)):
                 if all_claims[i].paper_id == all_claims[j].paper_id:
                     continue
 
                 sim = self._cosine_similarity(embeddings[i], embeddings[j])
-
                 if sim >= similarity_threshold:
-                    pairs.append(ClaimPair(
+                    key = (all_claims[i].id, all_claims[j].id)
+                    pair_map[key] = ClaimPair(
                         claim_a=all_claims[i],
                         claim_b=all_claims[j],
                         similarity=sim,
-                    ))
+                        retrieval_source="dense",
+                    )
 
-        pairs.sort(key=lambda p: p.similarity, reverse=True)
+        # ── BM25 pass ─────────────────────────────────────────
+        # Build one index over all claim texts. For each claim query the
+        # index and keep cross-paper matches above the score threshold.
+        bm25 = BM25Index(texts)
+
+        for i, claim in enumerate(all_claims):
+            matches = bm25.query(claim.text, n=bm25_top_k + 1)  # +1 to skip self
+            for match in matches:
+                j = match.doc_index
+                if j == i:
+                    continue
+                if all_claims[j].paper_id == claim.paper_id:
+                    continue
+                if match.score < bm25_min_score:
+                    continue
+
+                # Canonical key: smaller index first so (i,j) == (j,i)
+                lo, hi = (i, j) if i < j else (j, i)
+                key = (all_claims[lo].id, all_claims[hi].id)
+
+                if key in pair_map:
+                    # Already found by dense — upgrade tag, keep cosine score
+                    existing = pair_map[key]
+                    pair_map[key] = ClaimPair(
+                        claim_a=existing.claim_a,
+                        claim_b=existing.claim_b,
+                        similarity=existing.similarity,
+                        retrieval_source="both",
+                    )
+                else:
+                    # New pair from BM25 only — use normalised BM25 score
+                    pair_map[key] = ClaimPair(
+                        claim_a=all_claims[lo],
+                        claim_b=all_claims[hi],
+                        similarity=match.score,
+                        retrieval_source="bm25",
+                    )
+
+        n_dense   = sum(1 for p in pair_map.values() if p.retrieval_source == "dense")
+        n_bm25    = sum(1 for p in pair_map.values() if p.retrieval_source == "bm25")
+        n_both    = sum(1 for p in pair_map.values() if p.retrieval_source == "both")
+        print(f"[hybrid] dense={n_dense}  bm25_only={n_bm25}  both={n_both}  total={len(pair_map)}")
+
+        pairs = sorted(pair_map.values(), key=lambda p: p.similarity, reverse=True)
         return pairs
 
     @staticmethod
@@ -260,6 +382,7 @@ class ContradictionAgent:
                     stronger_evidence=db_hit.stronger_evidence or "neither",
                     resolution=db_hit.resolution or "",
                     similarity=pair.similarity,
+                    retrieval_source=pair.retrieval_source,
                     created_at=db_hit.created_at,
                 )
                 self._judgment_cache[key] = result
@@ -273,19 +396,39 @@ class ContradictionAgent:
                 messages=[{
                     "role": "user",
                     "content": (
-                        "You are analyzing two claims from different research papers. "
-                        "Determine their relationship.\n\n"
-                        f'Paper A: "{pair.claim_a.paper_title}"\n'
-                        f'Claim A: "{pair.claim_a.text}"\n\n'
-                        f'Paper B: "{pair.claim_b.paper_title}"\n'
-                        f'Claim B: "{pair.claim_b.text}"\n\n'
+                        "You are analyzing two claims from different research papers.\n\n"
+                        f"Paper A: {pair.claim_a.paper_title}\n"
+                        f"Claim A: {pair.claim_a.text}\n\n"
+                        f"Paper B: {pair.claim_b.paper_title}\n"
+                        f"Claim B: {pair.claim_b.text}\n\n"
+                        "DECISION GUIDE:\n"
+                        "- contradiction: the claims make incompatible assertions — if both are true, "
+                        "one must be wrong, or they predict opposite outcomes under the same conditions.\n"
+                        "- nuance: they partially agree but differ in scope, population, method, or "
+                        "conditions. Neither is wrong — the difference reveals a boundary condition.\n"
+                        "- support: they make compatible, mutually reinforcing assertions about the same phenomenon.\n"
+                        "- unrelated: they address different phenomena and comparison adds no insight.\n\n"
+                        "HARD RULES FOR THE EXPLANATION FIELD:\n"
+                        "1. Name the specific point of agreement or conflict — not just the topic area.\n"
+                        "2. Reference the actual measurements, methods, or conditions from each claim.\n"
+                        "3. Do NOT write a general description of what the papers are about.\n"
+                        "4. Do NOT use 'Claim A' or 'Claim B' labels.\n"
+                        f"5. Refer to papers by their names: {pair.claim_a.paper_title} and {pair.claim_b.paper_title}.\n\n"
+                        "BAD explanation (topic description, not analysis):\n"
+                        "Both papers demonstrate that automated systems can measure negotiation performance.\n\n"
+                        "GOOD explanation (names the specific agreement/conflict):\n"
+                        f"{pair.claim_a.paper_title} measures performance via error classification with GPT-4 "
+                        f"(>=0.90 accuracy), while {pair.claim_b.paper_title} uses dialogue-annotation metrics "
+                        "that predict actual outcomes. These are different measurement philosophies - "
+                        "one defines error categories top-down, the other derives signal bottom-up from behavior - "
+                        "making their accuracy figures non-comparable despite both claiming validity.\n\n"
                         "Return ONLY valid JSON with these fields:\n"
-                        '- "relationship": one of "contradiction", "support", "nuance", "unrelated"\n'
-                        '  (use "nuance" when claims partially agree but differ in scope or conditions)\n'
-                        '- "category": one of "methodological", "findings", "theoretical", "scope"\n'
-                        '- "explanation": 2-3 sentences explaining the relationship\n'
+                        '- "relationship": "contradiction", "support", "nuance", or "unrelated"\n'
+                        '- "category": "methodological", "findings", "theoretical", or "scope"\n'
+                        '- "explanation": 2-3 sentences. Must name the specific point of difference, '
+                        "not just the subject area. Must reference actual details from each claim.\n"
                         '- "stronger_evidence": "paper_a", "paper_b", or "neither"\n'
-                        '- "resolution": one sentence on how future research could resolve this\n\n'
+                        '- "resolution": one concrete sentence on what experiment or data would resolve this\n\n'
                         "No preamble, no markdown fences."
                     ),
                 }],
@@ -300,16 +443,21 @@ class ContradictionAgent:
 
             parsed = json.loads(raw)
 
+            VALID_RELATIONSHIPS = {"contradiction", "support", "nuance", "unrelated"}
+            raw_rel = parsed.get("relationship", "unrelated")
+            relationship = raw_rel if raw_rel in VALID_RELATIONSHIPS else "unrelated"
+
             result = ContradictionResult(
                 id=str(uuid.uuid4()),
                 claim_a=pair.claim_a,
                 claim_b=pair.claim_b,
-                relationship=parsed.get("relationship", "unrelated"),
+                relationship=relationship,
                 category=parsed.get("category", "findings"),
                 explanation=parsed.get("explanation", ""),
                 stronger_evidence=parsed.get("stronger_evidence", "neither"),
                 resolution=parsed.get("resolution", ""),
                 similarity=pair.similarity,
+                retrieval_source=pair.retrieval_source,
             )
 
         except Exception as e:
@@ -324,6 +472,7 @@ class ContradictionAgent:
                 stronger_evidence="neither",
                 resolution="",
                 similarity=pair.similarity,
+                retrieval_source=pair.retrieval_source,
             )
 
         # ── Write through to DB (skip errors and eval mode) ──
@@ -357,7 +506,7 @@ class ContradictionAgent:
         """
         Run the full contradiction detection pipeline:
         1. Extract claims from all papers (DB-first, LLM on cache miss)
-        2. Find similar claim pairs across papers
+        2. Find similar claim pairs across papers (hybrid: dense + BM25)
         3. Judge each pair (DB-first, LLM on cache miss)
         4. Persist every new judgment to the relationships table
 
@@ -381,7 +530,19 @@ class ContradictionAgent:
             return []
 
         pairs = self.find_claim_pairs(all_claims, similarity_threshold)
-        pairs = pairs[:max_pairs]
+
+        # Deduplicate: each claim appears at most once across all pairs.
+        # Without this, one dominant claim can monopolise all result slots.
+        # Pairs are sorted by similarity descending so we keep the
+        # highest-similarity match for each claim and discard the rest.
+        seen_claim_ids: set[str] = set()
+        deduped: list[ClaimPair] = []
+        for pair in pairs:
+            if pair.claim_a.id not in seen_claim_ids and pair.claim_b.id not in seen_claim_ids:
+                deduped.append(pair)
+                seen_claim_ids.add(pair.claim_a.id)
+                seen_claim_ids.add(pair.claim_b.id)
+        pairs = deduped[:max_pairs]
 
         if not pairs:
             return []

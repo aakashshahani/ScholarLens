@@ -96,13 +96,32 @@ ANALYSIS_TYPES = [
         "type": "key_claims",
         "max_tokens": 1024,
         "prompt_instruction": (
-            "Extract the paper's central claims — the specific assertions it "
-            "is asking you to believe after reading it. "
-            "For each claim: state it precisely in one sentence, rate confidence "
-            "(high/medium/low) based on the quality of evidence provided, and note "
-            "what evidence supports it. "
-            "Focus on claims that could be cited, replicated, or contradicted by "
-            "another paper. Avoid vague generalities."
+            "Extract the paper's 4-6 most important claims — the specific assertions "
+            "it is asking you to believe after reading it.\n\n"
+            "STRICT REQUIREMENTS for each claim:\n"
+            "1. Self-contained: a reader with zero context must understand it fully. "
+            "No pronouns ('it', 'they', 'this approach') that refer to something outside "
+            "the claim itself.\n"
+            "2. Name the subject explicitly: use the actual system/intervention/method name "
+            "(e.g. 'ACE feedback', 'the simulated annealing negotiator', 'GPT-4-based coaching') "
+            "not vague references.\n"
+            "3. Name the outcome: state what was measured and in what direction "
+            "(e.g. 'negotiation deal prices', 'self-efficacy scores', 'task completion time').\n"
+            "4. Include evidence where reported: quote specific numbers — effect sizes, "
+            "p-values, sample sizes, confidence intervals. If no quantitative evidence "
+            "exists, note that.\n"
+            "5. Include conditions: specify the population, setting, or conditions the "
+            "claim applies to (e.g. 'in MBA students across two negotiation trials', "
+            "'on complex network topologies with 100+ APs').\n\n"
+            "BAD example (do not produce this): "
+            "'The system improved negotiation outcomes significantly.'\n"
+            "GOOD example: "
+            "'ACE feedback produced significantly greater improvement in negotiation deal "
+            "prices than alternative feedback or no feedback in a second trial "
+            "(F(2,371)=10.79, p<0.001) among 374 participants, while showing no "
+            "significant difference in self-efficacy measures.'\n\n"
+            "Focus on claims that could be cited, replicated, or directly contradicted "
+            "by another paper."
         ),
     },
     {
@@ -126,7 +145,8 @@ TOOLS = [
         "description": (
             "Semantic search across stored paper chunks. Use this to find "
             "relevant passages when answering questions about papers. "
-            "Returns the most similar chunks with their section labels."
+            "Returns matching chunks, each with a paper_title (cite this) and "
+            "a section label."
         ),
         "input_schema": {
             "type": "object",
@@ -378,10 +398,21 @@ class PDFAnalysisAgent:
         whether to search again or answer. This is genuinely open-ended
         in a way that paper analysis is not.
         """
-        system_prompt = """You are ScholarLens, a research assistant with access to
-a library of analyzed papers. Answer questions using the search tool to find
-relevant passages. Always cite which paper and section your answer comes from.
-If the evidence is insufficient, say so clearly."""
+        system_prompt = """You are a research assistant with access to a library of
+analyzed papers. Answer questions using the search tool to find relevant passages.
+
+CITATION RULES:
+- Cite papers by their TITLE only — for example, "ACE: A LLM-based Negotiation
+  Coaching System found that...". Search results include a paper_title field; use it.
+- NEVER write internal identifiers, hashes, or UUID-style strings in your answer.
+  If a result has an id field, ignore it — it is not for display.
+- Name the section a finding came from when it helps (e.g. "in the results section").
+
+ANSWER STYLE:
+- This is a one-shot answer, not a chat. Do NOT end with follow-up questions like
+  "Would you like more detail?" — the user cannot reply. Just give the complete answer.
+- If the evidence is insufficient, say so plainly and stop.
+- Keep formatting light: short paragraphs, and bullets only when genuinely listing items."""
 
         messages = [{"role": "user", "content": question}]
 
@@ -423,21 +454,33 @@ If the evidence is insufficient, say so clearly."""
         return final_text
 
     def _execute_search_tool(self, tool_input: dict) -> str:
-        """Execute the search_paper_chunks tool for the ask() loop."""
+        """
+        Execute the search_paper_chunks tool for the ask() loop.
+
+        Each result is given a human-readable paper_title (resolved from the DB)
+        so the model cites by title. The raw paper_id (a UUID) and the cosine
+        score are deliberately NOT returned — exposing them caused the model to
+        echo UUID strings into its answers, and the raw score is meaningless to
+        an end user.
+        """
         try:
             results = self.vector_store.search(
                 query=tool_input["query"],
                 n_results=tool_input.get("n_results", 5),
                 paper_id=tool_input.get("paper_id"),
             )
-            return json.dumps([
-                {
-                    "paper_id": r.paper_id,
+            # Resolve titles once, cache within this call
+            title_cache: dict[str, str] = {}
+            payload = []
+            for r in results:
+                if r.paper_id not in title_cache:
+                    paper = self.db.get_paper(r.paper_id)
+                    title_cache[r.paper_id] = paper.title if paper else "Unknown paper"
+                payload.append({
+                    "paper_title": title_cache[r.paper_id],
                     "section": r.section,
                     "text": r.text[:500],
-                    "similarity_score": round(r.score, 4),
-                }
-                for r in results
-            ])
+                })
+            return json.dumps(payload)
         except Exception as e:
             return json.dumps({"error": str(e)})
