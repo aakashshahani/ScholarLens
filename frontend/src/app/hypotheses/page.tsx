@@ -6,17 +6,20 @@ import { PageHeader, Card, EmptyState, Spinner, Slider, SelectChip, PrimaryButto
 import { FlaskConical, TriangleAlert, GitBranch, AlertCircle, CheckCircle2, Zap, RefreshCw } from "lucide-react";
 import { cache } from "@/lib/cache";
 
-const NOVELTY_COLOR = {
-  high: "var(--support)", medium: "var(--nuance)", low: "var(--text-3)", unknown: "var(--text-4)"
-} as const;
-
-// Tier-only pill — the raw cosine-distance number is intentionally not shown.
-// It implies a precision the score doesn't have and means nothing to a reader.
-function NoveltyPill({ tier }: { tier: string }) {
-  const color = NOVELTY_COLOR[tier as keyof typeof NOVELTY_COLOR] || "var(--text-3)";
+// Novelty rank pill. On a tight corpus every hypothesis lands in the same raw
+// tier ("medium"), so the tier label stops discriminating — five identical
+// pills read as broken. Rank is always distinct and honest: it answers "which
+// of these is furthest from what the library already covers." Colour still
+// tracks absolute score so a genuinely high-novelty batch reads green.
+function NoveltyPill({ rank, total, score }: { rank: number; total: number; score: number }) {
+  const color = score > 0.45 ? "var(--support)" : score > 0.25 ? "var(--nuance)" : "var(--text-3)";
+  const label =
+    rank === 1 ? "Most novel" :
+    rank === total ? "Least novel" :
+    `#${rank} most novel`;
   return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[var(--surface-3)]" style={{ color }}>
-      {tier} novelty
+      {label}
     </span>
   );
 }
@@ -115,7 +118,16 @@ export default function HypothesesPage() {
             </div>
           )}
 
-          {hypotheses.length > 0 && (
+          {hypotheses.length > 0 && (() => {
+            // Rank hypotheses by novelty (highest score = rank 1). Built once
+            // so each card and the rail agree. id -> 1-based rank.
+            const novRank = new Map<string, number>();
+            [...hypotheses]
+              .sort((a, b) => (b.novelty_score || 0) - (a.novelty_score || 0))
+              .forEach((h, idx) => novRank.set(h.id, idx + 1));
+            const total = hypotheses.length;
+
+            return (
             <div className="grid grid-cols-[1fr_240px] gap-4 fade-up">
               <div className="space-y-4">
                 {hypotheses.map((h, i) => {
@@ -130,7 +142,7 @@ export default function HypothesesPage() {
                         <div className="flex items-center gap-2">
                           {isGrounded ? (
                             <span className="flex items-center gap-1 text-[11px] text-[var(--support)]">
-                              <CheckCircle2 size={11} /> grounded in {h.source_conflicts.length} conflict{h.source_conflicts.length !== 1 ? "s" : ""}
+                              <CheckCircle2 size={11} /> grounded in detected conflict
                             </span>
                           ) : (
                             <span className="flex items-center gap-1 text-[11px] text-[var(--text-3)]">
@@ -141,7 +153,7 @@ export default function HypothesesPage() {
                       </div>
 
                       <div className="mb-3">
-                        <NoveltyPill tier={h.novelty_tier || h.novelty} />
+                        <NoveltyPill rank={novRank.get(h.id) || total} total={total} score={h.novelty_score || 0} />
                       </div>
 
                       <div className="font-display text-[17px] text-[var(--text-1)] leading-[1.35] mb-2.5">{h.statement}</div>
@@ -184,28 +196,36 @@ export default function HypothesesPage() {
                 })}
               </div>
 
-              {/* Novelty ranking — bars only, no raw scores or jargon.
-                  The cosine-distance value still drives bar width and ordering;
-                  it is just never shown as a number or explained in model terms. */}
+              {/* Novelty ranking — relative bars, no raw cosine numbers.
+                  The score drives width and order; we show rank position so the
+                  rail is self-explanatory without exposing a meaningless float. */}
               <div className="sticky top-6 self-start">
                 <Card>
                   <SectionLabel>Novelty ranking</SectionLabel>
-                  <div className="text-[11px] text-[var(--text-3)] mb-4 leading-[1.5]">
+                  <div className="text-[11px] text-[var(--text-3)] mb-3 leading-[1.5]">
                     How different each hypothesis is from what your library already covers. Longer bars sit in less-explored territory.
+                  </div>
+                  <div className="flex items-center justify-between text-[9.5px] text-[var(--text-4)] uppercase tracking-wider mb-2.5">
+                    <span>Most novel</span><span>Least</span>
                   </div>
                   <div className="space-y-2.5">
                     {[...hypotheses]
                       .sort((a, b) => (b.novelty_score || 0) - (a.novelty_score || 0))
-                      .map((h) => {
-                        const idx = hypotheses.indexOf(h);
+                      .map((h, rankIdx) => {
+                        const cardNum = hypotheses.indexOf(h) + 1;
                         const score = h.novelty_score || 0;
-                        const color = score > 0.5 ? "var(--support)" : score > 0.3 ? "var(--nuance)" : "var(--text-3)";
+                        const color = score > 0.45 ? "var(--support)" : score > 0.25 ? "var(--nuance)" : "var(--text-3)";
+                        // Width is relative to the top-ranked bar so differences
+                        // are visible even when absolute scores cluster tightly.
+                        const maxScore = Math.max(...hypotheses.map((x) => x.novelty_score || 0), 0.0001);
+                        const width = 30 + (score / maxScore) * 70; // floor 30% so smallest bar still reads
                         return (
                           <div key={h.id} className="flex items-center gap-2.5">
-                            <span className="mono text-[11px] text-[var(--text-3)] w-5 shrink-0">H{idx + 1}</span>
-                            <div className="flex-1 h-[5px] bg-[var(--surface-3)] rounded-full overflow-hidden">
-                              <div className="h-full rounded-full t-all" style={{ width: `${Math.min(score * 150, 100)}%`, background: color }} />
+                            <span className="mono text-[11px] text-[var(--text-3)] w-5 shrink-0">H{cardNum}</span>
+                            <div className="flex-1 h-[6px] bg-[var(--surface-3)] rounded-full overflow-hidden">
+                              <div className="h-full rounded-full t-all" style={{ width: `${width}%`, background: color }} />
                             </div>
+                            <span className="mono text-[10px] text-[var(--text-4)] w-4 shrink-0 text-right">{rankIdx + 1}</span>
                           </div>
                         );
                       })}
@@ -213,7 +233,8 @@ export default function HypothesesPage() {
                 </Card>
               </div>
             </div>
-          )}
+            );
+          })()}
         </>
       )}
     </div>

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import {
-  LayoutDashboard, Library, Network, Zap, FlaskConical, Radio, Radar, Plus,
+  LayoutDashboard, Library, Network, Zap, FlaskConical, Radar, Plus,
 } from "lucide-react";
 
 const NAV = [
@@ -13,7 +13,6 @@ const NAV = [
   { href: "/graph", label: "Knowledge Graph", icon: Network },
   { href: "/contradictions", label: "Contradictions", icon: Zap },
   { href: "/hypotheses", label: "Hypotheses", icon: FlaskConical },
-  { href: "/feed", label: "Insight Feed", icon: Radio },
   { href: "/monitor", label: "Monitor", icon: Radar },
 ];
 

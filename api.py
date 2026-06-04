@@ -579,6 +579,65 @@ def contradiction_count():
     return {"counts": counts, "total": len(rels), "last_scanned": last}
 
 
+@app.get("/api/contradictions")
+def list_contradictions():
+    """
+    Return the full persisted relationship set — every relationship ever
+    judged, reconstructed into the same shape the scan POST returns.
+
+    This is the source of truth for the conflict map: it shows accumulated
+    knowledge across all scans, keeping it consistent with the dashboard's
+    /api/contradictions/count (which reads the same table). Pure DB read,
+    zero LLM calls. "unrelated" and "error" rows are excluded from the main
+    view but still counted by the count endpoint.
+    """
+    rels = db.list_relationships()
+
+    # Build a claim-id -> claim object map once (DB read, no LLM).
+    claim_by_id = {}
+    claim_paper_title = {}
+    for p in db.list_papers(limit=200):
+        for c in db.get_claims_for_paper(p.id):
+            claim_by_id[c.id] = c
+            claim_paper_title[c.id] = p.title
+
+    out = []
+    for r in rels:
+        if r.relationship in ("error", "unrelated"):
+            continue
+        a = claim_by_id.get(r.claim_lo)
+        b = claim_by_id.get(r.claim_hi)
+        if not a or not b:
+            continue  # claim was deleted; skip orphaned relationship
+        out.append({
+            "id": r.id,
+            "relationship": r.relationship,
+            "category": r.category,
+            "explanation": r.explanation,
+            "resolution": r.resolution,
+            "stronger_evidence": r.stronger_evidence,
+            "similarity": round(r.similarity, 3),
+            "claim_a": {
+                "paper_id": a.paper_id,
+                "paper_title": claim_paper_title.get(a.id, "Unknown paper"),
+                "text": a.text,
+                "confidence": a.confidence,
+            },
+            "claim_b": {
+                "paper_id": b.paper_id,
+                "paper_title": claim_paper_title.get(b.id, "Unknown paper"),
+                "text": b.text,
+                "confidence": b.confidence,
+            },
+            "created_at": r.created_at,
+        })
+
+    # Sort: contradictions first, then nuance, then support; newest within each.
+    order = {"contradiction": 0, "nuance": 1, "support": 2}
+    out.sort(key=lambda x: (order.get(x["relationship"], 9), x["created_at"] or ""), reverse=False)
+    return out
+
+
 @app.post("/api/contradictions")
 def run_contradictions(req: ContradictionRequest):
     results = contradiction_agent.run_contradiction_scan(
@@ -987,6 +1046,13 @@ def _build_graph_compute(req, papers):
         connected_claim_ids.add(pair.claim_a.id)
         connected_claim_ids.add(pair.claim_b.id)
 
+    # The compute path may have written new relationships via judge_pair.
+    # Invalidate the insight cache so the dashboard and research wire reflect
+    # them immediately — same contract as the contradiction scan endpoint.
+    # Without this, expanding the graph can surface contradictions that the
+    # dashboard's "top contradiction" card never sees (stale cache).
+    _invalidate_insight_cache()
+
     # Degree count for node sizing
     degree: dict[str, int] = {}
     for e in edges:
@@ -1114,6 +1180,30 @@ def insight_feed(req: InsightRequest):
             for c in db.get_claims_for_paper(p.id):
                 claim_paper[c.id] = p.title
 
+        def _strip_paper_prefix(sentence: str, title_a: str, title_b: str) -> str:
+            """
+            The explanation's first sentence usually leads with a paper title
+            ("<Paper> reports that ..."). The paper names are already shown in
+            the papers chip, so repeating them in the headline is redundant.
+            Strip a leading paper-title prefix (plus a reporting verb) so the
+            headline leads with the actual finding.
+            """
+            s = sentence
+            for title in (title_a, title_b):
+                if title and title != "Unknown paper" and s.startswith(title):
+                    s = s[len(title):].lstrip(" :—-")
+                    # Drop a leading reporting verb so it reads cleanly.
+                    for verb in ("reports that ", "documents that ", "establishes that ",
+                                 "finds that ", "shows that ", "demonstrates that ",
+                                 "identifies that ", "reports ", "documents ", "finds ",
+                                 "shows ", "establishes "):
+                        if s.lower().startswith(verb):
+                            s = s[len(verb):]
+                            break
+                    break
+            # Capitalise first letter if we stripped into a lowercase start.
+            return s[:1].upper() + s[1:] if s else sentence
+
         for rel in cached_rels:
             if rel.relationship in ("error", "unrelated"):
                 continue
@@ -1122,6 +1212,7 @@ def insight_feed(req: InsightRequest):
             tb = claim_paper.get(rel.claim_hi, "Unknown paper")
             explanation = rel.explanation or ""
             first_sentence = explanation.split(".")[0].strip() if explanation else ""
+            first_sentence = _strip_paper_prefix(first_sentence, ta, tb)
 
             if rel.relationship == "contradiction":
                 headline = _truncate(first_sentence, 120) if first_sentence else f"Conflicting findings between {ta[:40]} and {tb[:40]}"
@@ -1173,8 +1264,23 @@ def insight_feed(req: InsightRequest):
                 })
                 break
 
-    # Sort newest first
+    # Order the feed by signal priority, newest-first within each type.
+    # Contradictions are the highest-value signal and must never be buried by a
+    # large volume of lower-signal nuance/gap insights — otherwise a limit-
+    # capped consumer (e.g. the dashboard's top-contradiction card) misses them.
+    #
+    # Two stable sorts: first by recency (newest first), then by type priority.
+    # Python's sort is stable, so the recency order is preserved within each
+    # priority group.
+    _TYPE_PRIORITY = {
+        "contradiction": 0,
+        "consensus": 1,
+        "hypothesis": 2,
+        "gap": 3,
+        "new_paper": 4,
+    }
     insights.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    insights.sort(key=lambda x: _TYPE_PRIORITY.get(x.get("type", ""), 9))
 
     # ── Cache write ───────────────────────────────────────────
     _insight_cache["payload"] = insights

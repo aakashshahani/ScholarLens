@@ -81,42 +81,43 @@ export default function ContradictionsPage() {
 
   useEffect(() => {
     api.listPapers(50).then(setPapers);
-    api.health().then((h) => {
-      const fingerprint = (h as any).library_fingerprint || "default";
-      try {
-        const cached = cache.read<ContradictionResult[]>("contradictions");
-        const cachedFingerprint = localStorage.getItem("sl_contradictions_fp");
-        if (cached && Array.isArray(cached) && cached.length > 0) {
-          setResults(cached);
-          const firstReal = cached.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
-          if (firstReal) setSelected(firstReal);
-          // Show warning banner if library changed, but keep results visible
-          if (cachedFingerprint !== fingerprint) {
-            setLibraryChanged(true);
-          }
-        } else {
+
+    // Fast first paint from localStorage if present, then replace with the
+    // full persisted set from the backend so the conflict map always shows
+    // ALL accumulated relationships — consistent with the dashboard count,
+    // not just the last scan's slice.
+    const cached = cache.read<ContradictionResult[]>("contradictions");
+    if (cached && Array.isArray(cached) && cached.length > 0) {
+      setResults(cached);
+      const firstReal = cached.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
+      if (firstReal) setSelected(firstReal);
+    }
+
+    // Source of truth: the full relationship table (pure DB read, zero LLM).
+    api.listContradictions()
+      .then((full) => {
+        if (Array.isArray(full) && full.length > 0) {
+          setResults(full);
+          cache.write("contradictions", full);
+          setSelected((prev) => prev || full.find(
+            (r) => r.relationship !== "unrelated" && r.relationship !== "error"
+          ) || null);
+          setShowConfig(false);
+        } else if (!cached || cached.length === 0) {
+          // Nothing persisted and nothing cached → first-run config prompt.
           setShowConfig(true);
         }
-      } catch {
-        cache.clear("contradictions");
-        localStorage.removeItem("sl_contradictions_fp");
-        setShowConfig(true);
-      }
-    }).catch(() => {
-      try {
-        const cached = cache.read<ContradictionResult[]>("contradictions");
-        if (cached && Array.isArray(cached) && cached.length > 0) {
-          setResults(cached);
-          const firstReal = cached.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
-          if (firstReal) setSelected(firstReal);
-        } else {
-          setShowConfig(true);
-        }
-      } catch {
-        cache.clear("contradictions");
-        setShowConfig(true);
-      }
-    });
+        // Keep the library-changed fingerprint check for the warning banner.
+        api.health().then((h) => {
+          const fingerprint = (h as any).library_fingerprint || "default";
+          const cachedFingerprint = localStorage.getItem("sl_contradictions_fp");
+          if (cachedFingerprint && cachedFingerprint !== fingerprint) setLibraryChanged(true);
+        }).catch(() => {});
+      })
+      .catch(() => {
+        // Backend unreachable: fall back to whatever was cached; prompt if empty.
+        if (!cached || cached.length === 0) setShowConfig(true);
+      });
   }, []);
 
   const p = PRESETS[preset];
@@ -128,19 +129,22 @@ export default function ContradictionsPage() {
     let si = 0; setStage(stages[0]);
     const ticker = setInterval(() => { si = Math.min(si + 1, stages.length - 1); setStage(stages[si]); }, 3000);
     try {
-      const res = await api.runContradictions({
+      await api.runContradictions({
         paperIds: selectedIds.length ? selectedIds : undefined,
         similarityThreshold: p.threshold,
         maxPairs: p.maxPairs,
       });
-      setResults(res);
-      cache.write("contradictions", res);
+      // The scan appended/updated rows. Reload the FULL persisted set so the
+      // view shows everything accumulated, not just this run's slice.
+      const full = await api.listContradictions();
+      setResults(full);
+      cache.write("contradictions", full);
       api.health().then((h) => {
         const fp = (h as any).library_fingerprint || "default";
         localStorage.setItem("sl_contradictions_fp", fp);
       }).catch(() => {});
       setShowConfig(false);
-      const firstReal = res.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
+      const firstReal = full.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
       if (firstReal) setSelected(firstReal);
     } catch (e: any) { setError(e.message); }
     clearInterval(ticker); setLoading(false);

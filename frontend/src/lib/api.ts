@@ -211,6 +211,9 @@ export const api = {
       body: JSON.stringify({ question, paper_id: paperId || null }),
     }),
 
+  listContradictions: () =>
+    apiFetch<ContradictionResult[]>("/api/contradictions"),
+
   runContradictions: (opts?: { paperIds?: string[]; similarityThreshold?: number; maxPairs?: number }) =>
     apiFetch<ContradictionResult[]>("/api/contradictions", {
       method: "POST",

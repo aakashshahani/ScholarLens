@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
-  LayoutDashboard, Library, Network, Zap, FlaskConical, Radio, Radar, Plus, Search, CornerDownLeft,
+  LayoutDashboard, Library, Network, Zap, FlaskConical, Radar, Plus, Search, CornerDownLeft,
 } from "lucide-react";
 
 interface Cmd {
@@ -21,7 +21,6 @@ const COMMANDS: Cmd[] = [
   { id: "graph", label: "Open Knowledge Graph", hint: "Claim field", icon: Network, action: (r) => r.push("/graph"), keywords: "map network nodes" },
   { id: "contra", label: "Run Contradiction Scan", hint: "Conflict map", icon: Zap, action: (r) => r.push("/contradictions"), keywords: "conflict tension" },
   { id: "hypo", label: "Generate Hypotheses", hint: "Generative bench", icon: FlaskConical, action: (r) => r.push("/hypotheses"), keywords: "ideas research questions" },
-  { id: "feed", label: "Open Insight Feed", hint: "Research wire", icon: Radio, action: (r) => r.push("/feed"), keywords: "news activity" },
   { id: "monitor", label: "Open Research Monitor", hint: "Watch the literature", icon: Radar, action: (r) => r.push("/monitor"), keywords: "arxiv alerts new papers" },
   { id: "add", label: "Add Papers", hint: "Upload or import", icon: Plus, action: (r) => r.push("/add-papers"), keywords: "upload import arxiv pdf" },
 ];

@@ -23,8 +23,8 @@ import Link from "next/link";
 import { api, HealthStatus, Paper, Insight, Hypothesis, GraphPayload } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import {
-  FileStack, CheckCircle2, Zap, Link2, TrendingUp, ArrowRight, ArrowUpRight,
-  Sparkles, FlaskConical, Upload, AlertTriangle, Network, Lightbulb,
+  FileStack, CheckCircle2, Link2, TrendingUp, ArrowRight, ArrowUpRight,
+  Sparkles, FlaskConical, Upload, AlertTriangle, Network,
 } from "lucide-react";
 
 const API = "http://localhost:8000";
@@ -122,9 +122,9 @@ export default function Dashboard() {
   const crossLinks         = relCounts
     ? relCounts.contradiction + relCounts.support + relCounts.nuance : 0;
 
-  // Dedup so one dominant paper doesn't headline every cell. We track which
-  // papers have already been "spent" on the spotlight cells, then build the
-  // highlights list from insights whose papers haven't all been shown yet.
+  // Dedup so one dominant paper doesn't headline every spotlight cell. We track
+  // which papers have already been "spent" so the gap cell picks a different
+  // paper than the top-contradiction cell where possible.
   const usedPaperTitles = new Set<string>();
   if (topContra) { usedPaperTitles.add(topContra.paper_a); usedPaperTitles.add(topContra.paper_b); }
 
@@ -132,24 +132,6 @@ export default function Dashboard() {
     (i) => i.type === "gap" && !(i.papers || []).some((t) => usedPaperTitles.has(t))
   ) || insights.find((i) => i.type === "gap") || null;
   if (gapInsight) (gapInsight.papers || []).forEach((t) => usedPaperTitles.add(t));
-
-  // Highlights: prefer insights about not-yet-shown papers, dedup by paper,
-  // and never repeat the same headline.
-  const seenHighlightPapers = new Set<string>();
-  const seenHeadlines = new Set<string>();
-  const highlights = insights
-    .filter((i) => i.type !== "new_paper")
-    .map((i) => ({ ...i, headline: cleanHeadline(i.headline) }))
-    .filter((i) => {
-      const key = i.headline.toLowerCase().slice(0, 60);
-      if (seenHeadlines.has(key)) return false;
-      const primaryPaper = i.papers?.[0] || "";
-      if (primaryPaper && seenHighlightPapers.has(primaryPaper)) return false;
-      seenHeadlines.add(key);
-      if (primaryPaper) seenHighlightPapers.add(primaryPaper);
-      return true;
-    })
-    .slice(0, 4);
 
   if (error) return (
     <div className="bg-[var(--contra-dim)] border border-[var(--contra-line)] rounded-[var(--r-lg)] p-5">
@@ -246,7 +228,7 @@ export default function Dashboard() {
                 <p className="text-[12.5px] text-[var(--text-2)] leading-snug clamp-4">
                   {cleanHeadline(gapInsight.headline)}
                 </p>
-                <Link href="/feed" className="cardlink">
+                <Link href="/contradictions" className="cardlink">
                   Explore gaps <ArrowRight size={12} />
                 </Link>
               </>
@@ -292,80 +274,32 @@ export default function Dashboard() {
           </SpotlightCard>
         </div>
 
-        {/* ── Two-column: highlights + recent papers ─────── */}
-        <div className="grid grid-cols-[1fr_360px] gap-4 mb-5">
-
-          {/* Research highlights */}
-          <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-5">
-            <div className="flex items-end justify-between mb-4">
-              <div>
-                <h2 className="font-display text-[16px] text-[var(--text-1)]">Research highlights</h2>
-                <p className="text-[11.5px] text-[var(--text-3)] mt-0.5">Drawn from the analyzed claims in your library.</p>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              {highlights.length ? highlights.map((h, idx) => {
-                const meta = HIGHLIGHT_META[h.type] || HIGHLIGHT_META.gap;
-                return (
-                  <div key={h.id}
-                    className="group flex items-start gap-3 p-3 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-1)] hover:border-[var(--line-2)] t-all"
-                    style={{ animationDelay: `${idx * 60}ms` }}>
-                    <span className="w-8 h-8 rounded-[var(--r-md)] flex items-center justify-center shrink-0"
-                      style={{ background: meta.bg, color: meta.color }}>
-                      {meta.icon}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[12.5px] text-[var(--text-1)] font-medium leading-snug mb-0.5 clamp-2">
-                        {h.headline}
-                      </p>
-                      {h.papers?.length > 0 && (
-                        <p className="text-[10.5px] text-[var(--text-4)] clamp-1">{h.papers.join(" · ")}</p>
-                      )}
-                    </div>
-                    <Link href="/feed"
-                      className="text-[11px] text-[var(--gen)] font-medium opacity-0 group-hover:opacity-100 t-all shrink-0 self-center">
-                      View →
-                    </Link>
-                  </div>
-                );
-              }) : (
-                <p className="text-[12.5px] text-[var(--text-3)] py-8 text-center">
-                  Add papers and run a scan to surface highlights.
-                </p>
-              )}
-            </div>
-
-            {highlights.length > 0 && (
-              <Link href="/feed"
-                className="flex items-center justify-center gap-1.5 mt-4 py-2.5 rounded-[var(--r-md)] border border-[var(--line-2)] text-[12px] text-[var(--text-2)] hover:border-[var(--line-3)] hover:text-[var(--text-1)] t-all">
-                View all highlights <ArrowRight size={12} />
-              </Link>
-            )}
-          </div>
-
-          {/* Recent papers */}
-          <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-5">
-            <div className="flex items-center justify-between mb-4">
+        {/* ── Recent papers (full width) ─────────────────── */}
+        <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-5 mb-5">
+          <div className="flex items-center justify-between mb-4">
+            <div>
               <h2 className="font-display text-[16px] text-[var(--text-1)]">Recent papers</h2>
-              <Link href="/library" className="text-[11.5px] text-[var(--gen)] font-medium hover:underline flex items-center gap-1">
-                View all <ArrowUpRight size={11} />
+              <p className="text-[11.5px] text-[var(--text-3)] mt-0.5">Jump back into your most recently added work.</p>
+            </div>
+            <Link href="/library" className="text-[11.5px] text-[var(--gen)] font-medium hover:underline flex items-center gap-1">
+              View all <ArrowUpRight size={11} />
+            </Link>
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {papers.slice(0, 4).map((p, i) => (
+              <Link key={p.id} href={`/paper/${p.id}`}
+                className="block p-3.5 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-1)] hover:border-[var(--line-2)] hover:bg-[var(--surface-3)] t-all border-l-[2.5px] h-full"
+                style={{ borderLeftColor: PAPER_ACCENTS[i % PAPER_ACCENTS.length] }}>
+                <p className="text-[12.5px] text-[var(--text-1)] font-medium leading-snug mb-2 clamp-3">{p.title}</p>
+                <p className="text-[10.5px] text-[var(--text-4)]">
+                  {(p.authors || []).slice(0, 2).join(", ")}
+                  {p.year ? ` · ${p.year}` : ""}
+                </p>
+                <p className="text-[10.5px] text-[var(--text-4)] mt-0.5">
+                  {p.analysis_types?.length || 0}/6 analyses
+                </p>
               </Link>
-            </div>
-            <div className="space-y-2">
-              {papers.slice(0, 4).map((p, i) => (
-                <Link key={p.id} href={`/paper/${p.id}`}
-                  className="block p-3 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-1)] hover:border-[var(--line-2)] t-all border-l-[2.5px]"
-                  style={{ borderLeftColor: PAPER_ACCENTS[i % PAPER_ACCENTS.length] }}>
-                  <p className="text-[12.5px] text-[var(--text-1)] font-medium leading-snug mb-1 clamp-2">{p.title}</p>
-                  <p className="text-[10.5px] text-[var(--text-4)]">
-                    {(p.authors || []).slice(0, 2).join(", ")}
-                    {p.year ? ` · ${p.year}` : ""}
-                    {" · "}{p.analysis_types?.length || 0}/6 analyses
-                  </p>
-                </Link>
-              ))}
-            </div>
+            ))}
           </div>
         </div>
 
@@ -386,14 +320,6 @@ export default function Dashboard() {
     </div>
   );
 }
-
-// ── Highlight meta ────────────────────────────────────────────
-const HIGHLIGHT_META: Record<string, { icon: React.ReactNode; color: string; bg: string }> = {
-  contradiction: { icon: <Zap size={14} />,         color: "var(--contra)",  bg: "var(--contra-dim)"  },
-  consensus:     { icon: <CheckCircle2 size={14} />, color: "var(--support)", bg: "var(--support-dim)" },
-  gap:           { icon: <Lightbulb size={14} />,    color: "var(--nuance)",  bg: "var(--nuance-dim)"  },
-  hypothesis:    { icon: <FlaskConical size={14} />, color: "var(--gen)",     bg: "var(--gen-dim)"     },
-};
 
 // ── StatCard ──────────────────────────────────────────────────
 function StatCard({ icon, value, label, color, ring, suffix = "", sub, delay = 0 }: {
