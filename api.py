@@ -865,14 +865,14 @@ def monitor_scan(req: MonitorRequest):
         for t in req.topics
     ]
 
-    results = monitor.run_full_scan(
+    results, email_sent, email_error, sources_failed = monitor.run_full_scan(
         topics=topics,
         recipient=req.email,
         max_per_source=req.max_per_source,
         relevance_threshold=req.relevance_threshold,
     )
 
-    return [
+    digests = [
         {
             "topic": r.topic,
             "papers_found": r.papers_found,
@@ -897,6 +897,17 @@ def monitor_scan(req: MonitorRequest):
         }
         for r in results
     ]
+
+    # Wrap digests with truthful email status so the UI never claims a send
+    # that didn't actually happen. email_requested lets the UI distinguish
+    # "no email entered" from "email entered but failed".
+    return {
+        "digests": digests,
+        "email_requested": bool(req.email),
+        "email_sent": email_sent,
+        "email_error": email_error,
+        "sources_failed": sources_failed,
+    }
 
 
 # ── Knowledge Graph ──────────────────────────────────────────

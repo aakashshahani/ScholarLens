@@ -98,6 +98,14 @@ export interface MonitorDigest {
   }[];
 }
 
+export interface MonitorScanResponse {
+  digests: MonitorDigest[];
+  email_requested: boolean;
+  email_sent: boolean;
+  email_error: string | null;
+  sources_failed: string[];
+}
+
 export interface HealthStatus {
   status: "ok" | "degraded";
   errors: string[];
@@ -266,7 +274,7 @@ export const api = {
     relevanceThreshold?: number;
     maxPerSource?: number;
   }) =>
-    apiFetch<MonitorDigest[]>("/api/monitor/scan", {
+    apiFetch<MonitorScanResponse>("/api/monitor/scan", {
       method: "POST",
       body: JSON.stringify({
         topics: opts.topics,

@@ -30,9 +30,12 @@ def _make_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
         total=3,
-        backoff_factor=2,       # waits 2s, 4s, 8s
-        status_forcelist=[429, 500, 502, 503],
+        connect=3,              # retry on connection failures
+        read=3,                 # retry on read timeouts (the arXiv failure mode)
+        backoff_factor=2,       # waits 2s, 4s, 8s between attempts
+        status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
+        raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("http://", adapter)
@@ -60,6 +63,9 @@ def _wait(source: str, seconds: float = 3.0):
 
 
 # ── Data Model ───────────────────────────────────────────────
+
+class SourceUnavailable(Exception):
+    """Raised when an external source fails after retries (e.g. timeout)."""
 
 @dataclass
 class ImportResult:
@@ -89,11 +95,11 @@ class ArxivSource:
                 "max_results": max_results,
                 "sortBy": "relevance",
                 "sortOrder": "descending",
-            }, timeout=15)
+            }, timeout=30)
             resp.raise_for_status()
         except Exception as e:
             print(f"arXiv search failed: {e}")
-            return []
+            raise SourceUnavailable(str(e)) from e
         return self._parse(resp.text)
 
     def fetch_by_id(self, arxiv_id: str) -> ImportResult | None:
@@ -197,7 +203,7 @@ class SemanticScholarSource:
             data = resp.json()
         except Exception as e:
             print(f"Semantic Scholar search failed: {e}")
-            return []
+            raise SourceUnavailable(str(e)) from e
 
         return [self._to_result(p) for p in data.get("data", []) if p.get("title")]
 
@@ -259,24 +265,55 @@ class PaperImporter:
         self.arxiv = ArxivSource()
         self.s2 = SemanticScholarSource()
 
+    # Friendly names for surfacing failures to the user.
+    SOURCE_LABELS = {"arxiv": "arXiv", "semantic_scholar": "Semantic Scholar"}
+
     def search(
         self,
         query: str,
         sources: list[str] | None = None,
         max_per_source: int = 5,
     ) -> list[ImportResult]:
+        """Back-compat: returns just the deduped results (drops status)."""
+        results, _failed = self.search_with_status(query, sources, max_per_source)
+        return results
+
+    def search_with_status(
+        self,
+        query: str,
+        sources: list[str] | None = None,
+        max_per_source: int = 5,
+    ) -> tuple[list[ImportResult], list[str]]:
+        """
+        Search across sources and report which sources failed.
+
+        Returns (deduped_results, failed_source_labels). A source that raises
+        (e.g. arXiv read-timeout after retries) is recorded as failed so the
+        caller can tell the user a source was unavailable rather than silently
+        returning a thinner result set. An empty-but-successful source is NOT
+        a failure.
+        """
         if sources is None:
             sources = ["arxiv", "semantic_scholar"]
 
         cache_key = f"{query}|{'_'.join(sorted(sources))}|{max_per_source}"
         if cache_key in _cache:
-            return _cache[cache_key]
+            return _cache[cache_key], []
 
-        all_results = []
+        all_results: list[ImportResult] = []
+        failed: list[str] = []
+
         if "arxiv" in sources:
-            all_results.extend(self.arxiv.search(query, max_per_source))
+            try:
+                all_results.extend(self.arxiv.search(query, max_per_source))
+            except SourceUnavailable:
+                failed.append(self.SOURCE_LABELS["arxiv"])
+
         if "semantic_scholar" in sources:
-            all_results.extend(self.s2.search(query, max_per_source))
+            try:
+                all_results.extend(self.s2.search(query, max_per_source))
+            except SourceUnavailable:
+                failed.append(self.SOURCE_LABELS["semantic_scholar"])
 
         # Deduplicate by title
         seen = set()
@@ -287,8 +324,11 @@ class PaperImporter:
                 seen.add(key)
                 deduped.append(r)
 
-        _cache[cache_key] = deduped
-        return deduped
+        # Only cache a fully-successful scan; a partial failure shouldn't be
+        # cached as if it were the complete result for this query.
+        if not failed:
+            _cache[cache_key] = deduped
+        return deduped, failed
 
     def lookup(self, identifier: str) -> ImportResult | None:
         identifier = identifier.strip()
@@ -300,7 +340,10 @@ class PaperImporter:
             doi = re.sub(r"^https?://doi\.org/", "", identifier)
             return self.s2.fetch_by_doi(doi)
 
-        results = self.s2.search(identifier, max_results=1)
+        try:
+            results = self.s2.search(identifier, max_results=1)
+        except SourceUnavailable:
+            return None
         return results[0] if results else None
 
     def download_pdf(self, result: ImportResult) -> Path | None:

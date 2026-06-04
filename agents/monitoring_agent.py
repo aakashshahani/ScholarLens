@@ -59,6 +59,7 @@ class MonitoringAgent:
         self.db = Database()
         self.vector_store = VectorStore()
         self.importer = PaperImporter()
+        self._failed_sources: set[str] = set()
 
         # Configure Resend
         resend_key = os.getenv("RESEND_API_KEY", "")
@@ -79,11 +80,27 @@ class MonitoringAgent:
         3. Score relevance against library embeddings
         4. Return scored results
         """
-        # Search for papers
+        # Search for papers. Use the status-aware variant so we can report
+        # which external sources were unavailable rather than silently
+        # returning a thinner set.
         all_results = []
         for kw in topic.keywords:
-            results = self.importer.search(kw, sources=topic.sources, max_per_source=max_per_source)
+            # Sanitise: collapse whitespace, strip chars that break API
+            # query strings. Keeps alphanumerics, spaces, hyphens.
+            # Catches sloppy-typing failure mode, no spell library needed.
+            kw = " ".join(
+                ch if (ch.isalnum() or ch in "-_") else " "
+                for ch in kw
+            )
+            kw = " ".join(kw.split())  # collapse whitespace
+            if not kw:
+                continue
+            results, failed = self.importer.search_with_status(
+                kw, sources=topic.sources, max_per_source=max_per_source
+            )
             all_results.extend(results)
+            for label in failed:
+                self._failed_sources.add(label)
             time.sleep(2)  # Rate limit between keyword searches
 
         # Deduplicate
@@ -267,9 +284,10 @@ class MonitoringAgent:
         </div>
         """
 
+        from_addr = os.getenv("RESEND_FROM", "ScholarLens <onboarding@resend.dev>")
         try:
             response = resend.Emails.send({
-                "from": "ScholarLens <onboarding@resend.dev>",
+                "from": from_addr,
                 "to": [recipient],
                 "subject": f"ScholarLens: {total_papers} new paper{'s' if total_papers != 1 else ''} in {topics}",
                 "html": html,
@@ -286,13 +304,19 @@ class MonitoringAgent:
         recipient: str | None = None,
         max_per_source: int = 5,
         relevance_threshold: float = 0.3,
-    ) -> list[DigestResult]:
+    ) -> tuple[list[DigestResult], bool, str | None, list[str]]:
         """
         Full monitoring pipeline:
         1. Scan all topics
         2. Generate summary
         3. Send email digest (if recipient provided)
+
+        Returns (results, email_sent, email_error). email_sent is True only when
+        an email was actually delivered; email_error carries a short reason when
+        a requested send failed (e.g. no API key, or unverified-domain sandbox
+        limits) so the UI never claims a send that didn't happen.
         """
+        self._failed_sources: set[str] = set()
         results = []
         for topic in topics:
             result = self.scan_topic(topic, max_per_source, relevance_threshold)
@@ -304,8 +328,25 @@ class MonitoringAgent:
         else:
             summary = "No new relevant papers found in today's scan."
 
-        # Send email if configured
+        # Send email if configured, and report what actually happened.
+        email_sent = False
+        email_error: str | None = None
         if recipient:
-            self.send_digest_email(recipient, results, summary)
+            if not os.getenv("RESEND_API_KEY"):
+                email_error = "Email is not configured on the server."
+            else:
+                try:
+                    email_sent = self.send_digest_email(recipient, results, summary)
+                    if not email_sent:
+                        # send_digest_email returned False — most commonly the
+                        # Resend sandbox rejecting a non-owner recipient because
+                        # no sending domain is verified.
+                        email_error = (
+                            "Couldn't deliver. The demo uses a sandbox sender that "
+                            "only emails the account owner; verify a sending domain "
+                            "to email anyone."
+                        )
+                except Exception as e:  # noqa: BLE001
+                    email_error = f"Email failed: {e}"
 
-        return results
+        return results, email_sent, email_error, sorted(self._failed_sources)
