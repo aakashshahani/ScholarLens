@@ -27,8 +27,6 @@ import {
   Sparkles, FlaskConical, Upload, AlertTriangle, Network,
 } from "lucide-react";
 
-const API = "http://localhost:8000";
-
 interface RelCounts { contradiction: number; support: number; nuance: number; unrelated: number; }
 interface TopContra { explanation: string; paper_a: string; paper_b: string; }
 
@@ -74,8 +72,7 @@ export default function Dashboard() {
     api.listPapers(50).then(setPapers).catch(() => {});
     api.insights({ limit: 8 }).then(setInsights).catch(() => {});
 
-    fetch(`${API}/api/contradictions/count`)
-      .then((r) => r.json())
+    api.contradictionCount()
       .then((d) => setRelCounts(d.counts || null))
       .catch(() => {});
 

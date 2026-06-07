@@ -15,13 +15,29 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import json
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Query
+import os
+import re
+import uuid
+import secrets
+
+from fastapi import (
+    FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Query,
+    Request, Header, Depends, Response,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, EmailStr
 from typing import Optional
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from config import settings, UPLOAD_DIR
 from db import Database, Paper
+from db.database import User
+import auth as authlib
 from agents import (
     PDFAnalysisAgent,
     ContradictionAgent,
@@ -42,17 +58,69 @@ app = FastAPI(
     redoc_url="/api/redoc",
 )
 
-# Allow Next.js frontend (localhost:3000) to call the API
+# ── Rate limiting ────────────────────────────────────────────
+# Per-IP, keyed on the remote address. Storage is in-memory by default
+# (correct for a single instance); set RATE_LIMIT_STORAGE_URI=redis://...
+# in settings to share counters across instances. The global default is a
+# coarse backstop — the meaningful limits are per-endpoint decorators below.
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=[settings.rl_default],
+    storage_uri=settings.rate_limit_storage_uri,
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Middleware order note: add_middleware prepends, so the LAST added runs
+# outermost. SlowAPI is added first and CORS last, so CORS wraps SlowAPI and
+# preflight OPTIONS requests get CORS headers without being rate-limited.
+app.add_middleware(SlowAPIMiddleware)
+
+# Allowed origins: localhost for dev, plus the deployed frontend from env.
+# allow_credentials=True forbids the "*" wildcard, so origins stay explicit.
+_allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+if settings.frontend_origin:
+    _allowed_origins.append(settings.frontend_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Generic error handler ────────────────────────────────────
+# Unhandled exceptions return a clean message instead of leaking internals
+# (stack traces, file paths) to the client. HTTPException and RateLimitExceeded
+# have their own more-specific handlers and are unaffected.
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    print(f"[unhandled] {request.method} {request.url.path}: {type(exc).__name__}: {exc}")
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
+# ── Admin gate ───────────────────────────────────────────────
+# Guards expensive maintenance endpoints. When ADMIN_TOKEN is unset the gate
+# fails closed (403) — so these are dead in prod unless deliberately enabled.
+def require_admin(x_admin_token: Optional[str] = Header(default=None)):
+    expected = settings.admin_token
+    if not expected or not x_admin_token or not secrets.compare_digest(x_admin_token, expected):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return True
+
+
+# ── Upload helpers ───────────────────────────────────────────
+def _safe_display_name(name: Optional[str]) -> str:
+    """Sanitize a client-supplied filename for DISPLAY/storage only — never for
+    the on-disk path. Strips any directory components and disallowed chars."""
+    if not name:
+        return "upload.pdf"
+    base = os.path.basename(name.replace("\\", "/"))
+    base = re.sub(r"[^A-Za-z0-9._ -]", "_", base).strip()
+    base = base[:120]
+    return base or "upload.pdf"
 
 # ── Services (initialized once at startup) ───────────────────
 
@@ -75,41 +143,40 @@ import time as _time
 
 _INSIGHT_CACHE_TTL = 2 * 60 * 60  # 2 hours in seconds
 
-_insight_cache: dict = {
-    "payload": None,       # list[dict] — the last assembled insight list
-    "ts": 0.0,             # unix timestamp of last population
-}
+# Per-user insight cache: user_id -> {"payload": list, "ts": float}. Keyed by
+# user so one account's feed is never served to another.
+_insight_cache: dict[str, dict] = {}
 
 
 def _invalidate_insight_cache():
-    """Call this any time the library changes so the feed reflects it immediately."""
-    _insight_cache["payload"] = None
-    _insight_cache["ts"] = 0.0
+    """Call this any time the library changes so the feed reflects it
+    immediately. Clears every user's entry (cheap to rebuild)."""
+    _insight_cache.clear()
 
 
 # ── Request/Response Models ──────────────────────────────────
 
 class SearchRequest(BaseModel):
-    query: str
-    n_results: int = 10
+    query: str = Field(..., min_length=1, max_length=settings.max_query_len)
+    n_results: int = Field(10, ge=1, le=50)
     paper_id: Optional[str] = None
 
 
 class AskRequest(BaseModel):
-    question: str
+    question: str = Field(..., min_length=1, max_length=settings.max_query_len)
     paper_id: Optional[str] = None
 
 
 class ContradictionRequest(BaseModel):
     paper_ids: Optional[list[str]] = None
-    similarity_threshold: float = 0.5
-    max_pairs: int = 15
+    similarity_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    max_pairs: int = Field(15, ge=1, le=50)
 
 
 class HypothesisRequest(BaseModel):
-    research_question: Optional[str] = None
+    research_question: Optional[str] = Field(None, max_length=settings.max_query_len)
     paper_ids: Optional[list[str]] = None
-    num_hypotheses: int = 5
+    num_hypotheses: int = Field(5, ge=1, le=10)
     # Pass refresh=true to bypass the output cache and force regeneration.
     # Useful when you've added papers or run a new contradiction scan and
     # want hypotheses that reflect the updated conflict set immediately
@@ -119,13 +186,13 @@ class HypothesisRequest(BaseModel):
 
 
 class ImportSearchRequest(BaseModel):
-    query: str
+    query: str = Field(..., min_length=1, max_length=500)
     sources: list[str] = ["arxiv", "semantic_scholar"]
-    max_per_source: int = 5
+    max_per_source: int = Field(5, ge=1, le=20)
 
 
 class ImportAddRequest(BaseModel):
-    title: str
+    title: str = Field(..., min_length=1, max_length=1000)
     authors: list[str]
     abstract: str
     year: Optional[int] = None
@@ -137,37 +204,245 @@ class ImportAddRequest(BaseModel):
 
 
 class ImportLookupRequest(BaseModel):
-    identifier: str  # arXiv ID, DOI, or URL
+    identifier: str = Field(..., min_length=1, max_length=500)  # arXiv ID, DOI, or URL
 
 
 class MonitorRequest(BaseModel):
     topics: list[dict]  # [{name, keywords, sources}]
     email: Optional[str] = None
-    relevance_threshold: float = 0.3
-    max_per_source: int = 5
+    relevance_threshold: float = Field(0.3, ge=0.0, le=1.0)
+    max_per_source: int = Field(5, ge=1, le=20)
 
 
 # ── Background task helper ───────────────────────────────────
 
-def _analyze_paper_bg(paper_id: str):
-    """Background task for paper analysis."""
+def _analyze_paper_bg(paper_id: str, api_key: str | None = None, model: str | None = None):
+    """Background task for paper analysis. Runs on the caller's BYOK key when
+    provided, else the server key; `model` is the resolved, tier-capped model."""
     try:
-        agent.analyze_paper(paper_id)
+        agent.analyze_paper(paper_id, api_key=api_key, model=model)
     except Exception as e:
         print(f"Background analysis failed for {paper_id}: {e}")
 
 
-def _extract_claims_bg(paper_id: str, force: bool = False):
-    """Background task: extract grounded claims for a single paper."""
+# ── Auth & Settings (BYOK) ───────────────────────────────────
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=200)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=1, max_length=200)
+
+
+class SettingsUpdateRequest(BaseModel):
+    # All optional — only provided fields change. For api_key and digest_email,
+    # an empty string "" means "clear it"; omitting the field means "leave it".
+    model: Optional[str] = Field(None, max_length=80)
+    digest_email: Optional[str] = Field(None, max_length=320)
+    library_name: Optional[str] = Field(None, max_length=120)
+    api_key: Optional[str] = Field(None, max_length=200)
+
+
+class TestKeyRequest(BaseModel):
+    # If omitted, the stored key is tested instead.
+    api_key: Optional[str] = Field(None, max_length=200)
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=settings.session_cookie_name,
+        value=token,
+        httponly=True,                      # JS can't read it
+        secure=settings.cookie_secure,      # https-only in prod (env-toggled)
+        samesite=settings.cookie_samesite,  # "lax" — blocks cross-site CSRF
+        max_age=settings.session_ttl_days * 24 * 3600,
+        path="/",
+    )
+
+
+def _public_user(user: User) -> dict:
+    """User shape safe to return to the client — never the password hash or
+    the encrypted/decrypted API key. has_api_key is a boolean only."""
+    return {
+        "id": user.id,
+        "email": user.email,
+        "model": user.model,
+        "digest_email": user.digest_email,
+        "library_name": user.library_name,
+        "has_api_key": bool(user.api_key_encrypted),
+        "free_actions_used": user.free_actions_used,
+        "free_action_limit": settings.free_action_limit,
+        "free_sonnet_used": user.free_sonnet_used,
+        "free_sonnet_limit": settings.free_sonnet_limit,
+    }
+
+
+def _resolve_model_and_meter(user: User) -> str:
+    """Resolve the model for this request and enforce the free-tier limits on
+    the SERVER key (BYOK is uncapped):
+      • a total of free_action_limit actions (Haiku + Sonnet combined), then 402
+      • of those, at most free_sonnet_limit may be Sonnet, then 402 (Haiku stays
+        available until the total is reached)
+    The 402 is raised BEFORE any LLM call, so hitting a limit costs no tokens.
+    Opus on the server key was already floored to Haiku by resolve_user_model."""
+    model = authlib.resolve_user_model(user)
+    if authlib.user_has_own_key(user):
+        return model
+    if user.free_actions_used >= settings.free_action_limit:
+        raise HTTPException(
+            status_code=402,
+            detail=(f"Free limit reached ({settings.free_action_limit} actions). "
+                    "Add your own Anthropic API key in Settings to keep going."),
+        )
+    is_sonnet = authlib.model_tier(model) == "sonnet"
+    if is_sonnet and user.free_sonnet_used >= settings.free_sonnet_limit:
+        raise HTTPException(
+            status_code=402,
+            detail=(f"Free Sonnet limit reached ({settings.free_sonnet_limit}). "
+                    "Add your own Anthropic API key for more — Haiku stays available."),
+        )
+    db.increment_usage(user.id, is_sonnet)
+    return model
+
+
+def _require_owned_paper(paper_id: str, user: User) -> Paper:
+    """Fetch a paper and enforce ownership. Returns 404 (not 403) on a missing
+    paper OR one owned by someone else, so the API never reveals that a given
+    paper id exists in another user's library."""
+    paper = db.get_paper(paper_id)
+    if not paper or paper.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    return paper
+
+
+def _owned_ids(user: User) -> list[str]:
+    return db.list_paper_ids_for_user(user.id)
+
+
+def _scope_ids(user: User, requested: list[str] | None) -> list[str]:
+    """Effective paper scope for an aggregate request: the user's papers,
+    narrowed to any requested subset. Empty means 'nothing accessible' — and
+    callers MUST short-circuit on empty rather than pass it down, since the
+    agents treat a falsy paper_ids as 'the whole library'."""
+    owned = _owned_ids(user)
+    if not requested:
+        return owned
+    owned_set = set(owned)
+    return [pid for pid in requested if pid in owned_set]
+
+
+@app.post("/api/auth/register")
+@limiter.limit(settings.rl_register)
+def register(request: Request, response: Response, req: RegisterRequest):
+    email = req.email.lower().strip()
+    if db.get_user_by_email(email):
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    user = db.create_user(email, authlib.hash_password(req.password))
+    # The very first account adopts any pre-auth (unowned) papers, so existing
+    # test data isn't stranded once scoping turns on. Fires exactly once.
+    if db.count_users() == 1:
+        db.adopt_orphan_papers(user.id)
+    token = authlib.new_session_token()
+    db.create_session(user.id, token, authlib.session_expiry_iso())
+    _set_session_cookie(response, token)
+    return _public_user(user)
+
+
+@app.post("/api/auth/login")
+@limiter.limit(settings.rl_login)
+def login(request: Request, response: Response, req: LoginRequest):
+    email = req.email.lower().strip()
+    user = db.get_user_by_email(email)
+    # Same error whether the email is unknown or the password is wrong — don't
+    # leak which emails have accounts.
+    if not user or not authlib.verify_password(req.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    token = authlib.new_session_token()  # fresh token on every login (rotation)
+    db.create_session(user.id, token, authlib.session_expiry_iso())
+    _set_session_cookie(response, token)
+    return _public_user(user)
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response):
+    token = request.cookies.get(settings.session_cookie_name)
+    if token:
+        db.delete_session(token)
+    response.delete_cookie(settings.session_cookie_name, path="/")
+    return {"status": "logged_out"}
+
+
+@app.post("/api/auth/logout-all")
+def logout_all(response: Response, user: User = Depends(authlib.get_current_user)):
+    """Invalidate every session for this user (e.g. after a suspected leak)."""
+    db.delete_sessions_for_user(user.id)
+    response.delete_cookie(settings.session_cookie_name, path="/")
+    return {"status": "all_sessions_revoked"}
+
+
+@app.get("/api/auth/me")
+def auth_me(user: User = Depends(authlib.get_current_user)):
+    return _public_user(user)
+
+
+@app.get("/api/settings")
+def get_settings(user: User = Depends(authlib.get_current_user)):
+    data = _public_user(user)
+    # Show only a masked placeholder when a key is stored — never decrypt for
+    # display, so the plaintext key is never sent back to the client.
+    data["api_key_masked"] = "••••••••••••" if user.api_key_encrypted else None
+    data["allowed_models"] = [
+        {"id": mid, "label": info["label"], "tier": info["tier"]}
+        for mid, info in settings.ALLOWED_MODELS.items()
+    ]
+    return data
+
+
+@app.put("/api/settings")
+def update_settings(req: SettingsUpdateRequest, user: User = Depends(authlib.get_current_user)):
+    updates: dict = {}
+    if req.model is not None:
+        if req.model not in settings.ALLOWED_MODELS:
+            raise HTTPException(status_code=400, detail="Unknown model.")
+        updates["model"] = req.model
+    if req.library_name is not None:
+        updates["library_name"] = req.library_name
+    if req.digest_email is not None:
+        updates["digest_email"] = req.digest_email.strip() or None
+    if req.api_key is not None:
+        key = req.api_key.strip()
+        updates["api_key_encrypted"] = authlib.encrypt_api_key(key) if key else None
+
+    db.update_user_settings(user.id, **updates)
+    refreshed = db.get_user_by_id(user.id)
+    return _public_user(refreshed)
+
+
+@app.post("/api/settings/test-key")
+def test_api_key(req: TestKeyRequest, user: User = Depends(authlib.get_current_user)):
+    """Validate an Anthropic key WITHOUT spending tokens: models.list() is an
+    auth check, not an inference call. Never echoes the key back."""
+    key = (req.api_key or "").strip()
+    if not key:
+        if not user.api_key_encrypted:
+            raise HTTPException(status_code=400, detail="No API key provided or stored.")
+        key = authlib.decrypt_api_key(user.api_key_encrypted)
     try:
-        agent.extract_grounded_claims(paper_id, force=force)
-    except Exception as e:
-        print(f"[bg] extract_grounded_claims failed for {paper_id}: {e}")
+        from anthropic import Anthropic
+        Anthropic(api_key=key).models.list(limit=1)
+        return {"valid": True}
+    except Exception:
+        # Don't leak the upstream error verbatim.
+        return {"valid": False, "error": "Key was rejected by Anthropic."}
 
 
 # ── Health Check ─────────────────────────────────────────────
 
 @app.get("/api/health")
+@limiter.exempt
 def health():
     errors = settings.validate()
     papers = db.list_papers(limit=1000)
@@ -186,7 +461,7 @@ def health():
     }
 
 
-@app.post("/api/admin/fix-abstracts")
+@app.post("/api/admin/fix-abstracts", dependencies=[Depends(require_admin)])
 def fix_abstracts():
     """
     Re-fetch full abstracts for arXiv papers whose stored abstract is short
@@ -248,8 +523,9 @@ def normalize_abstracts():
 # ── Papers ───────────────────────────────────────────────────
 
 @app.get("/api/papers")
-def list_papers(limit: int = 50, offset: int = 0):
-    papers = db.list_papers(limit=limit, offset=offset)
+def list_papers(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+                user: User = Depends(authlib.get_current_user)):
+    papers = db.list_papers(limit=limit, offset=offset, user_id=user.id)
     results = []
     for p in papers:
         analyses = db.get_analyses_for_paper(p.id)
@@ -293,10 +569,8 @@ def _strip_scaffolding(text: str) -> str:
 
 
 @app.get("/api/papers/{paper_id}")
-def get_paper(paper_id: str):
-    paper = db.get_paper(paper_id)
-    if not paper:
-        raise HTTPException(status_code=404, detail="Paper not found")
+def get_paper(paper_id: str, user: User = Depends(authlib.get_current_user)):
+    paper = _require_owned_paper(paper_id, user)
     analyses = db.get_analyses_for_paper(paper_id)
     chunks = db.get_chunks_for_paper(paper_id)
     return {
@@ -322,10 +596,8 @@ def get_paper(paper_id: str):
 
 
 @app.delete("/api/papers/{paper_id}")
-def delete_paper(paper_id: str):
-    paper = db.get_paper(paper_id)
-    if not paper:
-        raise HTTPException(status_code=404, detail="Paper not found")
+def delete_paper(paper_id: str, user: User = Depends(authlib.get_current_user)):
+    _require_owned_paper(paper_id, user)
     # Capture this paper's claim IDs before the cascade removes them,
     # so we can also purge relationships that reference them.
     claim_ids = [c.id for c in db.get_claims_for_paper(paper_id)]
@@ -348,11 +620,9 @@ def delete_paper(paper_id: str):
 
 
 @app.get("/api/papers/{paper_id}/status")
-def paper_status(paper_id: str):
+def paper_status(paper_id: str, user: User = Depends(authlib.get_current_user)):
     """Check analysis completion status."""
-    paper = db.get_paper(paper_id)
-    if not paper:
-        raise HTTPException(status_code=404, detail="Paper not found")
+    paper = _require_owned_paper(paper_id, user)
     analyses = db.get_analyses_for_paper(paper_id)
     analysis_types = [a.analysis_type for a in analyses]
     all_types = {"summary", "methods", "findings", "limitations", "key_claims", "research_gaps"}
@@ -369,26 +639,64 @@ def paper_status(paper_id: str):
 # ── Upload & Analyze ─────────────────────────────────────────
 
 @app.post("/api/papers/upload")
+@limiter.limit(settings.rl_upload)
 async def upload_paper(
+    request: Request,
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
+    user: User = Depends(authlib.get_current_user),
 ):
+    # Cheap first gate: extension.
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files accepted")
 
-    # Save file
-    save_path = UPLOAD_DIR / file.filename
-    content = await file.read()
+    # Bounded read — never pull an unbounded upload into memory. Abort as soon
+    # as the running total crosses the cap rather than reading the whole thing.
+    max_bytes = settings.max_upload_bytes
+    buf = bytearray()
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File exceeds the {max_bytes // (1024 * 1024)} MB limit.",
+            )
+    content = bytes(buf)
+
+    # Validate it is actually a PDF, not arbitrary bytes renamed .pdf.
+    if b"%PDF-" not in content[:1024]:
+        raise HTTPException(status_code=400, detail="File is not a valid PDF.")
+
+    # NEVER trust the client filename for the on-disk path (path traversal:
+    # "../../api.py" would escape the upload dir). Write under a generated name
+    # and keep a sanitized original only as a display string.
+    display_name = _safe_display_name(file.filename)
+    save_path = UPLOAD_DIR / f"{uuid.uuid4().hex}.pdf"
+
+    # Defense in depth: confirm the resolved path stays inside UPLOAD_DIR.
+    if UPLOAD_DIR.resolve() not in save_path.resolve().parents:
+        raise HTTPException(status_code=400, detail="Invalid upload path.")
+
     save_path.write_bytes(content)
 
     # Ingest (extract + chunk + embed) — this is fast enough to do inline
-    paper = agent.ingest_pdf(save_path, filename=file.filename)
+    user_key = authlib.resolve_user_api_key(user)
+    model = _resolve_model_and_meter(user)
+    paper = agent.ingest_pdf(save_path, filename=display_name, api_key=user_key, model=model)
 
-    # Dedup: if a paper with the same title/DOI already exists, roll back
+    # Dedup is per-user: a paper already in THIS user's library is a duplicate;
+    # the same paper in another user's library is not (each owner keeps a copy).
     existing = db.find_duplicate(paper.title, doi=paper.doi, arxiv_id=paper.arxiv_id)
-    if existing and existing.id != paper.id:
+    if existing and existing.id != paper.id and existing.user_id == user.id:
         agent.vector_store.delete_paper_chunks(paper.id)
         db.delete_paper(paper.id)
+        try:
+            save_path.unlink(missing_ok=True)  # drop the redundant file copy
+        except OSError:
+            pass
         return {
             "id": existing.id,
             "title": existing.title,
@@ -396,8 +704,11 @@ async def upload_paper(
             "message": f"This paper is already in your library: \"{existing.title}\".",
         }
 
+    # Stamp ownership before analysis kicks off.
+    db.set_paper_owner(paper.id, user.id)
+
     # Analyze in background (parallel — ~5x faster than sequential loop)
-    background_tasks.add_task(_analyze_paper_bg, paper.id)
+    background_tasks.add_task(_analyze_paper_bg, paper.id, user_key, model)
     _invalidate_insight_cache()
 
     return {
@@ -413,11 +724,10 @@ async def upload_paper(
 
 
 @app.post("/api/papers/{paper_id}/reanalyze")
-def reanalyze_paper(paper_id: str, background_tasks: BackgroundTasks = BackgroundTasks()):
+def reanalyze_paper(paper_id: str, background_tasks: BackgroundTasks = BackgroundTasks(),
+                    user: User = Depends(authlib.get_current_user)):
     """Re-run analysis on an already-ingested paper."""
-    paper = db.get_paper(paper_id)
-    if not paper:
-        raise HTTPException(status_code=404, detail="Paper not found")
+    paper = _require_owned_paper(paper_id, user)
     # Invalidate cached claims + their relationships so they're freshly derived
     claim_ids = [c.id for c in db.get_claims_for_paper(paper_id)]
     db.delete_claims_for_paper(paper_id)
@@ -431,97 +741,16 @@ def reanalyze_paper(paper_id: str, background_tasks: BackgroundTasks = Backgroun
         )
         conn.commit()
         conn.close()
-    background_tasks.add_task(_analyze_paper_bg, paper_id)
+    background_tasks.add_task(_analyze_paper_bg, paper_id, authlib.resolve_user_api_key(user), _resolve_model_and_meter(user))
     return {"id": paper_id, "status": "analyzing"}
-
-
-# ── TASK 2: Grounded Claim Extraction ───────────────────────
-
-@app.post("/api/papers/{paper_id}/extract-claims")
-def extract_claims(
-    paper_id: str,
-    background_tasks: BackgroundTasks,
-    force: bool = Query(False, description="Re-extract even if grounded claims already exist."),
-):
-    """
-    Extract evidence-grounded claims directly from a paper's source text.
-
-    Unlike the old path (summary -> claim extraction), this goes to the raw
-    stored text so every claim carries: evidence (n, p-value, effect size,
-    design), conditions (scope), and a verbatim source_quote anchor.
-
-    Returns cached grounded claims immediately if they exist (force=False).
-    Pass force=True to delete existing claims and re-extract from scratch.
-    """
-    paper = db.get_paper(paper_id)
-    if not paper:
-        raise HTTPException(status_code=404, detail="Paper not found")
-    if not paper.full_text:
-        raise HTTPException(
-            status_code=422,
-            detail="Paper has no stored text. Re-upload the PDF to ingest it first.",
-        )
-
-    claims = agent.extract_grounded_claims(paper_id, force=force)
-    grounded = [c for c in claims if c.evidence is not None]
-
-    return {
-        "paper_id": paper_id,
-        "total": len(claims),
-        "grounded": len(grounded),
-        "legacy": len(claims) - len(grounded),
-        "claims": [
-            {
-                "id": c.id,
-                "text": c.text,
-                "section": c.section,
-                "confidence": c.confidence,
-                "evidence": c.evidence,
-                "conditions": c.conditions,
-                "source_quote": c.source_quote,
-                "grounded": c.evidence is not None,
-            }
-            for c in claims
-        ],
-    }
-
-
-@app.post("/api/papers/backfill-claims")
-def backfill_claims(
-    background_tasks: BackgroundTasks,
-    force: bool = Query(False, description="Re-extract even papers that already have grounded claims."),
-    limit: int = Query(50, description="Max papers to backfill."),
-):
-    """
-    Queue grounded claim extraction for every paper in the library that
-    lacks grounded claims. Runs each paper as a background task.
-    Use after upgrading from legacy (summary-based) extraction, or after
-    a prompt change with force=True.
-    """
-    papers = db.list_papers(limit=limit)
-    queued = []
-
-    for paper in papers:
-        if not paper.full_text:
-            continue
-        existing = db.get_claims_for_paper(paper.id)
-        already_grounded = any(c.evidence is not None for c in existing)
-        if already_grounded and not force:
-            continue
-        background_tasks.add_task(_extract_claims_bg, paper.id, force)
-        queued.append(paper.id)
-
-    return {
-        "queued": len(queued),
-        "paper_ids": queued,
-        "message": f"Grounded extraction queued for {len(queued)} papers.",
-    }
 
 
 # ── Search & QA ──────────────────────────────────────────────
 
 @app.post("/api/search")
-def search_papers(req: SearchRequest):
+@limiter.limit(settings.rl_search)
+def search_papers(request: Request, req: SearchRequest,
+                  user: User = Depends(authlib.get_current_user)):
     """
     Semantic search across the paper library.
 
@@ -539,10 +768,14 @@ def search_papers(req: SearchRequest):
       < 0.40  → related
       >= 0.40 → tangential
     """
+    # Scope to the user's own papers. A passed paper_id is $and'd with this set,
+    # so requesting another user's paper id simply returns nothing.
+    owned_ids = db.list_paper_ids_for_user(user.id)
     results = agent.vector_store.search(
         query=req.query,
         n_results=req.n_results,
         paper_id=req.paper_id,
+        paper_ids=owned_ids,
     )
 
     response = []
@@ -560,17 +793,20 @@ def search_papers(req: SearchRequest):
 
 
 @app.post("/api/ask")
-def ask_question(req: AskRequest):
-    answer = agent.ask(req.question, paper_id=req.paper_id)
+@limiter.limit(settings.rl_ask)
+def ask_question(request: Request, req: AskRequest,
+                 user: User = Depends(authlib.get_current_user)):
+    answer = agent.ask(req.question, paper_id=req.paper_id, paper_ids=_owned_ids(user), api_key=authlib.resolve_user_api_key(user), model=_resolve_model_and_meter(user))
     return {"answer": answer}
 
 
 # ── Contradictions ───────────────────────────────────────────
 
 @app.get("/api/contradictions/count")
-def contradiction_count():
+def contradiction_count(user: User = Depends(authlib.get_current_user)):
     """Lightweight endpoint — returns cached relationship counts with no LLM calls."""
-    rels = db.list_relationships()
+    owned = _owned_ids(user)
+    rels = db.list_relationships(paper_ids=owned) if owned else []
     counts = {"contradiction": 0, "support": 0, "nuance": 0, "unrelated": 0}
     for r in rels:
         if r.relationship in counts:
@@ -580,7 +816,7 @@ def contradiction_count():
 
 
 @app.get("/api/contradictions")
-def list_contradictions():
+def list_contradictions(user: User = Depends(authlib.get_current_user)):
     """
     Return the full persisted relationship set — every relationship ever
     judged, reconstructed into the same shape the scan POST returns.
@@ -591,12 +827,15 @@ def list_contradictions():
     zero LLM calls. "unrelated" and "error" rows are excluded from the main
     view but still counted by the count endpoint.
     """
-    rels = db.list_relationships()
+    owned = _owned_ids(user)
+    if not owned:
+        return []
+    rels = db.list_relationships(paper_ids=owned)
 
     # Build a claim-id -> claim object map once (DB read, no LLM).
     claim_by_id = {}
     claim_paper_title = {}
-    for p in db.list_papers(limit=200):
+    for p in db.list_papers(limit=200, user_id=user.id):
         for c in db.get_claims_for_paper(p.id):
             claim_by_id[c.id] = c
             claim_paper_title[c.id] = p.title
@@ -639,11 +878,18 @@ def list_contradictions():
 
 
 @app.post("/api/contradictions")
-def run_contradictions(req: ContradictionRequest):
+@limiter.limit(settings.rl_contradictions)
+def run_contradictions(request: Request, req: ContradictionRequest,
+                       user: User = Depends(authlib.get_current_user)):
+    scope = _scope_ids(user, req.paper_ids)
+    if not scope:
+        return []
     results = contradiction_agent.run_contradiction_scan(
-        paper_ids=req.paper_ids,
+        paper_ids=scope,
         similarity_threshold=req.similarity_threshold,
         max_pairs=req.max_pairs,
+        api_key=authlib.resolve_user_api_key(user),
+        model=_resolve_model_and_meter(user),
     )
     # Invalidate insight cache so research wire reflects new relationships immediately
     _invalidate_insight_cache()
@@ -678,7 +924,9 @@ def run_contradictions(req: ContradictionRequest):
 # ── Hypotheses ───────────────────────────────────────────────
 
 @app.post("/api/hypotheses")
-def generate_hypotheses(req: HypothesisRequest):
+@limiter.limit(settings.rl_hypotheses)
+def generate_hypotheses(request: Request, req: HypothesisRequest,
+                        user: User = Depends(authlib.get_current_user)):
     """
     Generate testable hypotheses from the library.
 
@@ -693,11 +941,16 @@ def generate_hypotheses(req: HypothesisRequest):
     Pass refresh=true to bypass the output cache.
     Cache auto-invalidates when a new contradiction scan runs.
     """
+    scope = _scope_ids(user, req.paper_ids)
+    if not scope:
+        return []
     hypotheses = hypothesis_agent.generate(
         research_question=req.research_question,
-        paper_ids=req.paper_ids,
+        paper_ids=scope,
         num_hypotheses=req.num_hypotheses,
         force_refresh=req.refresh,
+        api_key=authlib.resolve_user_api_key(user),
+        model=_resolve_model_and_meter(user),
     )
 
     return [
@@ -722,7 +975,9 @@ def generate_hypotheses(req: HypothesisRequest):
 # ── Import ───────────────────────────────────────────────────
 
 @app.post("/api/import/search")
-def import_search(req: ImportSearchRequest):
+@limiter.limit(settings.rl_import_search)
+def import_search(request: Request, req: ImportSearchRequest,
+                  user: User = Depends(authlib.get_current_user)):
     results = importer.search(
         query=req.query,
         sources=req.sources,
@@ -747,7 +1002,7 @@ def import_search(req: ImportSearchRequest):
 
 
 @app.post("/api/import/lookup")
-def import_lookup(req: ImportLookupRequest):
+def import_lookup(req: ImportLookupRequest, user: User = Depends(authlib.get_current_user)):
     """Look up a paper by arXiv ID, DOI, or URL."""
     result = importer.lookup(req.identifier)
     if not result:
@@ -788,9 +1043,12 @@ def _normalize_abstract(text: str | None) -> str:
 
 
 @app.post("/api/import/add")
+@limiter.limit(settings.rl_import_add)
 def import_add(
+    request: Request,
     req: ImportAddRequest,
     background_tasks: BackgroundTasks = BackgroundTasks(),
+    user: User = Depends(authlib.get_current_user),
 ):
     from agents.paper_import import ImportResult
 
@@ -807,10 +1065,11 @@ def import_add(
         url=req.url,
     )
 
-    # Dedup BEFORE downloading — we already have title/DOI/arXiv ID from the source
+    # Dedup BEFORE downloading — per user (same paper in another user's library
+    # is not a duplicate for this user).
     arxiv_id = req.source_id if req.source == "arxiv" else None
     existing = db.find_duplicate(req.title, doi=req.doi, arxiv_id=arxiv_id)
-    if existing:
+    if existing and existing.user_id == user.id:
         return {
             "id": existing.id,
             "title": existing.title,
@@ -827,21 +1086,24 @@ def import_add(
         )
 
     # Ingest into library
-    paper = agent.ingest_pdf(pdf_path, filename=pdf_path.name)
+    user_key = authlib.resolve_user_api_key(user)
+    model = _resolve_model_and_meter(user)
+    paper = agent.ingest_pdf(pdf_path, filename=pdf_path.name, api_key=user_key, model=model)
 
-    # Update metadata from the source (better than what PDF extraction finds)
+    # Update metadata from the source (better than what PDF extraction finds),
+    # and stamp ownership in the same write.
     import sqlite3
     conn = sqlite3.connect(str(db.db_path))
     conn.execute(
-        "UPDATE papers SET title=?, authors=?, abstract=?, year=?, source=?, doi=?, arxiv_id=? WHERE id=?",
+        "UPDATE papers SET title=?, authors=?, abstract=?, year=?, source=?, doi=?, arxiv_id=?, user_id=? WHERE id=?",
         (req.title, json.dumps(req.authors), _normalize_abstract(req.abstract), req.year,
-         req.source, req.doi, arxiv_id, paper.id),
+         req.source, req.doi, arxiv_id, user.id, paper.id),
     )
     conn.commit()
     conn.close()
 
     # Analyze in background
-    background_tasks.add_task(_analyze_paper_bg, paper.id)
+    background_tasks.add_task(_analyze_paper_bg, paper.id, user_key, model)
     _invalidate_insight_cache()
 
     return {
@@ -855,7 +1117,9 @@ def import_add(
 # ── Monitor ──────────────────────────────────────────────────
 
 @app.post("/api/monitor/scan")
-def monitor_scan(req: MonitorRequest):
+@limiter.limit(settings.rl_monitor)
+def monitor_scan(request: Request, req: MonitorRequest,
+                 user: User = Depends(authlib.get_current_user)):
     topics = [
         MonitorTopic(
             name=t["name"],
@@ -870,6 +1134,9 @@ def monitor_scan(req: MonitorRequest):
         recipient=req.email,
         max_per_source=req.max_per_source,
         relevance_threshold=req.relevance_threshold,
+        user_id=user.id,
+        api_key=authlib.resolve_user_api_key(user),
+        model=_resolve_model_and_meter(user),
     )
 
     digests = [
@@ -989,7 +1256,7 @@ def _build_graph_readonly(papers):
     }
 
 
-def _build_graph_compute(req, papers):
+def _build_graph_compute(req, papers, api_key: str | None = None, model: str | None = None):
     """
     Live pipeline: judge pairs and write them through to the relationships
     table. This is the original behaviour, preserved behind compute=true.
@@ -1005,7 +1272,7 @@ def _build_graph_compute(req, papers):
     # Extract claims (DB-first, zero LLM if already cached)
     all_claims = []
     for paper in papers:
-        all_claims.extend(contradiction_agent.extract_claims(paper.id))
+        all_claims.extend(contradiction_agent.extract_claims(paper.id, api_key=api_key, model=model))
 
     if len(all_claims) < 2:
         return {"nodes": [], "edges": [], "papers": [{"id": p.id, "title": p.title} for p in papers]}
@@ -1043,7 +1310,7 @@ def _build_graph_compute(req, papers):
     edges = []
     connected_claim_ids = set()
     for pair in selected:
-        result = contradiction_agent.judge_pair(pair)
+        result = contradiction_agent.judge_pair(pair, api_key=api_key, model=model)
         if result.relationship == "error":
             continue
         edges.append({
@@ -1092,7 +1359,7 @@ def _build_graph_compute(req, papers):
 
 
 @app.post("/api/graph")
-def build_graph(req: GraphRequest):
+def build_graph(req: GraphRequest, user: User = Depends(authlib.get_current_user)):
     """
     Assemble a claim-level knowledge graph.
 
@@ -1109,17 +1376,17 @@ def build_graph(req: GraphRequest):
     writes them through, applies the per-paper fairness guarantee). Use that
     only when deliberately expanding coverage.
     """
-    if req.paper_ids:
-        papers = [db.get_paper(pid) for pid in req.paper_ids]
-        papers = [p for p in papers if p is not None]
-    else:
-        papers = db.list_papers(limit=50)
+    scope = _scope_ids(user, req.paper_ids)
+    if len(scope) < 2:
+        return {"nodes": [], "edges": [], "papers": []}
+    papers = [db.get_paper(pid) for pid in scope]
+    papers = [p for p in papers if p is not None]
 
     if len(papers) < 2:
         return {"nodes": [], "edges": [], "papers": []}
 
     if req.compute:
-        return _build_graph_compute(req, papers)
+        return _build_graph_compute(req, papers, authlib.resolve_user_api_key(user), _resolve_model_and_meter(user))
     return _build_graph_readonly(papers)
 
 
@@ -1131,7 +1398,7 @@ class InsightRequest(BaseModel):
 
 
 @app.post("/api/insights")
-def insight_feed(req: InsightRequest):
+def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_user)):
     """
     Synthesize a stream of typed insights from existing agent outputs.
 
@@ -1148,17 +1415,17 @@ def insight_feed(req: InsightRequest):
 
     # ── Cache read ────────────────────────────────────────────
     now = _time.time()
-    if (
-        _insight_cache["payload"] is not None
-        and (now - _insight_cache["ts"]) < _INSIGHT_CACHE_TTL
-    ):
-        return _insight_cache["payload"][: req.limit]
+    _entry = _insight_cache.get(user.id)
+    if _entry is not None and (now - _entry["ts"]) < _INSIGHT_CACHE_TTL:
+        return _entry["payload"][: req.limit]
+
+    owned = _owned_ids(user)
 
     # ── Assemble insights (all DB reads, zero LLM calls) ─────
     insights = []
 
     # Newest papers
-    papers = db.list_papers(limit=10)
+    papers = db.list_papers(limit=10, user_id=user.id)
     for p in papers[:5]:
         insights.append({
             "id": str(uuid.uuid4()),
@@ -1185,9 +1452,9 @@ def insight_feed(req: InsightRequest):
 
     # Contradiction / consensus / nuance insights — from the relationships table.
     try:
-        cached_rels = db.list_relationships()
+        cached_rels = db.list_relationships(paper_ids=owned) if owned else []
         claim_paper: dict[str, str] = {}
-        for p in db.list_papers(limit=200):
+        for p in db.list_papers(limit=200, user_id=user.id):
             for c in db.get_claims_for_paper(p.id):
                 claim_paper[c.id] = p.title
 
@@ -1294,7 +1561,6 @@ def insight_feed(req: InsightRequest):
     insights.sort(key=lambda x: _TYPE_PRIORITY.get(x.get("type", ""), 9))
 
     # ── Cache write ───────────────────────────────────────────
-    _insight_cache["payload"] = insights
-    _insight_cache["ts"] = _time.time()
+    _insight_cache[user.id] = {"payload": insights, "ts": _time.time()}
 
     return insights[: req.limit]

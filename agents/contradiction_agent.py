@@ -101,6 +101,12 @@ class ContradictionAgent:
         # Does NOT persist across restarts — the relationships table is truth.
         self._judgment_cache: dict[str, ContradictionResult] = {}
 
+    def _anthropic(self, api_key: str | None = None):
+        """Per-request Anthropic client: the caller's BYOK key when provided,
+        else the shared server client. Built per call, never stored on self,
+        so it is safe under concurrent (threadpool) use."""
+        return Anthropic(api_key=api_key) if api_key else self.client
+
     @staticmethod
     def _cache_key(claim_a_text: str, claim_b_text: str) -> str:
         """
@@ -113,7 +119,7 @@ class ContradictionAgent:
 
     # ── Stage 1: Extract claims — DB-first ───────────────────
 
-    def extract_claims(self, paper_id: str) -> list[Claim]:
+    def extract_claims(self, paper_id: str, api_key: str | None = None, model: str | None = None) -> list[Claim]:
         """
         Return claims for a paper. DB is checked first so claim IDs are
         stable across requests. LLM extraction only runs when the paper has
@@ -149,8 +155,8 @@ class ContradictionAgent:
         )
 
         try:
-            response = self.client.messages.create(
-                model=settings.anthropic_model,
+            response = self._anthropic(api_key).messages.create(
+                model=(model or settings.anthropic_model),
                 max_tokens=2048,
                 messages=[{
                     "role": "user",
@@ -352,7 +358,7 @@ class ContradictionAgent:
 
     # ── Stage 2: LLM judges each pair ────────────────────────
 
-    def judge_pair(self, pair: ClaimPair, use_cache: bool = True) -> ContradictionResult:
+    def judge_pair(self, pair: ClaimPair, use_cache: bool = True, api_key: str | None = None, model: str | None = None) -> ContradictionResult:
         """
         The LLM decides if two claims contradict, support, or are unrelated.
 
@@ -390,8 +396,8 @@ class ContradictionAgent:
 
         # ── LLM call ─────────────────────────────────────────
         try:
-            response = self.client.messages.create(
-                model=settings.anthropic_model,
+            response = self._anthropic(api_key).messages.create(
+                model=(model or settings.anthropic_model),
                 max_tokens=1024,
                 messages=[{
                     "role": "user",
@@ -502,6 +508,8 @@ class ContradictionAgent:
         paper_ids: list[str] | None = None,
         similarity_threshold: float = 0.6,
         max_pairs: int = 20,
+        api_key: str | None = None,
+        model: str | None = None,
     ) -> list[ContradictionResult]:
         """
         Run the full contradiction detection pipeline:
@@ -523,7 +531,7 @@ class ContradictionAgent:
 
         all_claims = []
         for paper in papers:
-            claims = self.extract_claims(paper.id)
+            claims = self.extract_claims(paper.id, api_key=api_key, model=model)
             all_claims.extend(claims)
 
         if len(all_claims) < 2:
@@ -549,7 +557,7 @@ class ContradictionAgent:
 
         results = []
         for pair in pairs:
-            result = self.judge_pair(pair)
+            result = self.judge_pair(pair, api_key=api_key, model=model)
             results.append(result)
 
         priority = {"contradiction": 0, "nuance": 1, "support": 2, "unrelated": 3, "error": 4}

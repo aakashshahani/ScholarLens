@@ -31,6 +31,7 @@ class Paper:
     filename: str | None = None
     full_text: str | None = None
     page_count: int | None = None
+    user_id: str | None = None     # owner; NULL = legacy/unowned (pre-auth)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     @staticmethod
@@ -115,7 +116,39 @@ class StoredRelationship:
         return str(uuid.uuid4())
 
 
-# ── Database Manager ─────────────────────────────────────────
+@dataclass
+class User:
+    """An account. password_hash is bcrypt. api_key_encrypted is a Fernet
+    token (the tenant's Anthropic key, encrypted at rest) — never plaintext."""
+    id: str
+    email: str
+    password_hash: str
+    api_key_encrypted: str | None = None
+    model: str = "claude-haiku-4-5-20251001"
+    digest_email: str | None = None
+    library_name: str = "My Library"
+    free_actions_used: int = 0
+    free_sonnet_used: int = 0
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @staticmethod
+    def new_id() -> str:
+        return str(uuid.uuid4())
+
+
+@dataclass
+class Session:
+    """A login session. token is an opaque random string stored in an
+    httpOnly cookie; expires_at is an ISO-8601 UTC timestamp."""
+    token: str
+    user_id: str
+    created_at: str
+    expires_at: str
+
+
+# Columns the settings endpoint is allowed to update — whitelist guards the
+# dynamic UPDATE below so no caller-supplied key can reach the SQL.
+_ALLOWED_SETTING_COLS = {"model", "digest_email", "library_name", "api_key_encrypted"}
 
 class Database:
     def __init__(self, db_path: Path = SQLITE_PATH):
@@ -144,6 +177,7 @@ class Database:
                 filename        TEXT,
                 full_text       TEXT,
                 page_count      INTEGER,
+                user_id         TEXT REFERENCES users(id) ON DELETE CASCADE,
                 created_at      TEXT NOT NULL
             );
 
@@ -208,12 +242,37 @@ class Database:
                 created_at      TEXT NOT NULL
             );
 
+            -- Accounts. password_hash is bcrypt; api_key_encrypted is a Fernet
+            -- token (tenant Anthropic key, encrypted at rest — never plaintext).
+            CREATE TABLE IF NOT EXISTS users (
+                id                TEXT PRIMARY KEY,
+                email             TEXT NOT NULL UNIQUE,
+                password_hash     TEXT NOT NULL,
+                api_key_encrypted TEXT,
+                model             TEXT NOT NULL DEFAULT 'claude-haiku-4-5-20251001',
+                digest_email      TEXT,
+                library_name      TEXT NOT NULL DEFAULT 'My Library',
+                free_actions_used INTEGER NOT NULL DEFAULT 0,
+                free_sonnet_used  INTEGER NOT NULL DEFAULT 0,
+                created_at        TEXT NOT NULL
+            );
+
+            -- Login sessions. token lives in an httpOnly cookie; rows are
+            -- removed on logout or when expired.
+            CREATE TABLE IF NOT EXISTS sessions (
+                token       TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at  TEXT NOT NULL,
+                expires_at  TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_chunks_paper ON chunks(paper_id);
             CREATE INDEX IF NOT EXISTS idx_analysis_paper ON analysis_results(paper_id);
             CREATE INDEX IF NOT EXISTS idx_papers_source ON papers(source);
             CREATE INDEX IF NOT EXISTS idx_claims_paper ON claims(paper_id);
             CREATE INDEX IF NOT EXISTS idx_rel_lo ON relationships(claim_lo);
             CREATE INDEX IF NOT EXISTS idx_rel_hi ON relationships(claim_hi);
+            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         """)
 
         # Idempotent migration for existing DBs that have the old claims table
@@ -224,6 +283,26 @@ class Database:
         for col in ("evidence", "conditions", "source_quote"):
             if col not in existing_cols:
                 conn.execute(f"ALTER TABLE claims ADD COLUMN {col} TEXT")
+
+        # Idempotent migration: add papers.user_id (owner) to existing DBs.
+        # Added without a REFERENCES clause here (SQLite ALTER limitation);
+        # fresh DBs get the FK via CREATE TABLE above. Existing rows stay NULL
+        # (unowned) until adopted by the first registered user.
+        paper_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(papers)").fetchall()
+        }
+        if "user_id" not in paper_cols:
+            conn.execute("ALTER TABLE papers ADD COLUMN user_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_papers_user ON papers(user_id)")
+
+        # Idempotent migration: free-tier Sonnet usage counter on existing DBs.
+        user_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "free_actions_used" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN free_actions_used INTEGER NOT NULL DEFAULT 0")
+        if "free_sonnet_used" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN free_sonnet_used INTEGER NOT NULL DEFAULT 0")
 
         conn.commit()
         conn.close()
@@ -236,13 +315,13 @@ class Database:
         conn.execute(
             """INSERT INTO papers
                (id, title, authors, abstract, year, source, doi, arxiv_id,
-                filename, full_text, page_count, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                filename, full_text, page_count, user_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 paper.id, paper.title, json.dumps(paper.authors),
                 paper.abstract, paper.year, paper.source, paper.doi,
                 paper.arxiv_id, paper.filename, paper.full_text,
-                paper.page_count, paper.created_at,
+                paper.page_count, paper.user_id, paper.created_at,
             ),
         )
         conn.commit()
@@ -263,16 +342,28 @@ class Database:
             source=row["source"], doi=row["doi"],
             arxiv_id=row["arxiv_id"], filename=row["filename"],
             full_text=row["full_text"], page_count=row["page_count"],
+            user_id=row["user_id"],
             created_at=row["created_at"],
         )
 
-    def list_papers(self, limit: int = 50, offset: int = 0) -> list[Paper]:
+    def list_papers(self, limit: int = 50, offset: int = 0,
+                    user_id: str | None = None) -> list[Paper]:
+        """List papers. When user_id is given, only that owner's papers are
+        returned (the multi-user scoping path); when None, all papers (used by
+        legacy/internal callers during the transition)."""
         import json
         conn = self._get_conn()
-        rows = conn.execute(
-            "SELECT * FROM papers ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        ).fetchall()
+        if user_id is not None:
+            rows = conn.execute(
+                "SELECT * FROM papers WHERE user_id = ? "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (user_id, limit, offset),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM papers ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
         conn.close()
         return [
             Paper(
@@ -282,6 +373,7 @@ class Database:
                 source=r["source"], doi=r["doi"],
                 arxiv_id=r["arxiv_id"], filename=r["filename"],
                 full_text=r["full_text"], page_count=r["page_count"],
+                user_id=r["user_id"],
                 created_at=r["created_at"],
             )
             for r in rows
@@ -294,6 +386,45 @@ class Database:
         deleted = cursor.rowcount > 0
         conn.close()
         return deleted
+
+    # ── Ownership helpers (multi-user scoping) ───────────────
+
+    def set_paper_owner(self, paper_id: str, user_id: str) -> None:
+        """Stamp ownership on a paper (called right after ingest/import)."""
+        conn = self._get_conn()
+        conn.execute("UPDATE papers SET user_id = ? WHERE id = ?", (user_id, paper_id))
+        conn.commit()
+        conn.close()
+
+    def list_paper_ids_for_user(self, user_id: str) -> list[str]:
+        """All paper IDs owned by a user. Endpoints pass this set into the
+        aggregate features (search / contradictions / hypotheses / graph) so
+        cross-paper reasoning never reaches another user's library."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT id FROM papers WHERE user_id = ?", (user_id,)
+        ).fetchall()
+        conn.close()
+        return [r["id"] for r in rows]
+
+    def count_users(self) -> int:
+        conn = self._get_conn()
+        n = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        conn.close()
+        return int(n)
+
+    def adopt_orphan_papers(self, user_id: str) -> int:
+        """Assign all currently-unowned papers to a user. Used once, when the
+        first account registers, so pre-auth test data isn't stranded.
+        Returns the number of rows adopted."""
+        conn = self._get_conn()
+        cur = conn.execute(
+            "UPDATE papers SET user_id = ? WHERE user_id IS NULL", (user_id,)
+        )
+        conn.commit()
+        n = cur.rowcount
+        conn.close()
+        return n
 
     # ── Chunk CRUD ───────────────────────────────────────────
 
@@ -573,5 +704,140 @@ class Database:
         conn.execute(
             "DELETE FROM hypothesis_cache WHERE cache_key = ?", (cache_key,)
         )
+        conn.commit()
+        conn.close()
+
+    # ── Users / Auth ─────────────────────────────────────────
+
+    def _row_to_user(self, row) -> User:
+        return User(
+            id=row["id"],
+            email=row["email"],
+            password_hash=row["password_hash"],
+            api_key_encrypted=row["api_key_encrypted"],
+            model=row["model"],
+            digest_email=row["digest_email"],
+            library_name=row["library_name"],
+            free_actions_used=row["free_actions_used"],
+            free_sonnet_used=row["free_sonnet_used"],
+            created_at=row["created_at"],
+        )
+
+    def create_user(self, email: str, password_hash: str) -> User:
+        """Insert a new account. Email is normalised lower/stripped by the
+        caller. Raises sqlite3.IntegrityError if the email already exists
+        (the UNIQUE constraint), which the endpoint maps to a 409."""
+        user = User(id=User.new_id(), email=email, password_hash=password_hash)
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO users
+               (id, email, password_hash, api_key_encrypted, model,
+                digest_email, library_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user.id, user.email, user.password_hash, user.api_key_encrypted,
+             user.model, user.digest_email, user.library_name, user.created_at),
+        )
+        conn.commit()
+        conn.close()
+        return user
+
+    def get_user_by_email(self, email: str) -> User | None:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM users WHERE email = ?", (email,)
+        ).fetchone()
+        conn.close()
+        return self._row_to_user(row) if row else None
+
+    def get_user_by_id(self, user_id: str) -> User | None:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        conn.close()
+        return self._row_to_user(row) if row else None
+
+    def increment_usage(self, user_id: str, is_sonnet: bool) -> tuple[int, int]:
+        """Bump the total free-action counter (and the Sonnet sub-counter when
+        the action used Sonnet). Returns (free_actions_used, free_sonnet_used)."""
+        conn = self._get_conn()
+        if is_sonnet:
+            conn.execute(
+                "UPDATE users SET free_actions_used = free_actions_used + 1, "
+                "free_sonnet_used = free_sonnet_used + 1 WHERE id = ?",
+                (user_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE users SET free_actions_used = free_actions_used + 1 WHERE id = ?",
+                (user_id,),
+            )
+        conn.commit()
+        row = conn.execute(
+            "SELECT free_actions_used, free_sonnet_used FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        conn.close()
+        return (row["free_actions_used"], row["free_sonnet_used"]) if row else (0, 0)
+
+    def update_user_settings(self, user_id: str, **fields) -> None:
+        """Update only the whitelisted settings columns that were passed.
+        The column names are validated against _ALLOWED_SETTING_COLS so the
+        dynamic SET clause can never contain caller-supplied identifiers;
+        values are always bound as parameters."""
+        cols = {k: v for k, v in fields.items() if k in _ALLOWED_SETTING_COLS}
+        if not cols:
+            return
+        set_clause = ", ".join(f"{c} = ?" for c in cols)
+        values = list(cols.values()) + [user_id]
+        conn = self._get_conn()
+        conn.execute(f"UPDATE users SET {set_clause} WHERE id = ?", values)
+        conn.commit()
+        conn.close()
+
+    # ── Sessions ─────────────────────────────────────────────
+
+    def create_session(self, user_id: str, token: str, expires_at: str) -> Session:
+        sess = Session(
+            token=token,
+            user_id=user_id,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            expires_at=expires_at,
+        )
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (sess.token, sess.user_id, sess.created_at, sess.expires_at),
+        )
+        conn.commit()
+        conn.close()
+        return sess
+
+    def get_session(self, token: str) -> Session | None:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM sessions WHERE token = ?", (token,)
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        return Session(
+            token=row["token"],
+            user_id=row["user_id"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+        )
+
+    def delete_session(self, token: str) -> None:
+        conn = self._get_conn()
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.commit()
+        conn.close()
+
+    def delete_sessions_for_user(self, user_id: str) -> None:
+        """Log out everywhere — used on password change or explicit 'log out
+        all sessions'."""
+        conn = self._get_conn()
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()

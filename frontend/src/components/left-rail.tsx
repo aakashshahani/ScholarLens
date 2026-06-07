@@ -4,8 +4,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import {
-  LayoutDashboard, Library, Network, Zap, FlaskConical, Radar, Plus,
+  LayoutDashboard, Library, Network, Zap, FlaskConical, Radar, Plus, LogOut, Settings as SettingsIcon,
 } from "lucide-react";
+import { useAuth } from "@/lib/auth";
 
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -19,6 +20,7 @@ const NAV = [
 export function LeftRail() {
   const pathname = usePathname();
   const [expanded, setExpanded] = useState(false);
+  const { user, logout } = useAuth();
 
   return (
     <aside
@@ -62,7 +64,7 @@ export function LeftRail() {
         })}
       </nav>
 
-      {/* Add + hint */}
+      {/* Add + account + hint */}
       <div className="px-2.5 pb-3 space-y-2">
         <Link
           href="/add-papers"
@@ -73,6 +75,34 @@ export function LeftRail() {
             Add papers
           </span>
         </Link>
+
+        <Link
+          href="/settings"
+          title="Settings"
+          className={`relative flex items-center h-9 px-[9px] rounded-[var(--r-md)] overflow-hidden t-all ${
+            pathname.startsWith("/settings") ? "bg-[var(--surface-3)] text-[var(--text-1)]" : "text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--surface-2)]"
+          }`}
+        >
+          {pathname.startsWith("/settings") && <span className="absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-full bg-[var(--gen)]" />}
+          <SettingsIcon size={17} strokeWidth={pathname.startsWith("/settings") ? 2.2 : 1.8} className="shrink-0" />
+          <span className="text-[13.5px] ml-3 whitespace-nowrap t-all" style={{ opacity: expanded ? 1 : 0 }}>
+            Settings
+          </span>
+        </Link>
+
+        {user && (
+          <button
+            onClick={logout}
+            title="Sign out"
+            className="flex items-center w-full h-9 px-[9px] rounded-[var(--r-md)] text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--surface-2)] overflow-hidden t-all"
+          >
+            <LogOut size={17} strokeWidth={1.8} className="shrink-0" />
+            <span className="text-[12.5px] ml-3 whitespace-nowrap t-all truncate" style={{ opacity: expanded ? 1 : 0 }}>
+              {user.email}
+            </span>
+          </button>
+        )}
+
         <div
           className="flex items-center h-7 px-[9px] text-[var(--text-4)] overflow-hidden t-all"
           style={{ opacity: expanded ? 1 : 0 }}

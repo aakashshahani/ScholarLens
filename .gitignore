@@ -17,3 +17,9 @@ Thumbs.db
 
 # Model cache
 .cache/
+
+scholarlens*.db
+chroma/
+uploads/
+__pycache__/
+*.pyc

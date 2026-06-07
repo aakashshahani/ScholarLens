@@ -99,6 +99,7 @@ class VectorStore:
         paper_id: str | None = None,
         section: str | None = None,
         exclude_sections: list[str] | None = None,
+        paper_ids: list[str] | None = None,
     ) -> list[SearchResult]:
         """
         Semantic search across stored chunks.
@@ -106,7 +107,11 @@ class VectorStore:
         Args:
             query:            Natural language search query
             n_results:        Max results to return
-            paper_id:         Filter to a specific paper
+            paper_id:         Filter to a single paper
+            paper_ids:        Filter to a SET of papers (multi-user scoping —
+                              the caller passes the owner's paper IDs so search
+                              never reaches another user's library). An empty
+                              list means "no accessible papers" and returns [].
             section:          Filter to a specific section type
             exclude_sections: Section names to exclude from results.
                               Defaults to ["references", "appendix"] — these
@@ -118,20 +123,27 @@ class VectorStore:
         if exclude_sections is None:
             exclude_sections = ["references", "appendix"]
 
+        # An explicit empty owner set means there is nothing to search.
+        if paper_ids is not None and len(paper_ids) == 0:
+            return []
+
         query_embedding = self.embed_query(query)
 
-        where_filter = {}
-        if paper_id and section:
-            where_filter = {
-                "$and": [
-                    {"paper_id": paper_id},
-                    {"section": section},
-                ]
-            }
-        elif paper_id:
-            where_filter = {"paper_id": paper_id}
-        elif section:
-            where_filter = {"section": section}
+        # Build metadata conditions, then combine with $and if more than one.
+        conditions = []
+        if paper_id:
+            conditions.append({"paper_id": paper_id})
+        if paper_ids:
+            conditions.append({"paper_id": {"$in": paper_ids}})
+        if section:
+            conditions.append({"section": section})
+
+        if not conditions:
+            where_filter = None
+        elif len(conditions) == 1:
+            where_filter = conditions[0]
+        else:
+            where_filter = {"$and": conditions}
 
         # Fetch more candidates than requested so we have headroom after
         # filtering out excluded sections. 3× is enough for typical corpora.

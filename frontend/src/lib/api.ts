@@ -1,5 +1,10 @@
 /**
  * ScholarLens API Client — typed fetch wrapper for the FastAPI backend.
+ *
+ * Auth: the backend sets an httpOnly session cookie on login/register. Every
+ * request below sends `credentials: "include"` so the browser attaches that
+ * cookie cross-origin (frontend on :3000 / Vercel, backend on :8000 / Railway).
+ * Without it, every authenticated call returns 401.
  */
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -32,7 +37,8 @@ export interface SearchResult {
   paper_title: string;
   section: string | null;
   text: string;
-  relevance: number;                        // raw score (kept for compat)
+  // Backend returns a raw cosine distance (lower = more similar) plus a tier.
+  relevance_score: number;
   relevance_tier?: "highly_relevant" | "related" | "tangential";
 }
 
@@ -58,10 +64,10 @@ export interface Hypothesis {
   grounding: "detected_conflicts" | "single_paper_gaps" | string;
   methodology: string;
   challenges: string[];
-  novelty: "high" | "medium" | "low";
-  novelty_score: number;                    // cosine distance from corpus (0-1)
+  // Deterministic novelty signal (cosine distance from corpus). The old
+  // self-assessed `novelty`/`impact` string tiers were removed server-side.
+  novelty_score: number;
   novelty_tier: "high" | "medium" | "low" | "unknown";
-  impact: "high" | "medium" | "low";
   research_question: string;
   created_at: string;
 }
@@ -157,9 +163,42 @@ export interface Insight {
   created_at: string;
 }
 
+export interface ContradictionCount {
+  counts: { contradiction: number; support: number; nuance: number; unrelated: number };
+  total: number;
+  last_scanned: string | null;
+}
+
+// ── Auth / settings types ───────────────────────────────────
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  model: string;
+  digest_email: string | null;
+  library_name: string;
+  has_api_key: boolean;
+  // Free-tier meters (server key). BYOK users are uncapped.
+  free_actions_used: number;
+  free_action_limit: number;
+  free_sonnet_used: number;
+  free_sonnet_limit: number;
+}
+
+export interface AllowedModel {
+  id: string;
+  label: string;
+  tier: "haiku" | "sonnet" | "opus";
+}
+
+export interface UserSettings extends AuthUser {
+  api_key_masked: string | null;
+  allowed_models: AllowedModel[];
+}
+
 // ── Fetch helper ────────────────────────────────────────────
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
     this.name = "ApiError";
@@ -169,12 +208,15 @@ class ApiError extends Error {
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
+    credentials: "include", // send the httpOnly session cookie
     headers: { "Content-Type": "application/json", ...init?.headers },
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
     throw new ApiError(res.status, body.detail || res.statusText);
   }
+  // 204 / empty-body responses
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
@@ -183,6 +225,52 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => apiFetch<HealthStatus>("/api/health"),
 
+  // ── Auth ──────────────────────────────────────────────────
+  register: (email: string, password: string) =>
+    apiFetch<AuthUser>("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    }),
+
+  login: (email: string, password: string) =>
+    apiFetch<AuthUser>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    }),
+
+  logout: () => apiFetch<{ status: string }>("/api/auth/logout", { method: "POST" }),
+
+  logoutAll: () =>
+    apiFetch<{ status: string }>("/api/auth/logout-all", { method: "POST" }),
+
+  me: () => apiFetch<AuthUser>("/api/auth/me"),
+
+  // ── Settings (BYOK) ───────────────────────────────────────
+  getSettings: () => apiFetch<UserSettings>("/api/settings"),
+
+  updateSettings: (patch: {
+    model?: string;
+    digestEmail?: string | null;
+    libraryName?: string;
+    apiKey?: string | null; // "" clears the stored key; omit to leave unchanged
+  }) =>
+    apiFetch<AuthUser>("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        model: patch.model,
+        digest_email: patch.digestEmail,
+        library_name: patch.libraryName,
+        api_key: patch.apiKey,
+      }),
+    }),
+
+  testApiKey: (apiKey?: string) =>
+    apiFetch<{ valid: boolean; error?: string }>("/api/settings/test-key", {
+      method: "POST",
+      body: JSON.stringify({ api_key: apiKey ?? null }),
+    }),
+
+  // ── Papers ────────────────────────────────────────────────
   listPapers: (limit = 50, offset = 0) =>
     apiFetch<Paper[]>(`/api/papers?limit=${limit}&offset=${offset}`),
 
@@ -199,7 +287,12 @@ export const api = {
   uploadPaper: async (file: File) => {
     const formData = new FormData();
     formData.append("file", file);
-    const res = await fetch(`${API_BASE}/api/papers/upload`, { method: "POST", body: formData });
+    // NOTE: no Content-Type header — the browser sets the multipart boundary.
+    const res = await fetch(`${API_BASE}/api/papers/upload`, {
+      method: "POST",
+      body: formData,
+      credentials: "include",
+    });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ detail: res.statusText }));
       throw new ApiError(res.status, body.detail || res.statusText);
@@ -207,6 +300,7 @@ export const api = {
     return res.json() as Promise<{ id: string; title: string; status: string; message: string }>;
   },
 
+  // ── Search / Ask ──────────────────────────────────────────
   search: (query: string, nResults = 10, paperId?: string) =>
     apiFetch<SearchResult[]>("/api/search", {
       method: "POST",
@@ -219,6 +313,7 @@ export const api = {
       body: JSON.stringify({ question, paper_id: paperId || null }),
     }),
 
+  // ── Contradictions ────────────────────────────────────────
   listContradictions: () =>
     apiFetch<ContradictionResult[]>("/api/contradictions"),
 
@@ -232,20 +327,23 @@ export const api = {
       }),
     }),
 
-  // Returns cached count without triggering a new scan
+  // Returns cached counts without triggering a new scan
   contradictionCount: () =>
-    apiFetch<{ count: number; last_scanned: string | null }>("/api/contradictions/count"),
+    apiFetch<ContradictionCount>("/api/contradictions/count"),
 
-  generateHypotheses: (opts?: { researchQuestion?: string; paperIds?: string[]; numHypotheses?: number }) =>
+  // ── Hypotheses ────────────────────────────────────────────
+  generateHypotheses: (opts?: { researchQuestion?: string; paperIds?: string[]; numHypotheses?: number; refresh?: boolean }) =>
     apiFetch<Hypothesis[]>("/api/hypotheses", {
       method: "POST",
       body: JSON.stringify({
         research_question: opts?.researchQuestion || null,
         paper_ids: opts?.paperIds || null,
         num_hypotheses: opts?.numHypotheses ?? 5,
+        refresh: opts?.refresh ?? false,
       }),
     }),
 
+  // ── Import ────────────────────────────────────────────────
   importSearch: (query: string, sources?: string[], maxPerSource?: number) =>
     apiFetch<ImportResult[]>("/api/import/search", {
       method: "POST",
@@ -268,6 +366,7 @@ export const api = {
       body: JSON.stringify(paper),
     }),
 
+  // ── Monitor ───────────────────────────────────────────────
   monitorScan: (opts: {
     topics: { name: string; keywords: string[]; sources?: string[] }[];
     email?: string;
@@ -284,6 +383,7 @@ export const api = {
       }),
     }),
 
+  // ── Graph / Insights ──────────────────────────────────────
   graph: (opts?: { paperIds?: string[]; similarityThreshold?: number; maxPairs?: number; compute?: boolean }) =>
     apiFetch<GraphPayload>("/api/graph", {
       method: "POST",

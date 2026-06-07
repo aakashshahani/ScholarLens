@@ -179,11 +179,17 @@ class PDFAnalysisAgent:
 
     # ── Metadata Extraction ──────────────────────────────────
 
-    def _extract_metadata(self, first_pages_text: str) -> dict:
+    def _anthropic(self, api_key: str | None = None):
+        """Per-request Anthropic client: the caller's BYOK key when provided,
+        else the shared server client. Built per call, never stored on self,
+        so it is safe under concurrent (threadpool) use."""
+        return Anthropic(api_key=api_key) if api_key else self.client
+
+    def _extract_metadata(self, first_pages_text: str, api_key: str | None = None, model: str | None = None) -> dict:
         """Use Claude to extract title, authors, year, abstract from paper text."""
         try:
-            response = self.client.messages.create(
-                model=settings.anthropic_model,
+            response = self._anthropic(api_key).messages.create(
+                model=(model or settings.anthropic_model),
                 max_tokens=1024,
                 messages=[{
                     "role": "user",
@@ -220,7 +226,7 @@ class PDFAnalysisAgent:
 
     # ── Core Ingest Pipeline ─────────────────────────────────
 
-    def ingest_pdf(self, file_path: str | Path, filename: str | None = None) -> Paper:
+    def ingest_pdf(self, file_path: str | Path, filename: str | None = None, api_key: str | None = None, model: str | None = None) -> Paper:
         """
         Full ingestion pipeline:
         1. Extract text from PDF
@@ -232,7 +238,7 @@ class PDFAnalysisAgent:
         file_path = Path(file_path)
         extracted = extract_pdf(file_path)
 
-        meta = self._extract_metadata(extracted.full_text[:6000])
+        meta = self._extract_metadata(extracted.full_text[:6000], api_key=api_key, model=model)
 
         paper = Paper(
             id=Paper.new_id(),
@@ -293,6 +299,8 @@ class PDFAnalysisAgent:
         analysis_type: str,
         prompt_instruction: str,
         max_tokens: int,
+        api_key: str | None = None,
+        model: str | None = None,
     ) -> dict:
         """
         Run one targeted analysis call and persist the result.
@@ -304,8 +312,8 @@ class PDFAnalysisAgent:
         Returns a status dict for logging.
         """
         try:
-            response = self.client.messages.create(
-                model=settings.anthropic_model,
+            response = self._anthropic(api_key).messages.create(
+                model=(model or settings.anthropic_model),
                 max_tokens=max_tokens,
                 messages=[{
                     "role": "user",
@@ -329,7 +337,7 @@ class PDFAnalysisAgent:
             print(f"Analysis failed [{analysis_type}] for {paper_id}: {e}")
             return {"type": analysis_type, "status": "error", "error": str(e)}
 
-    def analyze_paper(self, paper_id: str) -> list[dict]:
+    def analyze_paper(self, paper_id: str, api_key: str | None = None, model: str | None = None) -> list[dict]:
         """
         Run all 6 analysis types concurrently for a paper.
 
@@ -374,6 +382,8 @@ class PDFAnalysisAgent:
                     a["type"],
                     a["prompt_instruction"],
                     a["max_tokens"],
+                    api_key,
+                    model,
                 ): a["type"]
                 for a in pending
             }
@@ -389,7 +399,9 @@ class PDFAnalysisAgent:
 
     # ── Question Answering (agentic RAG — unchanged) ─────────
 
-    def ask(self, question: str, paper_id: str | None = None) -> str:
+    def ask(self, question: str, paper_id: str | None = None,
+            paper_ids: list[str] | None = None,
+            api_key: str | None = None, model: str | None = None) -> str:
         """
         Answer a question using retrieved context from the paper library.
 
@@ -419,8 +431,8 @@ ANSWER STYLE:
         max_turns = 5
 
         for turn in range(max_turns):
-            response = self.client.messages.create(
-                model=settings.anthropic_model,
+            response = self._anthropic(api_key).messages.create(
+                model=(model or settings.anthropic_model),
                 max_tokens=2048,
                 system=system_prompt,
                 tools=TOOLS,
@@ -437,7 +449,7 @@ ANSWER STYLE:
                     {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": self._execute_search_tool(block.input),
+                        "content": self._execute_search_tool(block.input, paper_ids),
                     }
                     for block in assistant_content
                     if block.type == "tool_use"
@@ -453,7 +465,7 @@ ANSWER STYLE:
 
         return final_text
 
-    def _execute_search_tool(self, tool_input: dict) -> str:
+    def _execute_search_tool(self, tool_input: dict, paper_ids: list[str] | None = None) -> str:
         """
         Execute the search_paper_chunks tool for the ask() loop.
 
@@ -468,6 +480,7 @@ ANSWER STYLE:
                 query=tool_input["query"],
                 n_results=tool_input.get("n_results", 5),
                 paper_id=tool_input.get("paper_id"),
+                paper_ids=paper_ids,
             )
             # Resolve titles once, cache within this call
             title_cache: dict[str, str] = {}

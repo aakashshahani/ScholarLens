@@ -1,25 +1,31 @@
-# ScholarLens — Phase 1 Dependencies
+# ScholarLens — Dependencies
 # Install: pip install -r requirements.txt
 
-# Core
+# ── Core ─────────────────────────────────────────────────────
 anthropic>=0.40.0
-streamlit>=1.38.0
 
-# PDF parsing
-pdfplumber>=0.11.0
+# ── PDF parsing ──────────────────────────────────────────────
+pymupdf>=1.24.0            # imports as `fitz` — column-aware extraction
 
-# Vector store
+# ── Retrieval ────────────────────────────────────────────────
 chromadb>=0.5.0
-
-# Embeddings (swap to API embeddings later for better quality)
 sentence-transformers>=3.0.0
+rank-bm25>=0.2.2          # hybrid Stage-1 lexical pass
 
-# Utilities
+# ── Utilities ────────────────────────────────────────────────
 python-dotenv>=1.0.0
 requests>=2.31.0
 resend>=2.0.0
 
-# API server
+# ── API server ───────────────────────────────────────────────
 fastapi>=0.115.0
 uvicorn>=0.30.0
-python-multipart>=0.0.9
+python-multipart>=0.0.9   # required for file uploads
+
+# ── Security (this phase) ────────────────────────────────────
+slowapi>=0.1.9            # per-IP / global rate limiting
+
+# ── Auth + BYOK (next phase) ─────────────────────────────────
+bcrypt>=4.1.0             # password hashing
+cryptography>=42.0.0      # Fernet — encrypt tenant Anthropic keys at rest
+email-validator>=2.1.0    # pydantic EmailStr for the login form

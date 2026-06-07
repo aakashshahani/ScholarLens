@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Fraunces } from "next/font/google";
 import "./globals.css";
-import { LeftRail } from "@/components/left-rail";
-import { CommandPalette } from "@/components/command-palette";
+import { AuthProvider } from "@/lib/auth";
+import { AppShell } from "@/components/app-shell";
 
 // All three fonts via next/font/google — self-hosted at build time, so no
 // external request and no Content-Security-Policy concerns. next/font also
@@ -36,11 +36,11 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="en" className={`h-full ${geist.variable} ${fraunces.variable} ${geistMono.variable}`}>
       <body className="min-h-full antialiased">
-        <LeftRail />
-        <CommandPalette />
-        <main className="pl-[60px] min-h-screen">
-          <div className="max-w-[1180px] mx-auto px-8 py-8">{children}</div>
-        </main>
+        {/* AuthProvider holds the session; AppShell decides between the loader,
+            the login screen, and the full app (chrome + routed page). */}
+        <AuthProvider>
+          <AppShell>{children}</AppShell>
+        </AuthProvider>
       </body>
     </html>
   );

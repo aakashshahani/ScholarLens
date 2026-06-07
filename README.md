@@ -1,22 +1,14 @@
 # ScholarLens
 
-**An AI reasoning system for scientific literature.**
-
-Researchers juggle Google Scholar, Zotero, NotebookLM, and spreadsheets just to stay on top of a single literature review. ScholarLens replaces that workflow with something that actually reasons over a body of papers. Upload a paper and an AI agent extracts its methodology, findings, limitations, and open questions. Then — and this is the part most tools skip — ScholarLens reasons *across* papers: it finds where they contradict each other, where they form consensus, and what hypotheses live in the gaps between them.
-
-It's not a wrapper around an LLM. The system builds persistent, claim-level knowledge that grows with your library — extracted once, reasoned over indefinitely.
+AI reasoning system for scientific literature.
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue) ![Next.js](https://img.shields.io/badge/Next.js-16-black) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688) ![License](https://img.shields.io/badge/License-MIT-green)
 
 > **Live demo:** *coming soon*
 
----
+Most tools that let you "chat with your PDFs" treat the paper as the unit of analysis. ScholarLens treats the **claim** as the unit. Every paper is decomposed into discrete, falsifiable claims — embedded, compared across papers, and judged by an LLM that decides whether two claims contradict, support, or nuance each other. The system builds persistent, claim-level knowledge that compounds as your library grows: extracted once, reasoned over indefinitely.
 
-## What makes it different
-
-Most "chat with your PDF" tools treat the **paper** as the atomic unit. ScholarLens treats the **claim** as the atomic unit. Every paper is decomposed into discrete, testable claims. Those claims are embedded, compared across papers, and judged by an LLM that decides whether two claims contradict, support, or nuance each other — with an explanation and a proposed resolution path.
-
-This claim-level architecture means the product can do things that paper-level RAG fundamentally cannot: detect a contradiction between a specific finding in Paper A and a specific finding in Paper B, trace a generated hypothesis back to the exact claim pairs that motivated it, and build a knowledge graph where the nodes are claims and the edges are verified relationships.
+Built originally because I was spending weeks manually cross-referencing papers for my own lab research and got tired of it.
 
 ---
 
@@ -24,16 +16,18 @@ This claim-level architecture means the product can do things that paper-level R
 
 ### 1. PDF ingestion and chunking
 
-Papers are ingested via `pdfplumber` with layout-aware extraction. The extractor applies several post-processing steps to improve text quality from academic PDFs:
+Papers are ingested via **PyMuPDF** (`fitz`) with column-aware extraction. The extractor applies several post-processing steps to improve text quality from academic PDFs:
 
-- Hyphenation repair across line breaks (`re.sub(r"-\n\s*", "", text)`)
+- **Dynamic two-column detection** — word x-positions are bucketed to locate the actual column gutter on each page, then words are ordered down the left column before the right. This replaced a fixed 50%-page split that broke on papers with off-center or single-column layouts.
+- Hyphenation repair across line breaks
 - Letter/number boundary insertion to fix common concatenation artifacts
 - Section detection via regex patterns matching standard academic headings (Abstract, Introduction, Methods, Results, Discussion, Conclusion, References)
+- **References and appendix sections are excluded** from indexing and search — they add citation noise and dilute retrieval quality without carrying claims
 - Overlap-preserving chunking at ~500 tokens with 50-token overlap, flushing on section boundaries so chunks don't span major structural divides
 
 Each chunk is stored in SQLite with its paper ID, section label, page number, and token count. Chunks are also embedded and stored in ChromaDB for semantic retrieval.
 
-**Known limitation:** pdfplumber handles single-column PDFs well but degrades on two-column academic layouts, occasionally reading across columns instead of down them. This is the primary quality bottleneck — it propagates through every downstream feature since extraction quality sets the ceiling on everything else.
+Extraction quality sets the ceiling on every downstream feature, so the column-detection work was prioritized accordingly — it propagates through chunking, embeddings, claim extraction, and contradiction detection.
 
 ---
 
@@ -70,18 +64,21 @@ The extraction prompt asks the model to identify claims as self-contained, evide
 
 Naïvely comparing every claim against every other claim is O(n²) in LLM calls. With 10 papers and 10 claims each, that's 4,500 potential calls. ScholarLens uses a two-stage pipeline that reduces this to a small fraction.
 
-#### Stage 1: Vector pre-filter (cheap)
+#### Stage 1: Hybrid retrieval pre-filter (cheap)
 
-All claims are embedded using `sentence-transformers` (MiniLM-L6-v2). Cosine similarity is computed between every cross-paper claim pair. Only pairs exceeding a configurable threshold survive to Stage 2.
+All claims are embedded using `sentence-transformers` (MiniLM-L6-v2). Stage 1 runs **two retrievers in parallel** and unions their candidate pairs:
 
-The threshold is exposed as three presets in the UI:
-- **Quick** (threshold 0.55): fast, may miss vocabulary-distant but conceptually related claims
-- **Balanced** (threshold 0.50, default): good coverage for most libraries
-- **Deep** (threshold 0.40): catches more distant relationships, takes longer
+- **Dense (MiniLM):** cosine similarity between every cross-paper claim pair; pairs above a configurable threshold survive.
+- **BM25 (`rank-bm25`):** lexical retrieval over the same claim set, catching pairs that share key terms but sit far apart in embedding space.
 
-**Why MiniLM over BGE-base:** BGE-base was evaluated as a replacement. Its retrieval-tuned training compresses similarity scores upward, reducing the separation between related and unrelated pairs on narrow-domain academic text (delta dropped from +0.274 to +0.141 on our eval set). MiniLM's general-purpose similarity distribution better separates the claim pairs that need LLM judgment from those that don't. BGE infrastructure (the `embed_query`/`embed_texts` asymmetric split) remains in the codebase for future experiments.
+Each surviving pair is tagged with a `retrieval_source` (`dense`, `bm25`, or `both`) so coverage from each retriever is measurable. The dense pass alone misses vocabulary-distant but conceptually related claims; BM25 recovers them (e.g. "transformer attention degrades on long sequences" vs "BERT fails beyond 512 tokens"). The two together feed Stage 2.
 
-**Known limitation:** Two claims using different vocabulary for the same concept may not be adjacent in embedding space and will be filtered out before reaching the LLM. This is a fundamental limitation of dense retrieval. A BM25 keyword retrieval pass alongside the embedding pass would catch vocabulary-distant but conceptually related pairs — planned but not yet implemented.
+The dense threshold is exposed as three presets in the UI:
+- **Quick** (0.55): fast, may miss conceptually related but vocabulary-distant claims
+- **Balanced** (0.50, default): good coverage for most libraries
+- **Deep** (0.40): catches more distant relationships, takes longer
+
+**Why MiniLM over BGE-base:** BGE-base was evaluated as a replacement. Its retrieval-tuned training compresses similarity scores upward, reducing the separation between related and unrelated pairs on narrow-domain academic text (separation dropped from +0.274 to +0.141 on the eval corpus). MiniLM's general-purpose similarity distribution better separates the claim pairs that need LLM judgment from those that don't. The asymmetric `embed_query`/`embed_texts` split remains in the codebase for future experiments.
 
 #### Stage 2: LLM judgment (expensive, rare)
 
@@ -108,16 +105,11 @@ For each pair the model also produces:
 
 The contradiction engine has a formal eval harness that runs independently of the production database.
 
-**Gold set:** 30 hand-labeled claim pairs drawn from 5 real papers in the negotiation AI literature:
-- Duddu et al. (2025) — LLM-based negotiation coaching
-- Shea et al. (2024) — ACE coaching system
-- Ma et al. (2025) — ChatGPT context analysis in humanitarian negotiations
-- Johnson et al. (2017) — autonomous negotiation feedback agents
-- Shaikh et al. (2024) — AI coaching effectiveness
+**Gold set:** 30 hand-labeled claim pairs drawn from real papers in the negotiation-AI literature, balanced across all four classes. The set deliberately oversamples nuance cases (the hardest class) and includes boundary pairs that a careless model would misclassify. A class-balanced set matters here: on an earlier imbalanced 20-pair set, a single miss could swing a class F1 by 0.3+.
 
-The set deliberately oversamples nuance cases (the hardest class) and includes boundary pairs that a careless model would misclassify.
-
-**Isolation:** The eval script calls `judge_pair(pair, use_cache=False)`, bypassing both the in-memory judgment cache and the DB read/write path. Eval runs never contaminate production data and always hit the LLM fresh, ensuring results measure current behavior rather than cached verdicts from a previous prompt version.
+**Two harnesses:**
+- `eval/run_eval.py` scores **Stage 2** (the LLM judge) by feeding gold pairs straight to `judge_pair(pair, use_cache=False)`, bypassing both the in-memory cache and the DB read/write path. Eval runs never contaminate production data and always hit the LLM fresh.
+- `eval/stage1_separation.py` scores **Stage 1 retrieval separation** independently. This split exists because the Stage 2 harness feeds gold pairs directly to the judge, so any retrieval-threshold sweep measured against Stage 2 macro-F1 would produce a flat line — retrieval has to be measured on its own.
 
 **Metrics:** 4-way macro-F1 (treats all classes equally regardless of frequency), Cohen's kappa (agreement corrected for chance), and binary tension F1 collapsing {contradiction, nuance} vs. {support, unrelated}.
 
@@ -145,7 +137,7 @@ The hypothesis agent reads directly from the persisted contradiction results rat
 
 **Post-parse validation:** Cited conflict labels are validated against the actual set of labels passed in. The model occasionally fabricates label references — these are silently dropped. Only verified conflict IDs survive into the stored hypothesis.
 
-**Novelty scoring:** Rather than asking the model to self-assess novelty (unreliable — it tends toward high), novelty is computed as cosine distance between the hypothesis embedding and the nearest chunk in the library. A hypothesis very close to existing library content scores low novelty; one in unexplored territory scores high. The impact score was removed entirely — without citation data or field-level context, no reliable signal exists and fake precision is worse than no score.
+**Novelty scoring:** Rather than asking the model to self-assess novelty (unreliable — it tends toward high), novelty is computed as cosine distance between the hypothesis embedding and the nearest chunk in the library. A hypothesis very close to existing library content scores low novelty; one in unexplored territory scores high. The impact score was removed entirely — without citation data or field-level context, no reliable signal exists, and fake precision is worse than no score.
 
 **Cache:** Hypothesis results are cached keyed on the set of paper IDs, any research question, and a relationships watermark (count of relationships in DB at generation time). Cache is invalidated when the library changes or a new scan adds relationships.
 
@@ -153,27 +145,29 @@ The hypothesis agent reads directly from the persisted contradiction results rat
 
 ### 7. Knowledge graph
 
-The knowledge graph endpoint assembles nodes and edges from the claims and relationships tables — no new LLM calls. Nodes are claims filtered to only those with at least one edge; isolated claims are excluded since they add visual noise without conveying information. Edges are persisted relationships colored by type (red = contradiction, green = support, amber = nuance).
+The knowledge graph endpoint assembles nodes and edges from the claims and relationships tables. It is **read-only by default** (`compute=false`): edges come straight from the persisted relationships table — zero LLM calls, no writes, and the relationships watermark never moves, so viewing the graph never invalidates the hypothesis cache. Passing `compute=true` runs the live two-stage pipeline to expand coverage deliberately.
 
-The frontend runs a custom JavaScript force simulation with centering, repulsion, spring, and damping forces. No D3 dependency — the simulation runs entirely in the browser against the JSON payload the backend returns.
+Nodes are claims filtered to only those with at least one edge; isolated claims are excluded since they add visual noise without conveying information. Edges are persisted relationships colored by type (red = contradiction, green = support, amber = nuance).
+
+The frontend runs a custom JavaScript force simulation with centering, repulsion, spring, and damping forces — paper-colored rings, degree-scaled nodes, hover tooltips, and a contextual inspector rail. No D3 dependency; the simulation runs entirely in the browser against the JSON payload the backend returns.
 
 ---
 
 ### 8. Semantic search and relevance tiers
 
-Search queries are embedded using MiniLM (bare document embedding, no instruction prefix). ChromaDB returns the top-k nearest chunks by cosine distance. Relevance is reported as a tier rather than a percentage:
+Search queries are embedded using MiniLM (bare document embedding, no instruction prefix — MiniLM, unlike BGE retrieval models, needs no query prefix). ChromaDB returns the top-k nearest chunks by **cosine distance** (lower = more similar). Relevance is reported as a tier rather than a percentage, using thresholds calibrated for MiniLM on narrow-domain academic text:
 
-- **Highly relevant** — cosine similarity ≥ 0.6
-- **Related** — 0.4 ≤ similarity < 0.6
-- **Tangential** — similarity < 0.4
+- **Highly relevant** — distance < 0.20
+- **Related** — 0.20 ≤ distance < 0.40
+- **Tangential** — distance ≥ 0.40
 
-The previous implementation showed `(1 - cosine_distance) * 100` as a percentage. This implies calibrated precision that doesn't exist — tiers are honest about what the model actually knows.
+The previous implementation showed `(1 - cosine_distance) * 100` as a percentage. This implied calibrated precision that doesn't exist — tiers are honest about what the model actually knows. The raw distance is still returned (`relevance_score`) so the frontend can sort or filter, but it isn't shown as a headline number.
 
 ---
 
 ### 9. Research monitoring
 
-The monitoring agent searches arXiv and Semantic Scholar for papers matching configured keywords, filters out papers already in the library by title-key deduplication, and scores each candidate by embedding its abstract against the library's existing chunks. Results are grouped by topic with relevance tiers. If a Resend API key is configured, it sends an HTML digest email after each scan. Topics and results are cached in localStorage so they survive page reloads.
+The monitoring agent searches arXiv and Semantic Scholar for papers matching configured keywords, filters out papers already in the library by title-key deduplication, and scores each candidate by embedding its abstract against the library's existing chunks. Results are grouped by topic with relevance tiers. Per-source failures are reported honestly (a `SourceUnavailable` exception and a `sources_failed` field surface an arXiv-down banner rather than silently returning empty results), and queries are sanitised before dispatch. If a Resend API key is configured, it sends an HTML digest email after each scan, with honest `email_sent`/`email_error` status. Topics and results are cached in localStorage so they survive page reloads.
 
 ---
 
@@ -184,11 +178,25 @@ The cost model for a naive implementation is brutal: every page load re-extracts
 - A claim is extracted at most once per paper
 - A relationship is judged at most once per claim pair (idempotent upsert keyed on sorted claim ID pair)
 - The insight feed is a pure DB read — zero LLM calls per load regardless of library size
-- The knowledge graph reads from cache — no new LLM calls on re-render
+- The knowledge graph reads from cache by default — no new LLM calls on re-render
 
 Cache invalidation: deleting a paper cascades its claims (FK) and manually purges their relationships; re-analyzing a paper explicitly clears stale claims and relationships before re-running.
 
-The frontend mirrors this with localStorage caching (24-hour TTL, version-based busting) for contradiction results, graph payloads, and hypothesis outputs — results survive tab switches and full page reloads.
+The frontend mirrors this with localStorage caching (24-hour TTL, version-based busting, library-fingerprint cache-busting) for contradiction results, graph payloads, and hypothesis outputs — results survive tab switches and full page reloads. A React error boundary wraps the conflict-map page so a malformed payload degrades gracefully instead of blanking the route.
+
+---
+
+### 11. Security, authentication, and multi-tenancy
+
+ScholarLens is multi-user: every account has its own private library, and the backend is hardened against the common web-app attack classes.
+
+**Authentication.** Email + password, with passwords hashed using **bcrypt** (never stored in plaintext). On login the server issues an opaque 256-bit session token stored in an **httpOnly + Secure + SameSite=Lax** cookie — httpOnly so JavaScript can't read it (defangs token theft via XSS), Secure so it's only sent over HTTPS, SameSite=Lax so it isn't sent on cross-site requests (defeats CSRF). Sessions live server-side in a `sessions` table and rotate on each login. A FastAPI dependency (`get_current_user`) gates every protected endpoint.
+
+**Per-user data isolation.** Every paper carries a `user_id`; claims and relationships inherit ownership through their paper. Direct-object endpoints (`GET`/`DELETE /api/papers/{id}`) verify ownership and return `404` (not `403`) for another user's resource, so the API never reveals that an id exists. Aggregate features — search, contradictions, hypotheses, graph, insights, monitor — are scoped to the caller's paper IDs, closing the IDOR (insecure direct object reference) bug class.
+
+**BYOK (bring-your-own-key).** Each user can store their own Anthropic key, encrypted at rest with **Fernet** (the encryption key lives in the environment, never the database). That user's LLM calls then run on their key; users without one fall back to the server key. The plaintext key is never returned to the client (settings shows a boolean + mask) and is validated without spending tokens via `models.list()`.
+
+**Abuse protection.** Expensive endpoints carry per-IP **rate limits** (`slowapi`) — uploads, contradiction/hypothesis generation, search, monitor, and login (brute-force defense) — plus a global backstop. Uploads are validated by **magic bytes** (`%PDF-`), size-capped via a bounded read, and written under a generated UUID filename so a hostile client filename can't escape the upload directory (**path-traversal** defense). Admin endpoints are gated behind an environment token and fail closed when unset. All DB queries are parameterized (no SQL injection); rendered text relies on React's default escaping (no XSS); the localStorage cache is namespaced per user and cleared on logout.
 
 ---
 
@@ -196,11 +204,11 @@ The frontend mirrors this with localStorage caching (24-hour TTL, version-based 
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Next.js Frontend (App Router, TypeScript)           │
+│  Next.js 16 Frontend (App Router, TypeScript)        │
 │                                                       │
-│  Situation room  · The corpus  · Knowledge field     │
-│  Conflict map    · Generative bench · Research wire  │
-│  Research monitor · ⌘K command palette               │
+│  Dashboard  ·  Library  ·  Knowledge graph           │
+│  Conflict map  ·  Generative bench  ·  Monitor       │
+│  ⌘K command palette                                   │
 │                                                       │
 │  localStorage cache (contradictions, graph, hypo)    │
 └─────────────────────────┬───────────────────────────┘
@@ -209,7 +217,7 @@ The frontend mirrors this with localStorage caching (24-hour TTL, version-based 
 │  FastAPI Backend                                      │
 │                                                       │
 │  PDFAnalysisAgent   — 6 parallel LLM calls/paper     │
-│  ContradictionAgent — 2-stage pipeline (vec → LLM)   │
+│  ContradictionAgent — 2-stage pipeline (BM25+dense → LLM) │
 │  HypothesisAgent    — conflict-grounded synthesis     │
 │  PaperImporter      — arXiv + Semantic Scholar       │
 │  MonitoringAgent    — topic watch + email digest     │
@@ -218,11 +226,12 @@ The frontend mirrors this with localStorage caching (24-hour TTL, version-based 
 ┌──────────┴──────────┐  ┌────────┴─────────────────┐
 │  SQLite (WAL mode)  │  │  ChromaDB                 │
 │                     │  │                           │
-│  papers             │  │  chunk embeddings         │
-│  analyses           │  │  (MiniLM-L6-v2)           │
-│  chunks             │  │                           │
-│  claims  ← cache    │  │                           │
-│  relationships ← cache  │                          │
+│  users · sessions   │  │  chunk embeddings         │
+│  papers (user_id)   │  │  (MiniLM-L6-v2)           │
+│  analysis_results   │  │                           │
+│  chunks · claims    │  │                           │
+│  relationships      │  │                           │
+│  hypothesis_cache   │  │                           │
 └─────────────────────┘  └───────────────────────────┘
 ```
 
@@ -234,11 +243,15 @@ The frontend mirrors this with localStorage caching (24-hour TTL, version-based 
 |-----------|--------|-----|
 | LLM | Claude Haiku (Anthropic API) | Tool use support, strong structured extraction, cost-effective |
 | Backend | FastAPI | Async, typed, automatic OpenAPI docs at `/api/docs` |
-| Frontend | Next.js 16 + TypeScript | App Router, server components, fast iteration |
+| Frontend | Next.js 16 + TypeScript + Tailwind v4 | App Router, server components, Turbopack, fast iteration |
 | Embeddings | sentence-transformers MiniLM-L6-v2 | Runs locally, no API cost, better score separation than BGE on narrow-domain text |
+| Lexical retrieval | rank-bm25 | Hybrid Stage-1 pass alongside dense retrieval; recovers vocabulary-distant claim pairs |
 | Vector DB | ChromaDB | Zero setup, persistent, cosine similarity, migrates to pgvector |
 | Database | SQLite (WAL mode) | Single file, FK cascades, PostgreSQL-compatible schema |
-| PDF parsing | pdfplumber | Layout-aware extraction with section detection heuristics |
+| Auth | bcrypt + httpOnly session cookies | No external dependency; readable, upgradeable; cookie invisible to JS |
+| Key encryption | cryptography (Fernet) | Encrypts per-user Anthropic keys at rest |
+| Rate limiting | slowapi | Per-IP limits on expensive endpoints + login brute-force defense |
+| PDF parsing | PyMuPDF (`fitz`) | Fast, column-aware extraction with dynamic gutter detection |
 | Email | Resend | HTML digest delivery for monitoring agent |
 
 ---
@@ -283,42 +296,56 @@ App at `http://localhost:3000`.
 
 ```
 scholarlens/
-  api.py                  FastAPI — all REST endpoints
+  api.py                    FastAPI — all REST endpoints (auth-gated, per-user scoped)
+  auth.py                   Auth: bcrypt passwords, sessions, Fernet key encryption, get_current_user
   config/
-    settings.py           Config, env vars, relevance tier thresholds
+    settings.py             Config, env vars, relevance tiers, security / auth / rate-limit settings
   db/
-    database.py           SQLite data layer: papers, claims, relationships
+    database.py             SQLite data layer: users, sessions, papers (user_id), claims, relationships, caches
   agents/
-    pdf_analyst.py        Parallel 6-type analysis pipeline
-    contradiction_agent.py  Two-stage pipeline with eval harness support
-    hypothesis_agent.py   Conflict-grounded hypothesis synthesis
-    paper_import.py       arXiv + Semantic Scholar import + dedup
-    monitoring_agent.py   Topic monitoring + Resend email digest
-  pdf_parser.py           PDF extraction and section-aware chunking
-  vector_store.py         ChromaDB wrapper (embed_query / embed_texts split)
+    pdf_analyst.py          Parallel 6-type analysis pipeline + agentic RAG (ask)
+    contradiction_agent.py  Two-stage pipeline (BM25+dense → LLM judge), eval harness support
+    hypothesis_agent.py     Conflict-grounded hypothesis synthesis
+    paper_import.py         arXiv + Semantic Scholar import + dedup + retry
+    monitoring_agent.py     Topic monitoring + Resend email digest
+  utils/
+    pdf_parser.py           PyMuPDF extraction, dynamic column detection, section-aware chunking
+    vector_store.py         ChromaDB wrapper (embed_query / embed_texts split)
+    bm25_index.py           Lexical retrieval index for the hybrid Stage-1 pass
   eval/
-    gold_claims.json      30 hand-labeled claim pairs
-    run_eval.py           Scoring script (macro-F1, kappa, binary tension F1)
+    gold_claims.json        30 hand-labeled claim pairs, 4 balanced classes
+    run_eval.py             Stage 2 scoring (macro-F1, kappa, binary tension F1)
+    stage1_separation.py    Stage 1 retrieval-separation harness
   frontend/
     src/
-      app/                Next.js pages
-      components/         Left rail, command palette, shared UI
+      app/                  Next.js pages
+      components/           Left rail, command palette, shared UI
       lib/
-        api.ts            Typed API client
-        cache.ts          localStorage cache with TTL + version busting
-  data/                   Runtime (SQLite + ChromaDB — gitignored)
+        api.ts              Typed API client
+        cache.ts            localStorage cache — per-user namespaced, TTL + version busting
+  data/                     Runtime (SQLite + ChromaDB — gitignored)
 ```
 
 ---
 
 ## API reference
 
+All endpoints except `/api/health` and the `/api/auth/{register,login,logout}` routes require an authenticated session cookie. Library/aggregate endpoints are scoped to the authenticated user.
+
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/health` | System status, paper count, embedding count |
+| GET | `/api/health` | System status, paper count, embedding count, library fingerprint |
+| POST | `/api/auth/register` | Create account, set session cookie (first account adopts pre-auth papers) |
+| POST | `/api/auth/login` | Authenticate, rotate + set session cookie |
+| POST | `/api/auth/logout` | Clear the current session |
+| POST | `/api/auth/logout-all` | Revoke every session for the user |
+| GET | `/api/auth/me` | Current authenticated user |
+| GET | `/api/settings` | User settings (model, digest email, library name, masked key) |
+| PUT | `/api/settings` | Update settings / store BYOK key (Fernet-encrypted) |
+| POST | `/api/settings/test-key` | Validate an Anthropic key without spending tokens |
 | GET | `/api/papers` | List papers with analysis types and claim count |
 | GET | `/api/papers/{id}` | Paper detail, analyses (scaffolding stripped), chunk count |
-| POST | `/api/papers/upload` | Upload PDF — deduplication before ingest |
+| POST | `/api/papers/upload` | Upload PDF — deduplication before ingest, background analysis |
 | DELETE | `/api/papers/{id}` | Delete paper, cascade claims + relationships |
 | POST | `/api/papers/{id}/reanalyze` | Re-run analyses, invalidate claim/relationship cache |
 | GET | `/api/papers/{id}/status` | Analysis completion status for polling |
@@ -327,71 +354,36 @@ scholarlens/
 | GET | `/api/contradictions/count` | Cached relationship counts — zero LLM calls |
 | POST | `/api/contradictions` | Run two-stage contradiction scan |
 | POST | `/api/hypotheses` | Generate conflict-grounded hypotheses |
-| POST | `/api/graph` | Build claim knowledge graph from cache |
+| POST | `/api/graph` | Build claim knowledge graph (`compute=false` read-only by default) |
 | POST | `/api/insights` | Synthesized insight feed — pure DB read |
 | POST | `/api/import/search` | Search arXiv / Semantic Scholar |
 | POST | `/api/import/lookup` | Lookup by arXiv ID, DOI, or URL |
 | POST | `/api/import/add` | Import paper — dedup check before PDF download |
 | POST | `/api/monitor/scan` | Run monitoring scan with optional email digest |
+| POST | `/api/admin/fix-abstracts` | Re-fetch truncated abstracts *(admin — gate before deploy)* |
 
 Full interactive docs at `/api/docs`.
-
----
-
-## Evaluation
-
-The contradiction detection engine has a formal eval harness — see Section 5 above for full methodology.
-
-| Version | Macro-F1 | Kappa | Binary Tension F1 |
-|---------|----------|-------|-------------------|
-| Baseline (summary-based claims) | 0.690 | 0.552 | 0.774 |
-| Task 2 (grounded claims) | 0.648 | 0.513 | 0.733 |
-| Task 2b (nuance prompt v1) | 0.644 | 0.500 | 0.857 |
-| **Task 2c (current)** | **0.788** | **0.683** | **0.857** |
-
----
-
-## Demo screenshots
-
-<img width="1545" height="847" alt="Situation room" src="https://github.com/user-attachments/assets/b189bc55-00a7-4caa-8c27-6d2cc64fbb18" />
-<img width="1549" height="769" alt="Conflict map" src="https://github.com/user-attachments/assets/b77a8218-947e-46f2-bd19-99340097c417" />
-<img width="1538" height="833" alt="Generative bench" src="https://github.com/user-attachments/assets/0c3be7f2-9f9b-4278-a810-64acaa398d24" />
-<img width="1589" height="770" alt="Knowledge field" src="https://github.com/user-attachments/assets/2c5301b4-0400-4ee4-92e9-fcae883f97c9" />
-<img width="1355" height="834" alt="Research wire" src="https://github.com/user-attachments/assets/749ad6a2-7092-4287-89d1-04d0ca192a6a" />
-<img width="1108" height="824" alt="The corpus" src="https://github.com/user-attachments/assets/ade9c797-b98c-43b9-811b-96a82c24d331" />
-<img width="1020" height="786" alt="Paper detail" src="https://github.com/user-attachments/assets/f9b6f888-e0b2-4e9b-8e71-bb7ae834b5bd" />
 
 ---
 
 ## Roadmap
 
 **Done**
-- Agentic PDF analysis — 6 structured report types per paper
-- Section-aware chunking with configurable size and overlap
-- Semantic search and per-paper Q&A (RAG)
-- Two-stage contradiction detection with formal eval harness (macro-F1 0.788, kappa 0.683)
-- Evidence-grounded claim extraction from source text
-- Prompt-engineered contradiction judge with decision tree + few-shot boundary examples
-- BGE-base embedding evaluation — kept MiniLM on principled grounds
-- Parallel analysis pipeline (~5x faster upload, same API cost)
-- Claim + relationship SQLite cache (extracted once, judged once, reused indefinitely)
-- Hypothesis generation grounded in persisted conflict IDs with post-parse validation
-- Hypothesis output cache with library watermark invalidation
-- Novelty scoring via corpus cosine distance (replaced LLM self-assessment)
-- Impact score removed (no reliable signal without citation data)
-- Semantic search relevance tiers (replaced fake percentage precision)
-- Insight feed as pure DB read (zero LLM calls per load)
-- Knowledge graph from claim/relationship cache
-- Research monitor with arXiv + Semantic Scholar + Resend email digest
-- Automatic deduplication on upload and import (DOI → arXiv ID → normalized title key)
-- Dark UI — left rail nav, ⌘K command palette, localStorage result caching
-- FastAPI + Next.js migration from original Streamlit prototype
 
-**Next**
-- GROBID or PyMuPDF for better multi-column PDF parsing
-- BM25 keyword retrieval pass alongside dense retrieval
-- Deployed hosted demo
-- Auth and multi-user libraries
+Core pipeline: 6-type parallel analysis, two-stage contradiction detection (macro-F1 0.788, kappa 0.683), evidence-grounded claim extraction, BM25+dense hybrid retrieval, hypothesis generation with novelty scoring, research monitor with Resend digest, semantic search with relevance tiers, insight feed as a pure DB read, read-only knowledge graph with gated compute path, arXiv + Semantic Scholar import with dedup.
+
+Security and multi-user: email + password auth (bcrypt, httpOnly session cookies), per-user library scoping and IDOR-safe ownership checks, BYOK with Fernet key encryption, model selection with server-side ceiling (Haiku/Sonnet on free tier, Opus needs own key), free-tier action cap (15 total / 2 Sonnet, 402 before any token spend), upload hardening (magic-byte check, size cap, path-traversal-safe UUID filenames), per-IP rate limiting, parameterized queries throughout.
+
+Frontend: login/register gate, settings panel (BYOK key management, model picker, usage bars), per-user localStorage cache namespacing.
+
+**In progress**
+- Landing page for unauthenticated visitors
+- Daily monitor scheduling (APScheduler, per-user topics + digest email from DB)
+- Deploy — Railway/Render backend + Vercel frontend, security headers, `COOKIE_SECURE=true`
+
+**Later**
+- Cross-encoder reranking on the Stage-1 retrieval pass
+- Demo video
 
 ---
 

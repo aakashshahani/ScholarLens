@@ -66,11 +66,19 @@ class MonitoringAgent:
         if resend_key:
             resend.api_key = resend_key
 
+    def _anthropic(self, api_key: str | None = None):
+        """Per-request Anthropic client: the caller's BYOK key when provided,
+        else the shared server client. Built per call, never stored on self,
+        so it is safe under concurrent (threadpool) use."""
+        return Anthropic(api_key=api_key) if api_key else self.client
+
     def scan_topic(
         self,
         topic: MonitorTopic,
         max_per_source: int = 5,
         relevance_threshold: float = 0.3,
+        lib_ids: list[str] | None = None,
+        lib_titles: set[str] | None = None,
     ) -> DigestResult:
         """
         Scan a single topic for new relevant papers.
@@ -113,7 +121,7 @@ class MonitoringAgent:
                 unique.append(r)
 
         # Filter out papers already in library (by title similarity)
-        existing_titles = {p.title.lower().strip()[:60] for p in self.db.list_papers(limit=500)}
+        existing_titles = lib_titles if lib_titles is not None else {p.title.lower().strip()[:60] for p in self.db.list_papers(limit=500)}
         new_papers = [r for r in unique if r.title.lower().strip()[:60] not in existing_titles]
 
         if not new_papers:
@@ -126,7 +134,7 @@ class MonitoringAgent:
             )
 
         # Score relevance against library
-        scored = self._score_relevance(new_papers, relevance_threshold)
+        scored = self._score_relevance(new_papers, relevance_threshold, lib_ids=lib_ids)
 
         return DigestResult(
             topic=topic.name,
@@ -140,13 +148,18 @@ class MonitoringAgent:
         self,
         papers: list[ImportResult],
         threshold: float,
+        lib_ids: list[str] | None = None,
     ) -> list[ScoredPaper]:
         """
         Score each paper's relevance to the existing library.
         Uses embedding similarity between paper abstracts and library content.
         """
-        # If library is empty, all papers are relevant
-        if self.vector_store.count() == 0:
+        # If the user's library is empty, all papers are relevant
+        empty_library = (
+            (lib_ids is not None and len(lib_ids) == 0)
+            or (lib_ids is None and self.vector_store.count() == 0)
+        )
+        if empty_library:
             return [
                 ScoredPaper(paper=p, relevance_score=0.5, relevance_reason="No library to compare against")
                 for p in papers
@@ -161,6 +174,7 @@ class MonitoringAgent:
             results = self.vector_store.search(
                 query=paper.abstract[:500],
                 n_results=3,
+                paper_ids=lib_ids,
             )
 
             if results:
@@ -183,7 +197,7 @@ class MonitoringAgent:
         scored.sort(key=lambda s: s.relevance_score, reverse=True)
         return scored
 
-    def generate_digest_summary(self, results: list[DigestResult]) -> str:
+    def generate_digest_summary(self, results: list[DigestResult], api_key: str | None = None, model: str | None = None) -> str:
         """Use the LLM to write a brief digest summary."""
         if not any(r.scored_papers for r in results):
             return "No new relevant papers found today."
@@ -202,8 +216,8 @@ class MonitoringAgent:
                     )
 
         try:
-            response = self.client.messages.create(
-                model=settings.anthropic_model,
+            response = self._anthropic(api_key).messages.create(
+                model=(model or settings.anthropic_model),
                 max_tokens=1024,
                 messages=[{
                     "role": "user",
@@ -304,6 +318,9 @@ class MonitoringAgent:
         recipient: str | None = None,
         max_per_source: int = 5,
         relevance_threshold: float = 0.3,
+        user_id: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
     ) -> tuple[list[DigestResult], bool, str | None, list[str]]:
         """
         Full monitoring pipeline:
@@ -317,14 +334,24 @@ class MonitoringAgent:
         limits) so the UI never claims a send that didn't happen.
         """
         self._failed_sources: set[str] = set()
+        # Scope the comparison library to this user's papers.
+        if user_id is not None:
+            lib_papers = self.db.list_papers(limit=500, user_id=user_id)
+        else:
+            lib_papers = self.db.list_papers(limit=500)
+        lib_ids = [p.id for p in lib_papers]
+        lib_titles = {p.title.lower().strip()[:60] for p in lib_papers}
         results = []
         for topic in topics:
-            result = self.scan_topic(topic, max_per_source, relevance_threshold)
+            result = self.scan_topic(
+                topic, max_per_source, relevance_threshold,
+                lib_ids=lib_ids, lib_titles=lib_titles,
+            )
             results.append(result)
 
         # Generate digest summary if there are relevant papers
         if any(r.scored_papers for r in results):
-            summary = self.generate_digest_summary(results)
+            summary = self.generate_digest_summary(results, api_key=api_key, model=model)
         else:
             summary = "No new relevant papers found in today's scan."
 

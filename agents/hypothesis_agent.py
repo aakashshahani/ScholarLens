@@ -281,12 +281,20 @@ class HypothesisAgent:
 
     # ── Main entry point ─────────────────────────────────────
 
+    def _anthropic(self, api_key: str | None = None):
+        """Per-request Anthropic client: the caller's BYOK key when provided,
+        else the shared server client. Built per call, never stored on self,
+        so it is safe under concurrent (threadpool) use."""
+        return Anthropic(api_key=api_key) if api_key else self.client
+
     def generate(
         self,
         research_question: str | None = None,
         paper_ids: list[str] | None = None,
         num_hypotheses: int = 5,
         force_refresh: bool = False,
+        api_key: str | None = None,
+        model: str | None = None,
     ) -> list[Hypothesis]:
         """
         Generate testable hypotheses from the library.
@@ -366,8 +374,8 @@ class HypothesisAgent:
             )
 
         try:
-            response = self.client.messages.create(
-                model=settings.anthropic_model,
+            response = self._anthropic(api_key).messages.create(
+                model=(model or settings.anthropic_model),
                 max_tokens=4096,
                 messages=[{
                     "role": "user",
