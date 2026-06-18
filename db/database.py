@@ -805,6 +805,11 @@ class Database:
             expires_at=expires_at,
         )
         conn = self._get_conn()
+        # Purge expired sessions for this user on login to prevent unbounded table growth.
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id = ? AND expires_at < datetime('now')",
+            (user_id,),
+        )
         conn.execute(
             "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
             (sess.token, sess.user_id, sess.created_at, sess.expires_at),

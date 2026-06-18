@@ -441,6 +441,13 @@ def test_api_key(req: TestKeyRequest, user: User = Depends(authlib.get_current_u
 
 # ── Health Check ─────────────────────────────────────────────
 
+@app.get("/health")
+@limiter.exempt
+def health_root():
+    """Bare /health for Render's default health check probe."""
+    return {"status": "ok"}
+
+
 @app.get("/api/health")
 @limiter.exempt
 def health():

@@ -145,12 +145,8 @@ export default function Dashboard() {
   return (
     <div className="relative min-h-screen">
 
-      {/* ── Animated gradient mesh background ───────────── */}
+      {/* ── Subtle grain overlay ─────────────────────────── */}
       <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
-        {/* Three slow-orbiting radial blobs */}
-        <div className="db-blob db-blob-1" />
-        <div className="db-blob db-blob-2" />
-        <div className="db-blob db-blob-3" />
         {/* SVG grain overlay */}
         <svg className="absolute inset-0 w-full h-full opacity-[0.032]" xmlns="http://www.w3.org/2000/svg">
           <filter id="grain">
@@ -327,9 +323,6 @@ function StatCard({ icon, value, label, color, ring, suffix = "", sub, delay = 0
   return (
     <div className="db-stat-card bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4 relative overflow-hidden"
       style={{ animationDelay: `${delay}ms` }}>
-      {/* Subtle corner glow matching accent */}
-      <div className="absolute top-0 right-0 w-16 h-16 rounded-bl-full opacity-[0.07]"
-        style={{ background: color }} />
       <div className="flex items-start justify-between mb-3">
         <span style={{ color }}>{icon}</span>
         {ring !== undefined && (

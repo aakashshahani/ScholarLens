@@ -1,11 +1,84 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/lib/auth";
 import { ApiError } from "@/lib/api";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, ArrowLeft } from "lucide-react";
 
-export function AuthGate() {
+/* Faint, slow claim-field behind the card — a quiet echo of the landing hero
+   so the gate feels like the same product, not a bare login screen. Heavily
+   dimmed and static-friendly; respects reduced-motion. */
+function GateBackdrop() {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion:reduce)").matches;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const COL = ["#FF5C5C", "#3DD4A0", "#F5A623"];
+    let W = 0, H = 0, t = 0, raf = 0;
+    type N = { x: number; y: number; vx: number; vy: number; r: number };
+    let nodes: N[] = [];
+    let edges: { a: number; b: number; c: string }[] = [];
+    const hexA = (hex: string, a: number) => {
+      const n = parseInt(hex.slice(1), 16);
+      return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+    };
+    const build = () => {
+      const count = 26;
+      nodes = Array.from({ length: count }, () => ({
+        x: Math.random() * W, y: Math.random() * H,
+        vx: (Math.random() - 0.5) * 0.08, vy: (Math.random() - 0.5) * 0.08,
+        r: 1.4 + Math.random() * 1.8,
+      }));
+      edges = [];
+      for (let i = 0; i < 18; i++) {
+        const a = Math.floor(Math.random() * count);
+        let b = Math.floor(Math.random() * count);
+        if (a === b) b = (b + 1) % count;
+        edges.push({ a, b, c: COL[Math.floor(Math.random() * 3)] });
+      }
+    };
+    const resize = () => {
+      W = canvas.clientWidth; H = canvas.clientHeight;
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); build();
+    };
+    const frame = () => {
+      t += 0.012; ctx.clearRect(0, 0, W, H);
+      for (const nd of nodes) {
+        nd.x += nd.vx; nd.y += nd.vy;
+        if (nd.x < 0 || nd.x > W) nd.vx *= -1;
+        if (nd.y < 0 || nd.y > H) nd.vy *= -1;
+      }
+      for (const e of edges) {
+        const a = nodes[e.a], b = nodes[e.b];
+        if (!a || !b) continue;
+        const dist = Math.hypot(b.x - a.x, b.y - a.y);
+        if (dist > 320) continue;
+        const op = (1 - dist / 320) * (0.14 + Math.sin(t + e.a) * 0.05);
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2 - dist * 0.1;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.quadraticCurveTo(mx, my, b.x, b.y);
+        ctx.strokeStyle = hexA(e.c, Math.max(0, op)); ctx.lineWidth = 1; ctx.stroke();
+      }
+      for (const nd of nodes) {
+        ctx.beginPath(); ctx.arc(nd.x, nd.y, nd.r, 0, 6.28);
+        ctx.fillStyle = hexA("#9BA1AD", 0.3); ctx.fill();
+      }
+      raf = requestAnimationFrame(frame);
+    };
+    resize();
+    if (!reduce) frame();
+    else { for (const nd of nodes) { ctx.beginPath(); ctx.arc(nd.x, nd.y, nd.r, 0, 6.28); ctx.fillStyle = hexA("#9BA1AD", 0.3); ctx.fill(); } }
+    window.addEventListener("resize", resize);
+    return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", resize); };
+  }, []);
+  return <canvas ref={ref} className="absolute inset-0 w-full h-full block opacity-60" />;
+}
+
+export function AuthGate({ onBack }: { onBack?: () => void }) {
   const { login, register } = useAuth();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
@@ -18,16 +91,13 @@ export function AuthGate() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-
     if (!email.trim()) return setError("Enter your email.");
     if (isRegister && password.length < 8) return setError("Password must be at least 8 characters.");
     if (!password) return setError("Enter your password.");
-
     setSubmitting(true);
     try {
       if (isRegister) await register(email.trim(), password);
       else await login(email.trim(), password);
-      // On success the AuthProvider sets `user`, AppShell swaps to the app.
     } catch (err) {
       const msg =
         err instanceof ApiError
@@ -47,9 +117,25 @@ export function AuthGate() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center px-4 bg-[var(--canvas)]">
-      {/* Logomark + wordmark */}
-      <div className="flex items-center gap-3 mb-8 fade-up">
+    <div className="relative min-h-screen flex flex-col items-center justify-center px-4 bg-[var(--canvas)] overflow-hidden">
+      <GateBackdrop />
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{ background: "radial-gradient(120% 90% at 50% 45%, transparent 25%, rgba(11,13,18,0.7) 70%, var(--canvas) 100%)" }}
+      />
+
+      {/* back to landing — only when there's a landing to return to */}
+      {onBack && (
+        <button
+          onClick={onBack}
+          className="absolute top-6 left-6 z-10 inline-flex items-center gap-1.5 text-[13px] text-[var(--text-3)] hover:text-[var(--text-1)] t-all"
+        >
+          <ArrowLeft size={14} /> Back
+        </button>
+      )}
+
+      {/* logomark + wordmark */}
+      <div className="relative z-10 flex items-center gap-3 mb-8 fade-up">
         <span className="relative flex items-center justify-center w-8 h-8 rounded-[8px] bg-[var(--gen)] glow-gen">
           <span className="w-3 h-3 rounded-full border-[1.5px] border-white" />
         </span>
@@ -58,7 +144,8 @@ export function AuthGate() {
 
       <form
         onSubmit={submit}
-        className="w-full max-w-[380px] bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-7 fade-up"
+        className="relative z-10 w-full max-w-[380px] bg-[var(--surface-2)] border border-[var(--line-2)] rounded-[var(--r-lg)] p-7 fade-up"
+        style={{ boxShadow: "0 30px 80px -40px rgba(0,0,0,0.8)" }}
       >
         <h1 className="font-display text-[22px] leading-tight text-[var(--text-1)]">
           {isRegister ? "Create your library" : "Welcome back"}
@@ -113,7 +200,7 @@ export function AuthGate() {
 
       <button
         onClick={switchMode}
-        className="mt-5 text-[13px] text-[var(--text-3)] hover:text-[var(--text-1)] t-all fade-up"
+        className="relative z-10 mt-5 text-[13px] text-[var(--text-3)] hover:text-[var(--text-1)] t-all fade-up"
       >
         {isRegister ? "Already have an account? " : "New here? "}
         <span className="text-[var(--gen)]">{isRegister ? "Sign in" : "Create one"}</span>

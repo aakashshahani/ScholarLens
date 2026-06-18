@@ -130,44 +130,6 @@ input[type="range"]::-webkit-slider-thumb:hover {
 }
 .cardlink:hover { gap: 8px; }
 
-/* ── Dashboard animated mesh background ─────────────────── */
-.db-blob {
-  position: absolute; border-radius: 50%;
-  filter: blur(80px); opacity: 0.13;
-}
-.db-blob-1 {
-  width: 600px; height: 600px;
-  background: radial-gradient(circle, var(--gen) 0%, transparent 70%);
-  top: -200px; left: -100px;
-  animation: blobFloat1 28s linear infinite;
-}
-.db-blob-2 {
-  width: 500px; height: 500px;
-  background: radial-gradient(circle, var(--support) 0%, transparent 70%);
-  top: 20%; right: -150px;
-  animation: blobFloat2 34s linear infinite;
-}
-.db-blob-3 {
-  width: 400px; height: 400px;
-  background: radial-gradient(circle, var(--nuance) 0%, transparent 70%);
-  bottom: 10%; left: 30%;
-  animation: blobFloat3 22s linear infinite;
-}
-@keyframes blobFloat1 {
-  0%,100% { transform: translate(0,0) scale(1); }
-  33%      { transform: translate(60px,40px) scale(1.08); }
-  66%      { transform: translate(-30px,80px) scale(0.96); }
-}
-@keyframes blobFloat2 {
-  0%,100% { transform: translate(0,0) scale(1); }
-  33%      { transform: translate(-80px,30px) scale(1.05); }
-  66%      { transform: translate(40px,-60px) scale(0.98); }
-}
-@keyframes blobFloat3 {
-  0%,100% { transform: translate(0,0) scale(1); }
-  50%      { transform: translate(-40px,-50px) scale(1.1); }
-}
-
 .db-stat-card { animation: statEntrance 0.5s cubic-bezier(.16,1,.3,1) both; }
 @keyframes statEntrance {
   from { opacity: 0; transform: translateY(12px); }
@@ -177,3 +139,14 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .glow-gen { box-shadow: 0 0 24px -8px var(--gen-glow); }
 .glow-contra { box-shadow: 0 0 24px -8px rgba(255,92,92,0.5); }
 .glow-support { box-shadow: 0 0 24px -8px rgba(61,212,160,0.5); }
+
+/* ── Scroll-reveal (used by landing page) ────────────────── */
+.reveal {
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.55s cubic-bezier(.16,1,.3,1), transform 0.55s cubic-bezier(.16,1,.3,1);
+}
+.reveal.in {
+  opacity: 1;
+  transform: translateY(0);
+}

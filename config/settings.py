@@ -138,7 +138,7 @@ class Settings:
     # Secure flag MUST be False on localhost (http) or the browser drops the
     # cookie. Set COOKIE_SECURE=true in production (https).
     cookie_secure: bool = field(default_factory=lambda: _env_bool("COOKIE_SECURE", False))
-    cookie_samesite: str = "lax"
+    cookie_samesite: str = field(default_factory=lambda: os.getenv("COOKIE_SAMESITE", "lax"))
 
     rl_login: str = field(default_factory=lambda: os.getenv("RL_LOGIN", "10/minute"))
     rl_register: str = field(default_factory=lambda: os.getenv("RL_REGISTER", "5/hour"))

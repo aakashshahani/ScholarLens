@@ -1,22 +1,33 @@
 "use client";
 
-import { ReactNode } from "react";
+import { ReactNode, useState } from "react";
+import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { LeftRail } from "@/components/left-rail";
 import { CommandPalette } from "@/components/command-palette";
 import { AuthGate } from "@/components/auth-gate";
+import Landing from "@/components/landing";
 
 /**
- * Renders one of three states:
- *   loading  → full-screen loader while the initial me() check runs
- *   no user  → the login / register screen (no app chrome)
- *   signed in → the real app: left rail, command palette, and the routed page
+ * Renders one of these states:
+ *   loading                 → full-screen loader while the initial me() check runs
+ *   logged out, "/", browse → the public marketing landing page (no app chrome)
+ *   logged out, gate shown  → the login / register gate (triggered by a landing CTA,
+ *                             or shown immediately on any non-root path)
+ *   signed in               → the real app: left rail, command palette, routed page
+ *
+ * The landing lives at "/" so a shared link lands on marketing, not a login wall.
+ * Its CTAs flip `showGate` to swap in the gate inline — no separate /login route,
+ * so there's nothing to 404 on. The gate's own "Back" resets it via onBack.
+ * Authenticated users get the dashboard at "/" exactly as before.
  *
  * Pages mount only in the signed-in branch, so none of them fire API calls
  * until there's a valid session — which is what stops the 401 waterfall.
  */
 export function AppShell({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
+  const pathname = usePathname();
+  const [showGate, setShowGate] = useState(false);
 
   if (loading) {
     return (
@@ -31,7 +42,14 @@ export function AppShell({ children }: { children: ReactNode }) {
     );
   }
 
-  if (!user) return <AuthGate />;
+  if (!user) {
+    // On the root, show marketing until a CTA asks for the gate.
+    // On any other path, go straight to the gate.
+    if (pathname === "/" && !showGate) {
+      return <Landing onSignIn={() => setShowGate(true)} />;
+    }
+    return <AuthGate onBack={pathname === "/" ? () => setShowGate(false) : undefined} />;
+  }
 
   return (
     <>

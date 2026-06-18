@@ -52,7 +52,17 @@ export default function GraphPage() {
   useEffect(() => {
     api.listPapers(50).then(setPapers);
     const cached = cache.read<GraphPayload>("graph");
-    if (cached?.nodes?.length) { setData(cached); seedPositions(cached); }
+    if (cached?.nodes?.length) {
+      setData(cached); seedPositions(cached);
+    } else {
+      // No cache — fetch persisted relationships from DB (zero LLM calls).
+      // Users should never see an empty graph when data exists in SQLite.
+      setLoading(true);
+      api.graph({ compute: false })
+        .then((g) => { setData(g); cache.write("graph", g); seedPositions(g); })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    }
   }, []);
 
   const seedPositions = (g: GraphPayload) => {
