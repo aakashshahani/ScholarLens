@@ -21,6 +21,14 @@ from config import settings
 
 # â”€â”€ Data Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+def _clean(val):
+    """Strip NUL bytes from strings — Postgres rejects them in string literals.
+    PDFs often contain embedded NUL bytes from binary data or encoding artifacts."""
+    if isinstance(val, str):
+        return val.replace("\x00", "")
+    return val
+
+
 @dataclass
 class Paper:
     id: str
@@ -274,9 +282,9 @@ class Database:
                (id, title, authors, abstract, year, source, doi, arxiv_id,
                 filename, full_text, page_count, user_id, created_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (paper.id, paper.title, json.dumps(paper.authors),
-             paper.abstract, paper.year, paper.source, paper.doi,
-             paper.arxiv_id, paper.filename, paper.full_text,
+            (_clean(paper.id), _clean(paper.title), json.dumps(paper.authors),
+             _clean(paper.abstract), paper.year, _clean(paper.source), _clean(paper.doi),
+             _clean(paper.arxiv_id), _clean(paper.filename), _clean(paper.full_text),
              paper.page_count, paper.user_id, paper.created_at),
         )
         conn.commit()
@@ -371,7 +379,7 @@ class Database:
             """INSERT INTO chunks
                (id, paper_id, text, chunk_index, section, page_number, embedding_id)
                VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-            [(c.id, c.paper_id, c.text, c.chunk_index, c.section,
+            [(c.id, c.paper_id, _clean(c.text), c.chunk_index, _clean(c.section),
               c.page_number, c.embedding_id) for c in chunks],
         )
         conn.commit()
@@ -403,7 +411,7 @@ class Database:
             """INSERT INTO analysis_results (id, paper_id, analysis_type, content, created_at)
                VALUES (%s, %s, %s, %s, %s)""",
             (result.id, result.paper_id, result.analysis_type,
-             result.content, result.created_at),
+             _clean(result.content), result.created_at),
         )
         conn.commit()
         cur.close()
@@ -482,8 +490,8 @@ class Database:
                (id, paper_id, text, section, confidence,
                 evidence, conditions, source_quote, created_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            [(c.id, c.paper_id, c.text, c.section, c.confidence,
-              c.evidence, c.conditions, c.source_quote, c.created_at)
+            [(c.id, c.paper_id, _clean(c.text), _clean(c.section), _clean(c.confidence),
+              _clean(c.evidence), _clean(c.conditions), _clean(c.source_quote), c.created_at)
              for c in claims],
         )
         conn.commit()
