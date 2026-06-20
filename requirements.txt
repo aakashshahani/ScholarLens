@@ -9,8 +9,8 @@ pymupdf>=1.24.0            # imports as `fitz` — column-aware extraction
 
 # ── Retrieval ────────────────────────────────────────────────
 psycopg2-binary>=2.9.0    # PostgreSQL driver for Supabase
-torch --index-url https://download.pytorch.org/whl/cpu
-sentence-transformers>=3.0.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpusentence-transformers>=3.0.0
 rank-bm25>=0.2.2          # hybrid Stage-1 lexical pass
 
 # ── Utilities ────────────────────────────────────────────────
