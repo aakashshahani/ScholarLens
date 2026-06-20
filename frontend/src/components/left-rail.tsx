@@ -7,6 +7,8 @@ import {
   LayoutDashboard, Library, Network, Zap, FlaskConical, Radar, Plus, LogOut, Settings as SettingsIcon,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { useEffect } from "react";
+import { api, type UserSettings } from "@/lib/api";
 
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -20,7 +22,12 @@ const NAV = [
 export function LeftRail() {
   const pathname = usePathname();
   const [expanded, setExpanded] = useState(false);
+  const [libraryName, setLibraryName] = useState<string | null>(null);
   const { user, logout } = useAuth();
+
+  useEffect(() => {
+    api.getSettings().then((s: UserSettings) => setLibraryName(s.library_name)).catch(() => {});
+  }, []);
 
   return (
     <aside
@@ -34,12 +41,16 @@ export function LeftRail() {
         <span className="relative flex items-center justify-center w-6 h-6 rounded-[7px] bg-[var(--gen)] shrink-0 glow-gen">
           <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-white" />
         </span>
-        <span
-          className="font-display text-[15px] text-[var(--text-1)] ml-3 whitespace-nowrap t-all"
-          style={{ opacity: expanded ? 1 : 0 }}
-        >
-          ScholarLens
-        </span>
+        <div className="ml-3 flex flex-col overflow-hidden t-all" style={{ opacity: expanded ? 1 : 0 }}>
+          <span className="font-display text-[15px] text-[var(--text-1)] whitespace-nowrap leading-tight">
+            ScholarLens
+          </span>
+          {libraryName && libraryName !== "My Library" && (
+            <span className="text-[11px] text-[var(--text-4)] whitespace-nowrap truncate leading-tight mt-0.5">
+              {libraryName}
+            </span>
+          )}
+        </div>
       </Link>
 
       {/* Nav */}

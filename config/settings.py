@@ -14,18 +14,15 @@ if _env_file.exists():
     from dotenv import load_dotenv
     load_dotenv(_env_file)
 
-# DATA_DIR is overridable so a deployed host can point it at a PERSISTENT
-# volume. On most PaaS the default working dir is ephemeral — if DATA_DIR
-# lands there, the SQLite DB and ChromaDB store are wiped on every redeploy.
-# Set DATA_DIR=/data (or wherever the mounted volume lives) in production.
-DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data")))
-UPLOAD_DIR = DATA_DIR / "uploads"
+# Upload directory for PDF files. Still local/ephemeral on Render free tier
+# (uploads are transient — only used during analysis, not stored long-term).
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "data" / "uploads")))
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# Legacy aliases kept so existing imports in api.py don't break.
+DATA_DIR = UPLOAD_DIR.parent
 CHROMA_DIR = DATA_DIR / "chroma"
 SQLITE_PATH = DATA_DIR / "scholarlens.db"
-
-# Ensure dirs exist
-for d in [DATA_DIR, UPLOAD_DIR, CHROMA_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -94,6 +91,10 @@ class Settings:
         default_factory=lambda: os.getenv("SEMANTIC_SCHOLAR_KEY", "")
     )
 
+    # ── Database ────────────────────────────────────────
+    # Supabase Postgres URI. Required in production.
+    database_url: str = field(default_factory=lambda: os.getenv("DATABASE_URL", ""))
+
     # ── Security / deploy config ─────────────────────────────
     # Admin token guards expensive maintenance endpoints. When unset they are
     # LOCKED (403) — the safe default for prod. Compared in constant time.
@@ -147,6 +148,8 @@ class Settings:
         errors = []
         if not self.anthropic_api_key:
             errors.append("ANTHROPIC_API_KEY not set")
+        if not self.database_url:
+            errors.append("DATABASE_URL not set")
         return errors
 
     def relevance_tier(self, cosine_distance: float) -> str:

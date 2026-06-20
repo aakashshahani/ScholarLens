@@ -1,5 +1,5 @@
-"""
-ScholarLens API — FastAPI Backend
+﻿"""
+ScholarLens API â€” FastAPI Backend
 
 Exposes all agent functionality as REST endpoints.
 The existing agent code stays exactly the same.
@@ -47,22 +47,22 @@ from agents import (
     MonitorTopic,
 )
 
-# ── App Setup ────────────────────────────────────────────────
+# â”€â”€ App Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 app = FastAPI(
     title="ScholarLens API",
-    description="Research intelligence platform — agentic paper analysis, "
+    description="Research intelligence platform â€” agentic paper analysis, "
                 "cross-paper contradiction detection, and hypothesis generation.",
     version="1.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
 )
 
-# ── Rate limiting ────────────────────────────────────────────
+# â”€â”€ Rate limiting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Per-IP, keyed on the remote address. Storage is in-memory by default
 # (correct for a single instance); set RATE_LIMIT_STORAGE_URI=redis://...
 # in settings to share counters across instances. The global default is a
-# coarse backstop — the meaningful limits are per-endpoint decorators below.
+# coarse backstop â€” the meaningful limits are per-endpoint decorators below.
 limiter = Limiter(
     key_func=get_remote_address,
     default_limits=[settings.rl_default],
@@ -91,7 +91,7 @@ app.add_middleware(
 )
 
 
-# ── Generic error handler ────────────────────────────────────
+# â”€â”€ Generic error handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Unhandled exceptions return a clean message instead of leaking internals
 # (stack traces, file paths) to the client. HTTPException and RateLimitExceeded
 # have their own more-specific handlers and are unaffected.
@@ -101,9 +101,9 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
-# ── Admin gate ───────────────────────────────────────────────
+# â”€â”€ Admin gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Guards expensive maintenance endpoints. When ADMIN_TOKEN is unset the gate
-# fails closed (403) — so these are dead in prod unless deliberately enabled.
+# fails closed (403) â€” so these are dead in prod unless deliberately enabled.
 def require_admin(x_admin_token: Optional[str] = Header(default=None)):
     expected = settings.admin_token
     if not expected or not x_admin_token or not secrets.compare_digest(x_admin_token, expected):
@@ -111,9 +111,9 @@ def require_admin(x_admin_token: Optional[str] = Header(default=None)):
     return True
 
 
-# ── Upload helpers ───────────────────────────────────────────
+# â”€â”€ Upload helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def _safe_display_name(name: Optional[str]) -> str:
-    """Sanitize a client-supplied filename for DISPLAY/storage only — never for
+    """Sanitize a client-supplied filename for DISPLAY/storage only â€” never for
     the on-disk path. Strips any directory components and disallowed chars."""
     if not name:
         return "upload.pdf"
@@ -122,7 +122,7 @@ def _safe_display_name(name: Optional[str]) -> str:
     base = base[:120]
     return base or "upload.pdf"
 
-# ── Services (initialized once at startup) ───────────────────
+# â”€â”€ Services (initialized once at startup) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 db = Database()
 agent = PDFAnalysisAgent()
@@ -132,8 +132,8 @@ importer = PaperImporter()
 monitor = MonitoringAgent()
 
 
-# ── Insight feed cache ───────────────────────────────────────
-# Simple in-process TTL cache — no new DB table needed.
+# â”€â”€ Insight feed cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Simple in-process TTL cache â€” no new DB table needed.
 # The feed is pure DB reads so it's cheap to recompute, but repeated
 # page loads from the frontend shouldn't re-run the same queries on
 # every request. Cache holds the last assembled result and its timestamp.
@@ -154,7 +154,7 @@ def _invalidate_insight_cache():
     _insight_cache.clear()
 
 
-# ── Request/Response Models ──────────────────────────────────
+# â”€â”€ Request/Response Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=settings.max_query_len)
@@ -214,7 +214,7 @@ class MonitorRequest(BaseModel):
     max_per_source: int = Field(5, ge=1, le=20)
 
 
-# ── Background task helper ───────────────────────────────────
+# â”€â”€ Background task helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _analyze_paper_bg(paper_id: str, api_key: str | None = None, model: str | None = None):
     """Background task for paper analysis. Runs on the caller's BYOK key when
@@ -225,7 +225,7 @@ def _analyze_paper_bg(paper_id: str, api_key: str | None = None, model: str | No
         print(f"Background analysis failed for {paper_id}: {e}")
 
 
-# ── Auth & Settings (BYOK) ───────────────────────────────────
+# â”€â”€ Auth & Settings (BYOK) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class RegisterRequest(BaseModel):
     email: EmailStr
@@ -238,7 +238,7 @@ class LoginRequest(BaseModel):
 
 
 class SettingsUpdateRequest(BaseModel):
-    # All optional — only provided fields change. For api_key and digest_email,
+    # All optional â€” only provided fields change. For api_key and digest_email,
     # an empty string "" means "clear it"; omitting the field means "leave it".
     model: Optional[str] = Field(None, max_length=80)
     digest_email: Optional[str] = Field(None, max_length=320)
@@ -257,14 +257,14 @@ def _set_session_cookie(response: Response, token: str) -> None:
         value=token,
         httponly=True,                      # JS can't read it
         secure=settings.cookie_secure,      # https-only in prod (env-toggled)
-        samesite=settings.cookie_samesite,  # "lax" — blocks cross-site CSRF
+        samesite=settings.cookie_samesite,  # "lax" â€” blocks cross-site CSRF
         max_age=settings.session_ttl_days * 24 * 3600,
         path="/",
     )
 
 
 def _public_user(user: User) -> dict:
-    """User shape safe to return to the client — never the password hash or
+    """User shape safe to return to the client â€” never the password hash or
     the encrypted/decrypted API key. has_api_key is a boolean only."""
     return {
         "id": user.id,
@@ -283,8 +283,8 @@ def _public_user(user: User) -> dict:
 def _resolve_model_and_meter(user: User) -> str:
     """Resolve the model for this request and enforce the free-tier limits on
     the SERVER key (BYOK is uncapped):
-      • a total of free_action_limit actions (Haiku + Sonnet combined), then 402
-      • of those, at most free_sonnet_limit may be Sonnet, then 402 (Haiku stays
+      â€¢ a total of free_action_limit actions (Haiku + Sonnet combined), then 402
+      â€¢ of those, at most free_sonnet_limit may be Sonnet, then 402 (Haiku stays
         available until the total is reached)
     The 402 is raised BEFORE any LLM call, so hitting a limit costs no tokens.
     Opus on the server key was already floored to Haiku by resolve_user_model."""
@@ -302,7 +302,7 @@ def _resolve_model_and_meter(user: User) -> str:
         raise HTTPException(
             status_code=402,
             detail=(f"Free Sonnet limit reached ({settings.free_sonnet_limit}). "
-                    "Add your own Anthropic API key for more — Haiku stays available."),
+                    "Add your own Anthropic API key for more â€” Haiku stays available."),
         )
     db.increment_usage(user.id, is_sonnet)
     return model
@@ -324,7 +324,7 @@ def _owned_ids(user: User) -> list[str]:
 
 def _scope_ids(user: User, requested: list[str] | None) -> list[str]:
     """Effective paper scope for an aggregate request: the user's papers,
-    narrowed to any requested subset. Empty means 'nothing accessible' — and
+    narrowed to any requested subset. Empty means 'nothing accessible' â€” and
     callers MUST short-circuit on empty rather than pass it down, since the
     agents treat a falsy paper_ids as 'the whole library'."""
     owned = _owned_ids(user)
@@ -356,7 +356,7 @@ def register(request: Request, response: Response, req: RegisterRequest):
 def login(request: Request, response: Response, req: LoginRequest):
     email = req.email.lower().strip()
     user = db.get_user_by_email(email)
-    # Same error whether the email is unknown or the password is wrong — don't
+    # Same error whether the email is unknown or the password is wrong â€” don't
     # leak which emails have accounts.
     if not user or not authlib.verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
@@ -391,9 +391,9 @@ def auth_me(user: User = Depends(authlib.get_current_user)):
 @app.get("/api/settings")
 def get_settings(user: User = Depends(authlib.get_current_user)):
     data = _public_user(user)
-    # Show only a masked placeholder when a key is stored — never decrypt for
+    # Show only a masked placeholder when a key is stored â€” never decrypt for
     # display, so the plaintext key is never sent back to the client.
-    data["api_key_masked"] = "••••••••••••" if user.api_key_encrypted else None
+    data["api_key_masked"] = "â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢" if user.api_key_encrypted else None
     data["allowed_models"] = [
         {"id": mid, "label": info["label"], "tier": info["tier"]}
         for mid, info in settings.ALLOWED_MODELS.items()
@@ -439,7 +439,7 @@ def test_api_key(req: TestKeyRequest, user: User = Depends(authlib.get_current_u
         return {"valid": False, "error": "Key was rejected by Anthropic."}
 
 
-# ── Health Check ─────────────────────────────────────────────
+# â”€â”€ Health Check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/health")
 @limiter.exempt
@@ -472,13 +472,12 @@ def health():
 def fix_abstracts():
     """
     Re-fetch full abstracts for arXiv papers whose stored abstract is short
-    (under 400 chars) — these were truncated at import time by the [:300] slice
+    (under 400 chars) â€” these were truncated at import time by the [:300] slice
     that previously existed in the search/lookup response serializers.
 
-    Safe to run multiple times — only updates papers where the new abstract
+    Safe to run multiple times â€” only updates papers where the new abstract
     is longer than what's stored.
     """
-    import sqlite3
     papers = db.list_papers(limit=200)
     updated = 0
     for p in papers:
@@ -491,9 +490,12 @@ def fix_abstracts():
             result = importer.lookup(p.title)
             if result and result.abstract and len(result.abstract) > len(p.abstract or ""):
                 clean = _normalize_abstract(result.abstract)
-                conn = sqlite3.connect(str(db.db_path))
-                conn.execute("UPDATE papers SET abstract=? WHERE id=?", (clean, p.id))
+                import psycopg2
+                conn = psycopg2.connect(db._dsn)
+                cur = conn.cursor()
+                cur.execute("UPDATE papers SET abstract=%s WHERE id=%s", (clean, p.id))
                 conn.commit()
+                cur.close()
                 conn.close()
                 updated += 1
                 print(f"Fixed abstract for: {p.title[:60]}")
@@ -511,23 +513,27 @@ def normalize_abstracts():
     (line-wrapped at ~80 chars). This cleans all existing records so
     the UI truncates at sentence boundaries rather than mid-word.
 
-    Safe to run multiple times — idempotent.
+    Safe to run multiple times â€” idempotent.
     """
-    import sqlite3
-    conn = sqlite3.connect(str(db.db_path))
-    papers = conn.execute("SELECT id, abstract FROM papers WHERE abstract IS NOT NULL").fetchall()
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    conn = psycopg2.connect(db._dsn, cursor_factory=RealDictCursor)
+    cur = conn.cursor()
+    cur.execute("SELECT id, abstract FROM papers WHERE abstract IS NOT NULL")
+    papers = cur.fetchall()
     updated = 0
-    for paper_id, abstract in papers:
-        cleaned = _normalize_abstract(abstract)
-        if cleaned != abstract:
-            conn.execute("UPDATE papers SET abstract=? WHERE id=?", (cleaned, paper_id))
+    for row in papers:
+        cleaned = _normalize_abstract(row["abstract"])
+        if cleaned != row["abstract"]:
+            cur.execute("UPDATE papers SET abstract=%s WHERE id=%s", (cleaned, row["id"]))
             updated += 1
     conn.commit()
+    cur.close()
     conn.close()
     return {"updated": updated, "total": len(papers)}
 
 
-# ── Papers ───────────────────────────────────────────────────
+# â”€â”€ Papers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/papers")
 def list_papers(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
@@ -547,7 +553,7 @@ def list_papers(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=
             "page_count": p.page_count,
             "created_at": p.created_at,
             "analysis_types": [a.analysis_type for a in analyses],
-            "chunk_count": len(claims),  # extracted claims count — meaningful to display
+            "chunk_count": len(claims),  # extracted claims count â€” meaningful to display
         })
     return results
 
@@ -613,14 +619,15 @@ def delete_paper(paper_id: str, user: User = Depends(authlib.get_current_user)):
     db.delete_paper(paper_id)
     # Purge relationships referencing this paper's claims (no FK cascade on those)
     if claim_ids:
-        import sqlite3
-        conn = sqlite3.connect(str(db.db_path))
-        placeholders = ",".join("?" * len(claim_ids))
-        conn.execute(
-            f"DELETE FROM relationships WHERE claim_lo IN ({placeholders}) OR claim_hi IN ({placeholders})",
-            claim_ids + claim_ids,
+        import psycopg2
+        conn = psycopg2.connect(db._dsn)
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM relationships WHERE claim_lo = ANY(%s) OR claim_hi = ANY(%s)",
+            (claim_ids, claim_ids),
         )
         conn.commit()
+        cur.close()
         conn.close()
     _invalidate_insight_cache()
     return {"status": "deleted", "id": paper_id}
@@ -643,7 +650,7 @@ def paper_status(paper_id: str, user: User = Depends(authlib.get_current_user)):
     }
 
 
-# ── Upload & Analyze ─────────────────────────────────────────
+# â”€â”€ Upload & Analyze â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.post("/api/papers/upload")
 @limiter.limit(settings.rl_upload)
@@ -657,7 +664,7 @@ async def upload_paper(
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files accepted")
 
-    # Bounded read — never pull an unbounded upload into memory. Abort as soon
+    # Bounded read â€” never pull an unbounded upload into memory. Abort as soon
     # as the running total crosses the cap rather than reading the whole thing.
     max_bytes = settings.max_upload_bytes
     buf = bytearray()
@@ -689,7 +696,7 @@ async def upload_paper(
 
     save_path.write_bytes(content)
 
-    # Ingest (extract + chunk + embed) — this is fast enough to do inline
+    # Ingest (extract + chunk + embed) â€” this is fast enough to do inline
     user_key = authlib.resolve_user_api_key(user)
     model = _resolve_model_and_meter(user)
     paper = agent.ingest_pdf(save_path, filename=display_name, api_key=user_key, model=model)
@@ -714,7 +721,7 @@ async def upload_paper(
     # Stamp ownership before analysis kicks off.
     db.set_paper_owner(paper.id, user.id)
 
-    # Analyze in background (parallel — ~5x faster than sequential loop)
+    # Analyze in background (parallel â€” ~5x faster than sequential loop)
     background_tasks.add_task(_analyze_paper_bg, paper.id, user_key, model)
     _invalidate_insight_cache()
 
@@ -739,20 +746,21 @@ def reanalyze_paper(paper_id: str, background_tasks: BackgroundTasks = Backgroun
     claim_ids = [c.id for c in db.get_claims_for_paper(paper_id)]
     db.delete_claims_for_paper(paper_id)
     if claim_ids:
-        import sqlite3
-        conn = sqlite3.connect(str(db.db_path))
-        placeholders = ",".join("?" * len(claim_ids))
-        conn.execute(
-            f"DELETE FROM relationships WHERE claim_lo IN ({placeholders}) OR claim_hi IN ({placeholders})",
-            claim_ids + claim_ids,
+        import psycopg2
+        conn = psycopg2.connect(db._dsn)
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM relationships WHERE claim_lo = ANY(%s) OR claim_hi = ANY(%s)",
+            (claim_ids, claim_ids),
         )
         conn.commit()
+        cur.close()
         conn.close()
     background_tasks.add_task(_analyze_paper_bg, paper_id, authlib.resolve_user_api_key(user), _resolve_model_and_meter(user))
     return {"id": paper_id, "status": "analyzing"}
 
 
-# ── Search & QA ──────────────────────────────────────────────
+# â”€â”€ Search & QA â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.post("/api/search")
 @limiter.limit(settings.rl_search)
@@ -762,18 +770,18 @@ def search_papers(request: Request, req: SearchRequest,
     Semantic search across the paper library.
 
     Relevance fields returned per result:
-      relevance_tier  — "highly_relevant" | "related" | "tangential"
+      relevance_tier  â€” "highly_relevant" | "related" | "tangential"
                         Defined thresholds on cosine distance, calibrated for
                         MiniLM on narrow-domain academic text. Honest and
                         explainable; replaces the previous fake-precise percentage.
-      relevance_score — raw cosine distance in [0, 1] (lower = more similar).
+      relevance_score â€” raw cosine distance in [0, 1] (lower = more similar).
                         Exposed so the frontend can sort or filter if needed,
                         but not intended for display to end users.
 
     Thresholds (from settings):
-      < 0.20  → highly_relevant
-      < 0.40  → related
-      >= 0.40 → tangential
+      < 0.20  â†’ highly_relevant
+      < 0.40  â†’ related
+      >= 0.40 â†’ tangential
     """
     # Scope to the user's own papers. A passed paper_id is $and'd with this set,
     # so requesting another user's paper id simply returns nothing.
@@ -807,11 +815,11 @@ def ask_question(request: Request, req: AskRequest,
     return {"answer": answer}
 
 
-# ── Contradictions ───────────────────────────────────────────
+# â”€â”€ Contradictions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/contradictions/count")
 def contradiction_count(user: User = Depends(authlib.get_current_user)):
-    """Lightweight endpoint — returns cached relationship counts with no LLM calls."""
+    """Lightweight endpoint â€” returns cached relationship counts with no LLM calls."""
     owned = _owned_ids(user)
     rels = db.list_relationships(paper_ids=owned) if owned else []
     counts = {"contradiction": 0, "support": 0, "nuance": 0, "unrelated": 0}
@@ -825,7 +833,7 @@ def contradiction_count(user: User = Depends(authlib.get_current_user)):
 @app.get("/api/contradictions")
 def list_contradictions(user: User = Depends(authlib.get_current_user)):
     """
-    Return the full persisted relationship set — every relationship ever
+    Return the full persisted relationship set â€” every relationship ever
     judged, reconstructed into the same shape the scan POST returns.
 
     This is the source of truth for the conflict map: it shows accumulated
@@ -928,7 +936,23 @@ def run_contradictions(request: Request, req: ContradictionRequest,
     ]
 
 
-# ── Hypotheses ───────────────────────────────────────────────
+# â”€â”€ Hypotheses â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+@app.get("/api/hypotheses")
+def get_cached_hypotheses(user: User = Depends(authlib.get_current_user)):
+    """
+    Return the most recent cached hypotheses for this user.
+    Zero LLM calls — pure DB read from hypothesis_cache table.
+    Returns [] if no cache exists yet.
+    """
+    paper_ids = db.list_paper_ids_for_user(user.id)
+    entries = db.list_hypothesis_cache(paper_ids)
+    if not entries:
+        return []
+    # Return the most recent entry's hypotheses
+    latest = entries[0]
+    return latest["hypotheses"]
+
 
 @app.post("/api/hypotheses")
 @limiter.limit(settings.rl_hypotheses)
@@ -940,9 +964,9 @@ def generate_hypotheses(request: Request, req: HypothesisRequest,
     Response changes from previous version:
       - source_conflicts: list of validated relationship IDs the hypothesis draws from
       - grounding: "detected_conflicts" | "single_paper_gaps"
-      - novelty_score: cosine distance from nearest library chunk (0–1, higher = more novel)
+      - novelty_score: cosine distance from nearest library chunk (0â€“1, higher = more novel)
       - novelty_tier: "high" | "medium" | "low" | "unknown"
-      - impact: REMOVED (no reliable signal — no citation data in DB)
+      - impact: REMOVED (no reliable signal â€” no citation data in DB)
       - novelty_explanation: REMOVED (replaced by novelty_score + novelty_tier)
 
     Pass refresh=true to bypass the output cache.
@@ -979,7 +1003,7 @@ def generate_hypotheses(request: Request, req: HypothesisRequest,
     ]
 
 
-# ── Import ───────────────────────────────────────────────────
+# â”€â”€ Import â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.post("/api/import/search")
 @limiter.limit(settings.rl_import_search)
@@ -1072,7 +1096,7 @@ def import_add(
         url=req.url,
     )
 
-    # Dedup BEFORE downloading — per user (same paper in another user's library
+    # Dedup BEFORE downloading â€” per user (same paper in another user's library
     # is not a duplicate for this user).
     arxiv_id = req.source_id if req.source == "arxiv" else None
     existing = db.find_duplicate(req.title, doi=req.doi, arxiv_id=arxiv_id)
@@ -1099,14 +1123,16 @@ def import_add(
 
     # Update metadata from the source (better than what PDF extraction finds),
     # and stamp ownership in the same write.
-    import sqlite3
-    conn = sqlite3.connect(str(db.db_path))
-    conn.execute(
-        "UPDATE papers SET title=?, authors=?, abstract=?, year=?, source=?, doi=?, arxiv_id=?, user_id=? WHERE id=?",
+    import psycopg2
+    conn = psycopg2.connect(db._dsn)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE papers SET title=%s, authors=%s, abstract=%s, year=%s, source=%s, doi=%s, arxiv_id=%s, user_id=%s WHERE id=%s",
         (req.title, json.dumps(req.authors), _normalize_abstract(req.abstract), req.year,
          req.source, req.doi, arxiv_id, user.id, paper.id),
     )
     conn.commit()
+    cur.close()
     conn.close()
 
     # Analyze in background
@@ -1121,7 +1147,7 @@ def import_add(
     }
 
 
-# ── Monitor ──────────────────────────────────────────────────
+# â”€â”€ Monitor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.post("/api/monitor/scan")
 @limiter.limit(settings.rl_monitor)
@@ -1184,7 +1210,7 @@ def monitor_scan(request: Request, req: MonitorRequest,
     }
 
 
-# ── Knowledge Graph ──────────────────────────────────────────
+# â”€â”€ Knowledge Graph â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class GraphRequest(BaseModel):
     paper_ids: Optional[list[str]] = None
@@ -1194,20 +1220,20 @@ class GraphRequest(BaseModel):
     # `relationships` table (zero LLM calls, no new writes, watermark stays
     # put so viewing the graph never invalidates the hypothesis cache).
     # Pass True to run the live two-stage pipeline, which judges new pairs
-    # and writes them through — use only to deliberately expand coverage.
+    # and writes them through â€” use only to deliberately expand coverage.
     compute: bool = False
 
 
 def _build_graph_readonly(papers):
     """
-    Assemble the graph from the persisted relationships table — no agent
+    Assemble the graph from the persisted relationships table â€” no agent
     calls, no LLM, no writes. This is the same data the conflict map and
     hypothesis grounding read, so all three stay consistent.
 
     Claims come from db.get_claims_for_paper (pure DB read). Edges come from
     db.list_relationships scoped to the selected papers. Every paper that has
     a relationship is represented; papers with no detected relationships
-    simply have no nodes (same as before — isolated claims are hidden).
+    simply have no nodes (same as before â€” isolated claims are hidden).
     """
     scope_ids = [p.id for p in papers]
 
@@ -1301,7 +1327,7 @@ def _build_graph_compute(req, papers, api_key: str | None = None, model: str | N
         for pid in [pair.claim_a.paper_id, pair.claim_b.paper_id]:
             all_pairs_by_paper.setdefault(pid, []).append(pair)
 
-    # Inject the best pair for any unrepresented paper — only if a cross-paper
+    # Inject the best pair for any unrepresented paper â€” only if a cross-paper
     # pair exists for it at all (some papers may have no similar claims to others)
     for paper in papers:
         if paper.id not in represented_papers:
@@ -1333,7 +1359,7 @@ def _build_graph_compute(req, papers, api_key: str | None = None, model: str | N
 
     # The compute path may have written new relationships via judge_pair.
     # Invalidate the insight cache so the dashboard and research wire reflect
-    # them immediately — same contract as the contradiction scan endpoint.
+    # them immediately â€” same contract as the contradiction scan endpoint.
     # Without this, expanding the graph can surface contradictions that the
     # dashboard's "top contradiction" card never sees (stale cache).
     _invalidate_insight_cache()
@@ -1374,7 +1400,7 @@ def build_graph(req: GraphRequest, user: User = Depends(authlib.get_current_user
     Edges  = relationships between claims (contradiction/support/nuance).
 
     Read-only by default (compute=false): edges come straight from the
-    persisted relationships table — zero LLM calls, no writes, and the
+    persisted relationships table â€” zero LLM calls, no writes, and the
     relationships watermark never moves, so viewing the graph will not
     invalidate the hypothesis cache. This keeps the graph, the conflict
     map, and the hypothesis grounding consistent with one another.
@@ -1397,7 +1423,7 @@ def build_graph(req: GraphRequest, user: User = Depends(authlib.get_current_user
     return _build_graph_readonly(papers)
 
 
-# ── Insight Feed ─────────────────────────────────────────────
+# â”€â”€ Insight Feed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class InsightRequest(BaseModel):
     paper_ids: Optional[list[str]] = None
@@ -1410,9 +1436,9 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
     Synthesize a stream of typed insights from existing agent outputs.
 
     Sources:
-      - newest papers         → new_paper insights
-      - research_gaps analyses → gap insights
-      - relationships table   → contradiction / consensus insights (zero LLM calls)
+      - newest papers         â†’ new_paper insights
+      - research_gaps analyses â†’ gap insights
+      - relationships table   â†’ contradiction / consensus insights (zero LLM calls)
 
     Cache: assembled list is cached in-process for _INSIGHT_CACHE_TTL seconds
     (default 2 hours). Invalidated immediately on any paper add or delete so
@@ -1420,7 +1446,7 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
     """
     import uuid
 
-    # ── Cache read ────────────────────────────────────────────
+    # â”€â”€ Cache read â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     now = _time.time()
     _entry = _insight_cache.get(user.id)
     if _entry is not None and (now - _entry["ts"]) < _INSIGHT_CACHE_TTL:
@@ -1428,7 +1454,7 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
 
     owned = _owned_ids(user)
 
-    # ── Assemble insights (all DB reads, zero LLM calls) ─────
+    # â”€â”€ Assemble insights (all DB reads, zero LLM calls) â”€â”€â”€â”€â”€
     insights = []
 
     # Newest papers
@@ -1445,11 +1471,11 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
         })
 
     def _truncate(s: str, n: int) -> str:
-        """Word-boundary truncation — avoids cutting headlines mid-word."""
+        """Word-boundary truncation â€” avoids cutting headlines mid-word."""
         if len(s) <= n:
             return s
         cut = s[:n].rsplit(" ", 1)[0]
-        return cut + "…"
+        return cut + "â€¦"
 
     # Track papers already surfaced by a cross-paper relationship insight, so a
     # single dominant paper does not headline both a contradiction AND a gap.
@@ -1457,7 +1483,7 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
     # so they claim their papers first and gaps fill in only what is left.
     papers_in_relationships: set[str] = set()
 
-    # Contradiction / consensus / nuance insights — from the relationships table.
+    # Contradiction / consensus / nuance insights â€” from the relationships table.
     try:
         cached_rels = db.list_relationships(paper_ids=owned) if owned else []
         claim_paper: dict[str, str] = {}
@@ -1476,7 +1502,7 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
             s = sentence
             for title in (title_a, title_b):
                 if title and title != "Unknown paper" and s.startswith(title):
-                    s = s[len(title):].lstrip(" :—-")
+                    s = s[len(title):].lstrip(" :â€”-")
                     # Drop a leading reporting verb so it reads cleanly.
                     for verb in ("reports that ", "documents that ", "establishes that ",
                                  "finds that ", "shows that ", "demonstrates that ",
@@ -1527,7 +1553,7 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
     except Exception as e:
         print(f"Insight relationship read skipped: {e}")
 
-    # Gap insights from research_gaps analyses — but ONLY for papers that aren't
+    # Gap insights from research_gaps analyses â€” but ONLY for papers that aren't
     # already represented by a relationship insight above. This is the dedup
     # that stops one paper from headlining multiple cells on the dashboard.
     for p in papers[:8]:
@@ -1551,7 +1577,7 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
 
     # Order the feed by signal priority, newest-first within each type.
     # Contradictions are the highest-value signal and must never be buried by a
-    # large volume of lower-signal nuance/gap insights — otherwise a limit-
+    # large volume of lower-signal nuance/gap insights â€” otherwise a limit-
     # capped consumer (e.g. the dashboard's top-contradiction card) misses them.
     #
     # Two stable sorts: first by recency (newest first), then by type priority.
@@ -1567,7 +1593,7 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
     insights.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     insights.sort(key=lambda x: _TYPE_PRIORITY.get(x.get("type", ""), 9))
 
-    # ── Cache write ───────────────────────────────────────────
+    # â”€â”€ Cache write â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     _insight_cache[user.id] = {"payload": insights, "ts": _time.time()}
 
     return insights[: req.limit]

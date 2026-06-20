@@ -1,18 +1,17 @@
 """
-ChromaDB vector store for semantic search over paper chunks.
+pgvector-backed vector store for ScholarLens (migrated from ChromaDB).
 
-Wraps ChromaDB with a clean interface for:
-- Storing chunk embeddings with paper metadata
-- Semantic similarity search
-- Filtering by paper_id or section
+Stores embeddings in Supabase Postgres using the pgvector extension.
+Requires: CREATE EXTENSION IF NOT EXISTS vector; in Supabase.
 """
 
 from dataclasses import dataclass
 
-import chromadb
-from chromadb.config import Settings as ChromaSettings
+import psycopg2
+import psycopg2.extras
+from psycopg2.extras import RealDictCursor
 
-from config import CHROMA_DIR, settings
+from config import settings
 
 
 @dataclass
@@ -21,48 +20,53 @@ class SearchResult:
     paper_id: str
     text: str
     section: str | None
-    score: float  # lower = more similar (L2 distance)
+    score: float  # cosine distance, lower = more similar
 
 
 class VectorStore:
     def __init__(self):
-        self.client = chromadb.PersistentClient(
-            path=str(CHROMA_DIR),
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
-        self.collection = self.client.get_or_create_collection(
-            name=settings.chroma_collection,
-            metadata={"hnsw:space": "cosine"},
-        )
+        self._dsn = settings.database_url
         self._model = None
+        self._init_table()
+
+    def _get_conn(self):
+        return psycopg2.connect(self._dsn, cursor_factory=RealDictCursor)
+
+    def _init_table(self):
+        conn = self._get_conn()
+        cur = conn.cursor()
+        # Enable pgvector extension (idempotent)
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        # Embeddings table — 384 dims for all-MiniLM-L6-v2
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS embeddings (
+                chunk_id    TEXT PRIMARY KEY,
+                paper_id    TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                section     TEXT,
+                embedding   vector(384) NOT NULL
+            )
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_embeddings_paper ON embeddings(paper_id)"
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
 
     @property
     def embedding_model(self):
-        """Lazy-load the embedding model (heavy import)."""
+        """Lazy-load the embedding model."""
         if self._model is None:
             from sentence_transformers import SentenceTransformer
             self._model = SentenceTransformer(settings.embedding_model)
         return self._model
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """
-        Embed a batch of texts as DOCUMENTS (no instruction prefix).
-
-        Used for indexing chunks (add_chunks) and for claim-vs-claim
-        similarity in the contradiction agent, where every text is a
-        passage being compared, not a search query.
-        """
         embeddings = self.embedding_model.encode(texts, show_progress_bar=False)
         return embeddings.tolist()
 
     def embed_query(self, query: str) -> list[float]:
-        """
-        Embed a single search QUERY.
-
-        BGE retrieval models expect an instruction prefix on the query side
-        only; documents are embedded bare. settings.embedding_query_prefix is
-        "" for models that don't need it, so this is safe for any model.
-        """
         prefix = getattr(settings, "embedding_query_prefix", "")
         embeddings = self.embedding_model.encode([prefix + query], show_progress_bar=False)
         return embeddings[0].tolist()
@@ -74,23 +78,25 @@ class VectorStore:
         paper_ids: list[str],
         sections: list[str | None],
     ):
-        """Embed and store chunks in ChromaDB."""
         embeddings = self.embed_texts(texts)
-
-        metadatas = [
-            {
-                "paper_id": pid,
-                "section": sec or "unknown",
-            }
-            for pid, sec in zip(paper_ids, sections)
-        ]
-
-        self.collection.add(
-            ids=chunk_ids,
-            embeddings=embeddings,
-            documents=texts,
-            metadatas=metadatas,
+        conn = self._get_conn()
+        cur = conn.cursor()
+        psycopg2.extras.execute_batch(
+            cur,
+            """INSERT INTO embeddings (chunk_id, paper_id, text, section, embedding)
+               VALUES (%s, %s, %s, %s, %s::vector)
+               ON CONFLICT (chunk_id) DO UPDATE SET
+                 paper_id=EXCLUDED.paper_id, text=EXCLUDED.text,
+                 section=EXCLUDED.section, embedding=EXCLUDED.embedding""",
+            [
+                (cid, pid, text, sec or "unknown", str(emb))
+                for cid, pid, text, sec, emb
+                in zip(chunk_ids, paper_ids, texts, sections, embeddings)
+            ],
         )
+        conn.commit()
+        cur.close()
+        conn.close()
 
     def search(
         self,
@@ -101,93 +107,82 @@ class VectorStore:
         exclude_sections: list[str] | None = None,
         paper_ids: list[str] | None = None,
     ) -> list[SearchResult]:
-        """
-        Semantic search across stored chunks.
-
-        Args:
-            query:            Natural language search query
-            n_results:        Max results to return
-            paper_id:         Filter to a single paper
-            paper_ids:        Filter to a SET of papers (multi-user scoping —
-                              the caller passes the owner's paper IDs so search
-                              never reaches another user's library). An empty
-                              list means "no accessible papers" and returns [].
-            section:          Filter to a specific section type
-            exclude_sections: Section names to exclude from results.
-                              Defaults to ["references", "appendix"] — these
-                              sections contain bibliography entries and
-                              supplementary material, not substantive claims.
-                              They score high on keyword overlap but carry no
-                              useful information for Q&A or contradiction detection.
-        """
         if exclude_sections is None:
             exclude_sections = ["references", "appendix"]
 
-        # An explicit empty owner set means there is nothing to search.
         if paper_ids is not None and len(paper_ids) == 0:
             return []
 
         query_embedding = self.embed_query(query)
+        query_vec_str = str(query_embedding)
 
-        # Build metadata conditions, then combine with $and if more than one.
-        conditions = []
+        # Build WHERE clause
+        conditions = ["1=1"]
+        params: list = []
+
         if paper_id:
-            conditions.append({"paper_id": paper_id})
+            conditions.append("paper_id = %s")
+            params.append(paper_id)
         if paper_ids:
-            conditions.append({"paper_id": {"$in": paper_ids}})
+            conditions.append("paper_id = ANY(%s)")
+            params.append(paper_ids)
         if section:
-            conditions.append({"section": section})
+            conditions.append("section = %s")
+            params.append(section)
+        if exclude_sections:
+            conditions.append("section != ALL(%s)")
+            params.append(exclude_sections)
 
-        if not conditions:
-            where_filter = None
-        elif len(conditions) == 1:
-            where_filter = conditions[0]
-        else:
-            where_filter = {"$and": conditions}
+        where = " AND ".join(conditions)
 
-        # Fetch more candidates than requested so we have headroom after
-        # filtering out excluded sections. 3× is enough for typical corpora.
+        # Fetch more than needed to allow post-filter headroom
         fetch_n = n_results * 3
+        params.extend([query_vec_str, fetch_n])
 
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=fetch_n,
-            where=where_filter if where_filter else None,
-            include=["documents", "metadatas", "distances"],
-        )
+        sql = f"""
+            SELECT chunk_id, paper_id, text, section,
+                   (embedding <=> %s::vector) AS score
+            FROM embeddings
+            WHERE {where}
+            ORDER BY score
+            LIMIT %s
+        """
+        params_full = params[:-2] + [query_vec_str, fetch_n]
 
-        search_results = []
-        if results["ids"] and results["ids"][0]:
-            for i, chunk_id in enumerate(results["ids"][0]):
-                sec = results["metadatas"][0][i].get("section")
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(sql, params_full)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
 
-                # Skip excluded sections — bibliography entries and appendix
-                # material match on keywords but contain no useful claims.
-                if sec in exclude_sections:
-                    continue
+        results = []
+        for r in rows:
+            if len(results) >= n_results:
+                break
+            results.append(SearchResult(
+                chunk_id=r["chunk_id"],
+                paper_id=r["paper_id"],
+                text=r["text"],
+                section=r["section"],
+                score=float(r["score"]),
+            ))
 
-                search_results.append(SearchResult(
-                    chunk_id=chunk_id,
-                    paper_id=results["metadatas"][0][i]["paper_id"],
-                    text=results["documents"][0][i],
-                    section=sec,
-                    score=results["distances"][0][i],
-                ))
-
-                if len(search_results) >= n_results:
-                    break
-
-        return search_results
+        return results
 
     def delete_paper_chunks(self, paper_id: str):
-        """Remove all chunks for a paper from the vector store."""
-        # ChromaDB requires IDs to delete; query first
-        results = self.collection.get(
-            where={"paper_id": paper_id},
-            include=[],
-        )
-        if results["ids"]:
-            self.collection.delete(ids=results["ids"])
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM embeddings WHERE paper_id = %s", (paper_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
 
     def count(self) -> int:
-        return self.collection.count()
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) as count FROM embeddings")
+        n = cur.fetchone()["count"]
+        cur.close()
+        conn.close()
+        return int(n)

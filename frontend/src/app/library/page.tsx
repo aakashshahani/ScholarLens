@@ -88,8 +88,20 @@ export default function LibraryPage() {
   const [abstractExpanded, setAbstractExpanded] = useState(false);
 
   useEffect(() => {
+    // Cache-first: show papers instantly, refresh in background
+    const cachedPapers = cache.read<Paper[]>("papers");
+    if (cachedPapers?.length) {
+      setPapers(cachedPapers);
+      setLoading(false);
+      if (cachedPapers[0]) setSelected(cachedPapers[0]);
+    }
     api.listPapers(50)
-      .then((p) => { setPapers(p); setLoading(false); if (p[0]) setSelected(p[0]); })
+      .then((p) => {
+        setPapers(p);
+        cache.write("papers", p);
+        setLoading(false);
+        if (p[0] && !cachedPapers?.length) setSelected(p[0]);
+      })
       .catch(() => setLoading(false));
     // Restore last Ask result from cache so it survives navigation
     const cached = cache.read<{ query: string; answer: string; passages: SR[] }>(ASK_CACHE_KEY);

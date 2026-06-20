@@ -80,7 +80,9 @@ export default function ContradictionsPage() {
   const [libraryChanged, setLibraryChanged] = useState(false);
 
   useEffect(() => {
-    api.listPapers(50).then(setPapers);
+    const cachedPapers = cache.read<Paper[]>("papers");
+    if (cachedPapers?.length) setPapers(cachedPapers);
+    api.listPapers(50).then((p) => { setPapers(p); cache.write("papers", p); });
 
     // Fast first paint from localStorage if present, then replace with the
     // full persisted set from the backend so the conflict map always shows

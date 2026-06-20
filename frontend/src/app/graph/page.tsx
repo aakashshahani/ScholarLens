@@ -50,7 +50,10 @@ export default function GraphPage() {
   const simsRef               = useRef<Sim[]>([]);
 
   useEffect(() => {
-    api.listPapers(50).then(setPapers);
+    // Cache-first for papers list
+    const cachedPapers = cache.read<Paper[]>("papers");
+    if (cachedPapers?.length) setPapers(cachedPapers);
+    api.listPapers(50).then((p) => { setPapers(p); cache.write("papers", p); });
     const cached = cache.read<GraphPayload>("graph");
     if (cached?.nodes?.length) {
       setData(cached); seedPositions(cached);

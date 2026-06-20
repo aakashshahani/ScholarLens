@@ -332,6 +332,9 @@ export const api = {
     apiFetch<ContradictionCount>("/api/contradictions/count"),
 
   // ── Hypotheses ────────────────────────────────────────────
+  getCachedHypotheses: () =>
+    apiFetch<Hypothesis[]>("/api/hypotheses"),
+
   generateHypotheses: (opts?: { researchQuestion?: string; paperIds?: string[]; numHypotheses?: number; refresh?: boolean }) =>
     apiFetch<Hypothesis[]>("/api/hypotheses", {
       method: "POST",

@@ -68,28 +68,59 @@ export default function Dashboard() {
 
   useEffect(() => {
     setMounted(true);
-    api.health().then(setHealth).catch((e) => setError(e.message));
-    api.listPapers(50).then(setPapers).catch(() => {});
-    api.insights({ limit: 8 }).then(setInsights).catch(() => {});
 
+    // ── Cache-first helpers ───────────────────────────────────────────
+    // Show cached data instantly, then refresh in the background.
+    // This makes tab revisits feel instant even with Supabase latency.
+
+    // Health
+    const cachedHealth = cache.read<HealthStatus>("health");
+    if (cachedHealth) setHealth(cachedHealth);
+    api.health()
+      .then((h) => { setHealth(h); cache.write("health", h); })
+      .catch((e) => setError(e.message));
+
+    // Papers
+    const cachedPapers = cache.read<Paper[]>("papers");
+    if (cachedPapers?.length) setPapers(cachedPapers);
+    api.listPapers(50)
+      .then((p) => { setPapers(p); cache.write("papers", p); })
+      .catch(() => {});
+
+    // Insights (short)
+    const cachedInsights = cache.read<Insight[]>("insights_short");
+    if (cachedInsights?.length) setInsights(cachedInsights);
+    api.insights({ limit: 8 })
+      .then((i) => { setInsights(i); cache.write("insights_short", i); })
+      .catch(() => {});
+
+    // Contradiction count
+    const cachedRelCounts = cache.read<RelCounts>("rel_counts");
+    if (cachedRelCounts) setRelCounts(cachedRelCounts);
     api.contradictionCount()
-      .then((d) => setRelCounts(d.counts || null))
+      .then((d) => { const c = d.counts || null; setRelCounts(c); if (c) cache.write("rel_counts", c); })
       .catch(() => {});
 
+    // Top contradiction (insights long)
+    const cachedInsightsLong = cache.read<Insight[]>("insights_long");
+    const applyInsightsLong = (rows: Insight[]) => {
+      const contra = rows.find((i) => i.type === "contradiction");
+      if (contra) setTopContra({
+        explanation: cleanHeadline(contra.detail || contra.headline),
+        paper_a: contra.papers?.[0] || "",
+        paper_b: contra.papers?.[1] || "",
+      });
+    };
+    if (cachedInsightsLong?.length) applyInsightsLong(cachedInsightsLong);
     api.insights({ limit: 30 })
-      .then((rows) => {
-        const contra = rows.find((i) => i.type === "contradiction");
-        if (contra) setTopContra({
-          explanation: cleanHeadline(contra.detail || contra.headline),
-          paper_a: contra.papers?.[0] || "",
-          paper_b: contra.papers?.[1] || "",
-        });
-      })
+      .then((rows) => { cache.write("insights_long", rows); applyInsightsLong(rows); })
       .catch(() => {});
 
+    // Hypotheses (already cache-first)
     const cachedHypos = cache.read<Hypothesis[]>("hypotheses");
     if (cachedHypos?.length) setTopHypo(cachedHypos[0]);
 
+    // Graph topics (already cache-first)
     const cachedGraph = cache.read<GraphPayload>("graph");
     if (cachedGraph?.nodes?.length) {
       const byPaper: Record<string, number> = {};

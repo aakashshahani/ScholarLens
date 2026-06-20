@@ -34,15 +34,37 @@ export default function HypothesesPage() {
   const [error, setError] = useState("");
   const [showLineage, setShowLineage] = useState<Record<string, boolean>>({});
   const [showConfig, setShowConfig] = useState(false);
+  const [libraryChanged, setLibraryChanged] = useState(false);
 
   useEffect(() => {
-    api.listPapers(50).then(setPapers);
+    const cachedPapers = cache.read<Paper[]>("papers");
+    if (cachedPapers?.length) setPapers(cachedPapers);
+    api.listPapers(50).then((p) => { setPapers(p); cache.write("papers", p); });
+
     const cached = cache.read<Hypothesis[]>("hypotheses");
     if (cached && cached.length > 0) {
+      // Serve from localStorage instantly
       setHypotheses(cached);
     } else {
-      setShowConfig(true);
+      // Cache miss — try server (hypothesis_cache table, zero LLM calls)
+      api.getCachedHypotheses()
+        .then((hyps) => {
+          if (hyps && hyps.length > 0) {
+            setHypotheses(hyps);
+            cache.write("hypotheses", hyps);
+          } else {
+            setShowConfig(true);
+          }
+        })
+        .catch(() => setShowConfig(true));
     }
+
+    // Fingerprint check — warn if library changed since last generation
+    api.health().then((h) => {
+      const fingerprint = (h as any).library_fingerprint || "default";
+      const cachedFp = localStorage.getItem("sl_hypotheses_fp");
+      if (cachedFp && cachedFp !== fingerprint) setLibraryChanged(true);
+    }).catch(() => {});
   }, []);
 
   const generate = async () => {
@@ -56,6 +78,11 @@ export default function HypothesesPage() {
       setHypotheses(res);
       cache.write("hypotheses", res);
       setShowConfig(false);
+      setLibraryChanged(false);
+      api.health().then((h) => {
+        const fp = (h as any).library_fingerprint || "default";
+        localStorage.setItem("sl_hypotheses_fp", fp);
+      }).catch(() => {});
     } catch (e: any) { setError(e.message); }
     setLoading(false);
   };
@@ -72,6 +99,21 @@ export default function HypothesesPage() {
           </button>
         }
       />
+
+      {libraryChanged && !showConfig && (
+        <div className="bg-[var(--nuance-dim)] border border-[var(--nuance-line)] rounded-[var(--r-lg)] p-4 mb-4 flex items-center gap-3">
+          <AlertCircle size={15} className="text-[var(--nuance)] shrink-0" />
+          <div className="flex-1 text-[13px] text-[var(--text-2)]">
+            Your library has changed — these hypotheses may not reflect your latest papers.
+          </div>
+          <button
+            onClick={() => { setShowConfig(true); setLibraryChanged(false); }}
+            className="text-[12px] text-[var(--gen)] font-medium hover:underline shrink-0 t-all"
+          >
+            Regenerate
+          </button>
+        </div>
+      )}
 
       {papers.length < 1 ? (
         <EmptyState icon={<FlaskConical size={20} />} title="Add papers first"

@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { api, Paper } from "@/lib/api";
+import { cache } from "@/lib/cache";
 import { Card, Spinner, EmptyState, AnalysisTag, SectionLabel } from "@/components/ui";
 import { ArrowLeft, RefreshCw, Trash2, FileText, SendHorizontal, CheckCircle2 } from "lucide-react";
 
@@ -25,8 +26,11 @@ export default function PaperDetailPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
+    // Cache-first: show cached paper instantly, refresh in background
+    const cachedPaper = cache.read<Paper>(`paper_${paperId}`);
+    if (cachedPaper) { setPaper(cachedPaper); setLoading(false); }
     api.getPaper(paperId)
-      .then((p) => { setPaper(p); setLoading(false); })
+      .then((p) => { setPaper(p); setLoading(false); cache.write(`paper_${paperId}`, p); })
       .catch(() => setLoading(false));
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [paperId]);
@@ -77,6 +81,7 @@ export default function PaperDetailPage() {
           // Reload full paper with fresh analyses
           const updated = await api.getPaper(paperId);
           setPaper(updated);
+          cache.write(`paper_${paperId}`, updated);
           setActiveTab(0);
           setReanalyzing(false);
           setReanalyzeDone(true);
