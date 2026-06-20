@@ -348,7 +348,7 @@ def register(request: Request, response: Response, req: RegisterRequest):
     token = authlib.new_session_token()
     db.create_session(user.id, token, authlib.session_expiry_iso())
     _set_session_cookie(response, token)
-    return _public_user(user)
+    return {**_public_user(user), "session_token": token}
 
 
 @app.post("/api/auth/login")
@@ -363,7 +363,7 @@ def login(request: Request, response: Response, req: LoginRequest):
     token = authlib.new_session_token()  # fresh token on every login (rotation)
     db.create_session(user.id, token, authlib.session_expiry_iso())
     _set_session_cookie(response, token)
-    return _public_user(user)
+    return {**_public_user(user), "session_token": token}
 
 
 @app.post("/api/auth/logout")
