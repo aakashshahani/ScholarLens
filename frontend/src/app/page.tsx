@@ -144,7 +144,7 @@ export default function Dashboard() {
     const types = new Set(p.analysis_types || []);
     return REQUIRED.every((t) => types.has(t));
   }).length;
-  const paperCount         = papers.length || (health?.papers ?? 0);
+  const paperCount         = papers.length || (cache.read<Paper[]>("papers")?.length ?? 0);
   const coverage           = paperCount > 0 ? Math.round((analyzed / paperCount) * 100) : 0;
   const contradictionCount = relCounts?.contradiction ?? 0;
   const crossLinks         = relCounts
