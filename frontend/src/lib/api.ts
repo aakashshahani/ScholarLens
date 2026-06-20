@@ -9,6 +9,24 @@
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// ── Session token storage ────────────────────────────────────
+// Stored in localStorage as a fallback for cross-origin deployments
+// where third-party cookies are blocked (Chrome 2024+).
+// The httpOnly cookie is still set by the backend and used in same-origin
+// or cookie-friendly environments.
+const TOKEN_KEY = "sl_session_token";
+
+function saveToken(token: string | null) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch { /* SSR or storage disabled */ }
+}
+
+function getToken(): string | null {
+  try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
+}
+
 // ── Types ───────────────────────────────────────────────────
 
 export interface Paper {
@@ -206,10 +224,14 @@ export class ApiError extends Error {
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken();
+  const authHeaders: Record<string, string> = token
+    ? { "Authorization": `Bearer ${token}` }
+    : {};
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
-    credentials: "include", // send the httpOnly session cookie
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    credentials: "include", // send the httpOnly session cookie (same-origin)
+    headers: { "Content-Type": "application/json", ...authHeaders, ...init?.headers },
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
@@ -226,22 +248,35 @@ export const api = {
   health: () => apiFetch<HealthStatus>("/api/health"),
 
   // ── Auth ──────────────────────────────────────────────────
-  register: (email: string, password: string) =>
-    apiFetch<AuthUser>("/api/auth/register", {
+  register: async (email: string, password: string) => {
+    const res = await apiFetch<AuthUser & { session_token?: string }>("/api/auth/register", {
       method: "POST",
       body: JSON.stringify({ email, password }),
-    }),
+    });
+    if (res.session_token) saveToken(res.session_token);
+    return res;
+  },
 
-  login: (email: string, password: string) =>
-    apiFetch<AuthUser>("/api/auth/login", {
+  login: async (email: string, password: string) => {
+    const res = await apiFetch<AuthUser & { session_token?: string }>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ email, password }),
-    }),
+    });
+    if (res.session_token) saveToken(res.session_token);
+    return res;
+  },
 
-  logout: () => apiFetch<{ status: string }>("/api/auth/logout", { method: "POST" }),
+  logout: async () => {
+    const res = await apiFetch<{ status: string }>("/api/auth/logout", { method: "POST" });
+    saveToken(null);
+    return res;
+  },
 
-  logoutAll: () =>
-    apiFetch<{ status: string }>("/api/auth/logout-all", { method: "POST" }),
+  logoutAll: async () => {
+    const res = await apiFetch<{ status: string }>("/api/auth/logout-all", { method: "POST" });
+    saveToken(null);
+    return res;
+  },
 
   me: () => apiFetch<AuthUser>("/api/auth/me"),
 
@@ -288,10 +323,15 @@ export const api = {
     const formData = new FormData();
     formData.append("file", file);
     // NOTE: no Content-Type header — the browser sets the multipart boundary.
+    const uploadToken = getToken();
+    const uploadAuthHeaders: Record<string, string> = uploadToken
+      ? { "Authorization": `Bearer ${uploadToken}` }
+      : {};
     const res = await fetch(`${API_BASE}/api/papers/upload`, {
       method: "POST",
       body: formData,
       credentials: "include",
+      headers: uploadAuthHeaders,
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ detail: res.statusText }));
