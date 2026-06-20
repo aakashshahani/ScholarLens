@@ -1,7 +1,5 @@
 # ScholarLens
 
-AI reasoning system for scientific literature.
-
 ![Python](https://img.shields.io/badge/Python-3.12-blue) ![Next.js](https://img.shields.io/badge/Next.js-16-black) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688) ![License](https://img.shields.io/badge/License-MIT-green)
 
 > **Live demo:** *coming soon*
@@ -25,7 +23,7 @@ Papers are ingested via **PyMuPDF** (`fitz`) with column-aware extraction. The e
 - **References and appendix sections are excluded** from indexing and search — they add citation noise and dilute retrieval quality without carrying claims
 - Overlap-preserving chunking at ~500 tokens with 50-token overlap, flushing on section boundaries so chunks don't span major structural divides
 
-Each chunk is stored in SQLite with its paper ID, section label, page number, and token count. Chunks are also embedded and stored in ChromaDB for semantic retrieval.
+Each chunk is stored in Postgres with its paper ID, section label, page number, and token count. Chunks are embedded and stored in pgvector for semantic retrieval.
 
 Extraction quality sets the ceiling on every downstream feature, so the column-detection work was prioritized accordingly — it propagates through chunking, embeddings, claim extraction, and contradiction detection.
 
@@ -44,7 +42,7 @@ When a paper is uploaded, six structured analyses are produced concurrently via 
 | `key_claims` | 4–6 falsifiable claims stated or strongly implied by the paper |
 | `research_gaps` | Open questions and directions explicitly or implicitly identified |
 
-Running these concurrently gives approximately 5× faster wall-clock time at identical API cost compared to sequential execution. Results are persisted to SQLite immediately — if a run fails mid-way, completed analyses survive.
+Running these concurrently gives approximately 5× faster wall-clock time at identical API cost compared to sequential execution. Results are persisted to Postgres immediately — if a run fails mid-way, completed analyses survive.
 
 Analysis content is stripped of LLM scaffolding artifacts (markdown headers, bold markers, uppercase label lines) before being returned to the frontend, so the UI renders clean prose rather than raw prompt structure.
 
@@ -68,7 +66,7 @@ Naïvely comparing every claim against every other claim is O(n²) in LLM calls.
 
 All claims are embedded using `sentence-transformers` (MiniLM-L6-v2). Stage 1 runs **two retrievers in parallel** and unions their candidate pairs:
 
-- **Dense (MiniLM):** cosine similarity between every cross-paper claim pair; pairs above a configurable threshold survive.
+- **Dense (MiniLM):** cosine similarity between every cross-paper claim pair via pgvector's `<=>` operator; pairs above a configurable threshold survive.
 - **BM25 (`rank-bm25`):** lexical retrieval over the same claim set, catching pairs that share key terms but sit far apart in embedding space.
 
 Each surviving pair is tagged with a `retrieval_source` (`dense`, `bm25`, or `both`) so coverage from each retriever is measurable. The dense pass alone misses vocabulary-distant but conceptually related claims; BM25 recovers them (e.g. "transformer attention degrades on long sequences" vs "BERT fails beyond 512 tokens"). The two together feed Stage 2.
@@ -137,9 +135,9 @@ The hypothesis agent reads directly from the persisted contradiction results rat
 
 **Post-parse validation:** Cited conflict labels are validated against the actual set of labels passed in. The model occasionally fabricates label references — these are silently dropped. Only verified conflict IDs survive into the stored hypothesis.
 
-**Novelty scoring:** Rather than asking the model to self-assess novelty (unreliable — it tends toward high), novelty is computed as cosine distance between the hypothesis embedding and the nearest chunk in the library. A hypothesis very close to existing library content scores low novelty; one in unexplored territory scores high. The impact score was removed entirely — without citation data or field-level context, no reliable signal exists, and fake precision is worse than no score.
+**Novelty scoring:** Rather than asking the model to self-assess novelty (unreliable — it tends toward high), novelty is computed as cosine distance between the hypothesis embedding and the nearest chunk in the library via pgvector. A hypothesis very close to existing library content scores low novelty; one in unexplored territory scores high. The impact score was removed entirely — without citation data or field-level context, no reliable signal exists, and fake precision is worse than no score.
 
-**Cache:** Hypothesis results are cached keyed on the set of paper IDs, any research question, and a relationships watermark (count of relationships in DB at generation time). Cache is invalidated when the library changes or a new scan adds relationships.
+**Cache:** Hypothesis results are cached keyed on the set of paper IDs, any research question, and a relationships watermark (count of relationships in DB at generation time). Cache is invalidated when the library changes or a new scan adds relationships. A `GET /api/hypotheses` endpoint returns the most recent cached result (zero LLM calls) — the frontend uses this as a fallback when localStorage expires.
 
 ---
 
@@ -155,7 +153,7 @@ The frontend runs a custom JavaScript force simulation with centering, repulsion
 
 ### 8. Semantic search and relevance tiers
 
-Search queries are embedded using MiniLM (bare document embedding, no instruction prefix — MiniLM, unlike BGE retrieval models, needs no query prefix). ChromaDB returns the top-k nearest chunks by **cosine distance** (lower = more similar). Relevance is reported as a tier rather than a percentage, using thresholds calibrated for MiniLM on narrow-domain academic text:
+Search queries are embedded using MiniLM (bare document embedding, no instruction prefix — MiniLM, unlike BGE retrieval models, needs no query prefix). pgvector returns the top-k nearest chunks by **cosine distance** (lower = more similar) using the `<=>` operator. Relevance is reported as a tier rather than a percentage, using thresholds calibrated for MiniLM on narrow-domain academic text:
 
 - **Highly relevant** — distance < 0.20
 - **Related** — 0.20 ≤ distance < 0.40
@@ -167,22 +165,23 @@ The previous implementation showed `(1 - cosine_distance) * 100` as a percentage
 
 ### 9. Research monitoring
 
-The monitoring agent searches arXiv and Semantic Scholar for papers matching configured keywords, filters out papers already in the library by title-key deduplication, and scores each candidate by embedding its abstract against the library's existing chunks. Results are grouped by topic with relevance tiers. Per-source failures are reported honestly (a `SourceUnavailable` exception and a `sources_failed` field surface an arXiv-down banner rather than silently returning empty results), and queries are sanitised before dispatch. If a Resend API key is configured, it sends an HTML digest email after each scan, with honest `email_sent`/`email_error` status. Topics and results are cached in localStorage so they survive page reloads.
+The monitoring agent searches arXiv and Semantic Scholar for papers matching configured keywords, filters out papers already in the library by title-key deduplication, and scores each candidate by embedding its abstract against the library's existing chunks via pgvector. Results are grouped by topic with relevance tiers. Per-source failures are reported honestly (a `SourceUnavailable` exception and a `sources_failed` field surface an arXiv-down banner rather than silently returning empty results), and queries are sanitised before dispatch. If a Resend API key is configured, it sends an HTML digest email after each scan, with honest `email_sent`/`email_error` status. Topics and results are cached in localStorage so they survive page reloads.
 
 ---
 
 ### 10. Persistence and cost control
 
-The cost model for a naive implementation is brutal: every page load re-extracts claims, re-judges relationships, re-generates hypotheses. ScholarLens uses a two-table SQLite cache (`claims`, `relationships`) with these guarantees:
+The cost model for a naive implementation is brutal: every page load re-extracts claims, re-judges relationships, re-generates hypotheses. ScholarLens uses a two-table Postgres cache (`claims`, `relationships`) with these guarantees:
 
 - A claim is extracted at most once per paper
 - A relationship is judged at most once per claim pair (idempotent upsert keyed on sorted claim ID pair)
 - The insight feed is a pure DB read — zero LLM calls per load regardless of library size
 - The knowledge graph reads from cache by default — no new LLM calls on re-render
+- Cached hypotheses are returned via `GET /api/hypotheses` — zero LLM calls on revisit
 
 Cache invalidation: deleting a paper cascades its claims (FK) and manually purges their relationships; re-analyzing a paper explicitly clears stale claims and relationships before re-running.
 
-The frontend mirrors this with localStorage caching (24-hour TTL, version-based busting, library-fingerprint cache-busting) for contradiction results, graph payloads, and hypothesis outputs — results survive tab switches and full page reloads. A React error boundary wraps the conflict-map page so a malformed payload degrades gracefully instead of blanking the route.
+The frontend mirrors this with localStorage caching (24-hour TTL, version-based busting, library-fingerprint cache-busting) for contradiction results, graph payloads, and hypothesis outputs — results survive tab switches and full page reloads. Every data-fetching tab uses a stale-while-revalidate pattern: cached data renders instantly, a background fetch updates it silently.
 
 ---
 
@@ -190,7 +189,7 @@ The frontend mirrors this with localStorage caching (24-hour TTL, version-based 
 
 ScholarLens is multi-user: every account has its own private library, and the backend is hardened against the common web-app attack classes.
 
-**Authentication.** Email + password, with passwords hashed using **bcrypt** (never stored in plaintext). On login the server issues an opaque 256-bit session token stored in an **httpOnly + Secure + SameSite=Lax** cookie — httpOnly so JavaScript can't read it (defangs token theft via XSS), Secure so it's only sent over HTTPS, SameSite=Lax so it isn't sent on cross-site requests (defeats CSRF). Sessions live server-side in a `sessions` table and rotate on each login. A FastAPI dependency (`get_current_user`) gates every protected endpoint.
+**Authentication.** Email + password, with passwords hashed using **bcrypt** (never stored in plaintext). On login the server issues an opaque 256-bit session token stored in an **httpOnly + Secure + SameSite** cookie — httpOnly so JavaScript can't read it (defangs token theft via XSS), Secure so it's only sent over HTTPS, SameSite configurable via env var (`none` in production for cross-origin Vercel→Render requests). Sessions live server-side in a `sessions` table and rotate on each login. A FastAPI dependency (`get_current_user`) gates every protected endpoint.
 
 **Per-user data isolation.** Every paper carries a `user_id`; claims and relationships inherit ownership through their paper. Direct-object endpoints (`GET`/`DELETE /api/papers/{id}`) verify ownership and return `404` (not `403`) for another user's resource, so the API never reveals that an id exists. Aggregate features — search, contradictions, hypotheses, graph, insights, monitor — are scoped to the caller's paper IDs, closing the IDOR (insecure direct object reference) bug class.
 
@@ -203,36 +202,34 @@ ScholarLens is multi-user: every account has its own private library, and the ba
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Next.js 16 Frontend (App Router, TypeScript)        │
-│                                                       │
-│  Dashboard  ·  Library  ·  Knowledge graph           │
-│  Conflict map  ·  Generative bench  ·  Monitor       │
-│  ⌘K command palette                                   │
-│                                                       │
-│  localStorage cache (contradictions, graph, hypo)    │
-└─────────────────────────┬───────────────────────────┘
-                          │  REST/JSON
-┌─────────────────────────┴───────────────────────────┐
-│  FastAPI Backend                                      │
-│                                                       │
-│  PDFAnalysisAgent   — 6 parallel LLM calls/paper     │
-│  ContradictionAgent — 2-stage pipeline (BM25+dense → LLM) │
-│  HypothesisAgent    — conflict-grounded synthesis     │
-│  PaperImporter      — arXiv + Semantic Scholar       │
-│  MonitoringAgent    — topic watch + email digest     │
-└──────────┬──────────────────────┬───────────────────┘
-           │                      │
-┌──────────┴──────────┐  ┌────────┴─────────────────┐
-│  SQLite (WAL mode)  │  │  ChromaDB                 │
-│                     │  │                           │
-│  users · sessions   │  │  chunk embeddings         │
-│  papers (user_id)   │  │  (MiniLM-L6-v2)           │
-│  analysis_results   │  │                           │
-│  chunks · claims    │  │                           │
-│  relationships      │  │                           │
-│  hypothesis_cache   │  │                           │
-└─────────────────────┘  └───────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  Next.js 16 Frontend (App Router, TypeScript)           │
+│                                                         │
+│  Dashboard  ·  Library  ·  Knowledge graph             │
+│  Conflict map  ·  Generative bench  ·  Monitor         │
+│  ⌘K command palette                                     │
+│                                                         │
+│  localStorage cache (stale-while-revalidate pattern)   │
+└─────────────────────────────┬───────────────────────────┘
+                              │  REST/JSON
+┌─────────────────────────────┴───────────────────────────┐
+│  FastAPI Backend                                        │
+│                                                         │
+│  PDFAnalysisAgent   — 6 parallel LLM calls/paper       │
+│  ContradictionAgent — 2-stage pipeline (BM25+dense→LLM)│
+│  HypothesisAgent    — conflict-grounded synthesis      │
+│  PaperImporter      — arXiv + Semantic Scholar         │
+│  MonitoringAgent    — topic watch + email digest       │
+└──────────────┬──────────────────────────────────────────┘
+               │
+┌──────────────┴──────────────────────────────────────────┐
+│  Supabase (Postgres + pgvector)                         │
+│                                                         │
+│  users · sessions · papers (user_id)                   │
+│  analysis_results · chunks · claims                    │
+│  relationships · hypothesis_cache                      │
+│  embeddings (vector(384), MiniLM-L6-v2)                │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -246,19 +243,20 @@ ScholarLens is multi-user: every account has its own private library, and the ba
 | Frontend | Next.js 16 + TypeScript + Tailwind v4 | App Router, server components, Turbopack, fast iteration |
 | Embeddings | sentence-transformers MiniLM-L6-v2 | Runs locally, no API cost, better score separation than BGE on narrow-domain text |
 | Lexical retrieval | rank-bm25 | Hybrid Stage-1 pass alongside dense retrieval; recovers vocabulary-distant claim pairs |
-| Vector DB | ChromaDB | Zero setup, persistent, cosine similarity, migrates to pgvector |
-| Database | SQLite (WAL mode) | Single file, FK cascades, PostgreSQL-compatible schema |
+| Vector store | pgvector (Supabase) | Native Postgres extension, `<=>` cosine operator, no separate vector DB process |
+| Database | Postgres via psycopg2 (Supabase) | Persistent, free tier, FK cascades, scales beyond SQLite |
 | Auth | bcrypt + httpOnly session cookies | No external dependency; readable, upgradeable; cookie invisible to JS |
 | Key encryption | cryptography (Fernet) | Encrypts per-user Anthropic keys at rest |
 | Rate limiting | slowapi | Per-IP limits on expensive endpoints + login brute-force defense |
 | PDF parsing | PyMuPDF (`fitz`) | Fast, column-aware extraction with dynamic gutter detection |
 | Email | Resend | HTML digest delivery for monitoring agent |
+| Deploy | Render (backend) + Vercel (frontend) + Supabase (DB) | Free tier stack, persistent DB survives redeployments |
 
 ---
 
 ## Quick start
 
-You'll need Python 3.12+, Node.js 18+, and an Anthropic API key.
+You'll need Python 3.12+, Node.js 18+, an Anthropic API key, and a Supabase project (free tier).
 
 ### Backend
 
@@ -272,6 +270,8 @@ pip install -r requirements.txt
 
 # Create .env:
 # ANTHROPIC_API_KEY=sk-ant-xxxxx
+# DATABASE_URL=postgresql://postgres:[password]@[host]:5432/postgres
+# FERNET_KEY=<generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
 # SEMANTIC_SCHOLAR_KEY=...       (optional — higher rate limits)
 # RESEND_API_KEY=re_...          (optional — for email digests)
 
@@ -301,7 +301,7 @@ scholarlens/
   config/
     settings.py             Config, env vars, relevance tiers, security / auth / rate-limit settings
   db/
-    database.py             SQLite data layer: users, sessions, papers (user_id), claims, relationships, caches
+    database.py             Postgres data layer (psycopg2): users, sessions, papers, claims, relationships, caches
   agents/
     pdf_analyst.py          Parallel 6-type analysis pipeline + agentic RAG (ask)
     contradiction_agent.py  Two-stage pipeline (BM25+dense → LLM judge), eval harness support
@@ -310,7 +310,7 @@ scholarlens/
     monitoring_agent.py     Topic monitoring + Resend email digest
   utils/
     pdf_parser.py           PyMuPDF extraction, dynamic column detection, section-aware chunking
-    vector_store.py         ChromaDB wrapper (embed_query / embed_texts split)
+    vector_store.py         pgvector wrapper — embed_query / embed_texts, cosine search via <=> operator
     bm25_index.py           Lexical retrieval index for the hybrid Stage-1 pass
   eval/
     gold_claims.json        30 hand-labeled claim pairs, 4 balanced classes
@@ -323,7 +323,7 @@ scholarlens/
       lib/
         api.ts              Typed API client
         cache.ts            localStorage cache — per-user namespaced, TTL + version busting
-  data/                     Runtime (SQLite + ChromaDB — gitignored)
+  data/                     Runtime uploads (gitignored)
 ```
 
 ---
@@ -334,6 +334,7 @@ All endpoints except `/api/health` and the `/api/auth/{register,login,logout}` r
 
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/health` | Bare health check for Render probe |
 | GET | `/api/health` | System status, paper count, embedding count, library fingerprint |
 | POST | `/api/auth/register` | Create account, set session cookie (first account adopts pre-auth papers) |
 | POST | `/api/auth/login` | Authenticate, rotate + set session cookie |
@@ -349,10 +350,12 @@ All endpoints except `/api/health` and the `/api/auth/{register,login,logout}` r
 | DELETE | `/api/papers/{id}` | Delete paper, cascade claims + relationships |
 | POST | `/api/papers/{id}/reanalyze` | Re-run analyses, invalidate claim/relationship cache |
 | GET | `/api/papers/{id}/status` | Analysis completion status for polling |
-| POST | `/api/search` | Semantic search, returns relevance tiers |
+| POST | `/api/search` | Semantic search via pgvector, returns relevance tiers |
 | POST | `/api/ask` | RAG Q&A grounded in retrieved passages |
 | GET | `/api/contradictions/count` | Cached relationship counts — zero LLM calls |
+| GET | `/api/contradictions` | List persisted contradiction results — zero LLM calls |
 | POST | `/api/contradictions` | Run two-stage contradiction scan |
+| GET | `/api/hypotheses` | Return most recent cached hypotheses — zero LLM calls |
 | POST | `/api/hypotheses` | Generate conflict-grounded hypotheses |
 | POST | `/api/graph` | Build claim knowledge graph (`compute=false` read-only by default) |
 | POST | `/api/insights` | Synthesized insight feed — pure DB read |
@@ -360,7 +363,7 @@ All endpoints except `/api/health` and the `/api/auth/{register,login,logout}` r
 | POST | `/api/import/lookup` | Lookup by arXiv ID, DOI, or URL |
 | POST | `/api/import/add` | Import paper — dedup check before PDF download |
 | POST | `/api/monitor/scan` | Run monitoring scan with optional email digest |
-| POST | `/api/admin/fix-abstracts` | Re-fetch truncated abstracts *(admin — gate before deploy)* |
+| POST | `/api/admin/fix-abstracts` | Re-fetch truncated abstracts *(admin — token-gated)* |
 
 Full interactive docs at `/api/docs`.
 
@@ -374,14 +377,12 @@ Core pipeline: 6-type parallel analysis, two-stage contradiction detection (macr
 
 Security and multi-user: email + password auth (bcrypt, httpOnly session cookies), per-user library scoping and IDOR-safe ownership checks, BYOK with Fernet key encryption, model selection with server-side ceiling (Haiku/Sonnet on free tier, Opus needs own key), free-tier action cap (15 total / 2 Sonnet, 402 before any token spend), upload hardening (magic-byte check, size cap, path-traversal-safe UUID filenames), per-IP rate limiting, parameterized queries throughout.
 
-Frontend: login/register gate, settings panel (BYOK key management, model picker, usage bars), per-user localStorage cache namespacing.
+Frontend: landing page, login/register gate, settings panel (BYOK key management, model picker, usage bars), per-user localStorage cache namespacing, stale-while-revalidate across all tabs.
 
-**In progress**
-- Landing page for unauthenticated visitors
-- Daily monitor scheduling (APScheduler, per-user topics + digest email from DB)
-- Deploy — Railway/Render backend + Vercel frontend, security headers, `COOKIE_SECURE=true`
+Infrastructure: migrated from SQLite + ChromaDB to Supabase Postgres + pgvector. Deployed on Render (backend) + Vercel (frontend).
 
 **Later**
+- Daily monitor scheduling (APScheduler, per-user topics + digest email from DB)
 - Cross-encoder reranking on the Stage-1 retrieval pass
 - Demo video
 
