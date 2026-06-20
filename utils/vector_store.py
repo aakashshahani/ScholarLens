@@ -1,8 +1,11 @@
 """
-pgvector-backed vector store for ScholarLens (migrated from ChromaDB).
+pgvector-backed vector store for ScholarLens using Voyage AI embeddings.
 
-Stores embeddings in Supabase Postgres using the pgvector extension.
-Requires: CREATE EXTENSION IF NOT EXISTS vector; in Supabase.
+Replaces local sentence-transformers (MiniLM) with Voyage AI API calls,
+eliminating the ~400MB torch RAM overhead on Render free tier.
+
+Model: voyage-3-lite — 1024 dims, fast, generous free tier (200M tokens/month).
+Requires: VOYAGE_API_KEY in environment.
 """
 
 from dataclasses import dataclass
@@ -26,25 +29,32 @@ class SearchResult:
 class VectorStore:
     def __init__(self):
         self._dsn = settings.database_url
-        self._model = None
+        self._client = None
         self._init_table()
 
     def _get_conn(self):
         return psycopg2.connect(self._dsn, cursor_factory=RealDictCursor)
 
+    @property
+    def client(self):
+        """Lazy-load the Voyage AI client."""
+        if self._client is None:
+            import voyageai
+            self._client = voyageai.Client(api_key=settings.voyage_api_key)
+        return self._client
+
     def _init_table(self):
         conn = self._get_conn()
         cur = conn.cursor()
-        # Enable pgvector extension (idempotent)
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        # Embeddings table — 384 dims for all-MiniLM-L6-v2
+        # 1024 dims for voyage-3-lite
         cur.execute("""
             CREATE TABLE IF NOT EXISTS embeddings (
                 chunk_id    TEXT PRIMARY KEY,
                 paper_id    TEXT NOT NULL,
                 text        TEXT NOT NULL,
                 section     TEXT,
-                embedding   vector(384) NOT NULL
+                embedding   vector(512) NOT NULL
             )
         """)
         cur.execute(
@@ -54,22 +64,21 @@ class VectorStore:
         cur.close()
         conn.close()
 
-    @property
-    def embedding_model(self):
-        """Lazy-load the embedding model."""
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(settings.embedding_model)
-        return self._model
-
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        embeddings = self.embedding_model.encode(texts, show_progress_bar=False)
-        return embeddings.tolist()
+        """Embed a batch of document texts."""
+        # Voyage API has a max batch size of 128
+        all_embeddings = []
+        batch_size = 128
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            result = self.client.embed(batch, model="voyage-3-lite", input_type="document")
+            all_embeddings.extend(result.embeddings)
+        return all_embeddings
 
     def embed_query(self, query: str) -> list[float]:
-        prefix = getattr(settings, "embedding_query_prefix", "")
-        embeddings = self.embedding_model.encode([prefix + query], show_progress_bar=False)
-        return embeddings[0].tolist()
+        """Embed a single search query."""
+        result = self.client.embed([query], model="voyage-3-lite", input_type="query")
+        return result.embeddings[0]
 
     def add_chunks(
         self,
@@ -116,7 +125,6 @@ class VectorStore:
         query_embedding = self.embed_query(query)
         query_vec_str = str(query_embedding)
 
-        # Build WHERE clause
         conditions = ["1=1"]
         params: list = []
 
@@ -134,10 +142,7 @@ class VectorStore:
             params.append(exclude_sections)
 
         where = " AND ".join(conditions)
-
-        # Fetch more than needed to allow post-filter headroom
         fetch_n = n_results * 3
-        params.extend([query_vec_str, fetch_n])
 
         sql = f"""
             SELECT chunk_id, paper_id, text, section,
@@ -147,7 +152,7 @@ class VectorStore:
             ORDER BY score
             LIMIT %s
         """
-        params_full = params[:-2] + [query_vec_str, fetch_n]
+        params_full = params + [query_vec_str, fetch_n]
 
         conn = self._get_conn()
         cur = conn.cursor()

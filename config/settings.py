@@ -63,15 +63,13 @@ class Settings:
     # Total free actions (Haiku + Sonnet) on the SERVER key before BYOK required.
     free_action_limit: int = field(default_factory=lambda: _env_int("FREE_ACTION_LIMIT", 15))
 
-    # Embedding model — all-MiniLM-L6-v2 (384-dim, general-purpose).
-    # BGE-base was tested and rejected: score compression on narrow-domain
-    # negotiation/AI text made distance thresholds unreliable.
-    # NOTE: changing this model requires re-embedding the full library.
-    embedding_model: str = "all-MiniLM-L6-v2"
-
-    # MiniLM does not require a query instruction prefix (unlike BGE retrieval
-    # models). This field is intentionally absent — embed_query() in
-    # VectorStore uses the text as-is.
+    # Voyage AI embedding model — voyage-3-lite (1024-dim).
+    # Replaces local MiniLM to eliminate torch RAM overhead on Render free tier.
+    # voyage-3-lite: fast, 1024 dims, 200M tokens/month free tier.
+    voyage_api_key: str = field(
+        default_factory=lambda: os.getenv("VOYAGE_API_KEY", "")
+    )
+    embedding_model: str = "voyage-3-lite"
 
     # Chunking params
     chunk_size: int = 500          # tokens per chunk
@@ -150,6 +148,8 @@ class Settings:
             errors.append("ANTHROPIC_API_KEY not set")
         if not self.database_url:
             errors.append("DATABASE_URL not set")
+        if not self.voyage_api_key:
+            errors.append("VOYAGE_API_KEY not set")
         return errors
 
     def relevance_tier(self, cosine_distance: float) -> str:

@@ -9,9 +9,7 @@ pymupdf>=1.24.0            # imports as `fitz` — column-aware extraction
 
 # ── Retrieval ────────────────────────────────────────────────
 psycopg2-binary>=2.9.0    # PostgreSQL driver for Supabase
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.12.1+cpu
-sentence-transformers>=3.0.0
+voyageai>=0.2.0            # Voyage AI embeddings — replaces local MiniLM/torch
 rank-bm25>=0.2.2          # hybrid Stage-1 lexical pass
 
 # ── Utilities ────────────────────────────────────────────────
@@ -24,13 +22,10 @@ fastapi>=0.115.0
 uvicorn>=0.30.0
 python-multipart>=0.0.9   # required for file uploads
 
-# ── Security (this phase) ────────────────────────────────────
+# ── Security ─────────────────────────────────────────────────
 slowapi>=0.1.9            # per-IP / global rate limiting
 
-# ── Auth + BYOK (next phase) ─────────────────────────────────
+# ── Auth + BYOK ──────────────────────────────────────────────
 bcrypt>=4.1.0             # password hashing
 cryptography>=42.0.0      # Fernet — encrypt tenant Anthropic keys at rest
 email-validator>=2.1.0    # pydantic EmailStr for the login form
-
-
-psycopg2-binary
