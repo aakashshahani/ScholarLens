@@ -87,6 +87,8 @@ class VectorStore:
         paper_ids: list[str],
         sections: list[str | None],
     ):
+        # Strip NUL bytes — Postgres rejects them in string literals
+        texts = [t.replace("\x00", "") if t else t for t in texts]
         embeddings = self.embed_texts(texts)
         conn = self._get_conn()
         cur = conn.cursor()
