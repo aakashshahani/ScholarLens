@@ -14,9 +14,31 @@ from dataclasses import dataclass, field
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 from psycopg2.extras import RealDictCursor
 
 from config import settings
+
+# ── Shared connection pool ────────────────────────────────────────────────────
+# ThreadedConnectionPool is safe for concurrent use across FastAPI's threadpool.
+# minconn=1: keep one connection alive to avoid cold-connect latency.
+# maxconn=5: cap at 5 simultaneous connections — Supabase free tier allows 60
+# through the session pooler, but we only need a small slice. Keeps TCP buffer
+# overhead low on Render's 512MB free tier.
+# Initialised lazily on first use so import doesn't fail if DATABASE_URL is unset.
+_pool: psycopg2.pool.ThreadedConnectionPool | None = None
+
+
+def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pool
+    if _pool is None or _pool.closed:
+        from config import settings as _s
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=1,
+            maxconn=5,
+            dsn=_s.database_url,
+        )
+    return _pool
 
 
 # â”€â”€ Data Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -171,7 +193,18 @@ class Database:
         self._init_db()
 
     def _get_conn(self):
-        return psycopg2.connect(self._dsn, cursor_factory=RealDictCursor)
+        """Borrow a connection from the shared pool."""
+        conn = _get_pool().getconn()
+        # Ensure RealDictCursor is used for all queries
+        conn.cursor_factory = RealDictCursor
+        return conn
+
+    def _put_conn(self, conn, *, close: bool = False):
+        """Return a connection to the pool. Pass close=True on error."""
+        try:
+            _get_pool().putconn(conn, close=close)
+        except Exception:
+            pass
 
     def _init_db(self):
         conn = self._get_conn()
@@ -287,7 +320,7 @@ class Database:
             cur.execute(idx_sql)
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     # â”€â”€ Paper CRUD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -306,7 +339,7 @@ class Database:
         )
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return paper.id
 
     def get_paper(self, paper_id: str) -> Paper | None:
@@ -315,7 +348,7 @@ class Database:
         cur.execute("SELECT * FROM papers WHERE id = %s", (paper_id,))
         row = cur.fetchone()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return self._row_to_paper(row) if row else None
 
     def list_papers(self, limit: int = 50, offset: int = 0,
@@ -335,7 +368,7 @@ class Database:
             )
         rows = cur.fetchall()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return [self._row_to_paper(r) for r in rows]
 
     def delete_paper(self, paper_id: str) -> bool:
@@ -345,7 +378,7 @@ class Database:
         deleted = cur.rowcount > 0
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return deleted
 
     # â”€â”€ Ownership helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -356,7 +389,7 @@ class Database:
         cur.execute("UPDATE papers SET user_id = %s WHERE id = %s", (user_id, paper_id))
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     def list_paper_ids_for_user(self, user_id: str) -> list[str]:
         conn = self._get_conn()
@@ -364,7 +397,7 @@ class Database:
         cur.execute("SELECT id FROM papers WHERE user_id = %s", (user_id,))
         rows = cur.fetchall()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return [r["id"] for r in rows]
 
     def count_users(self) -> int:
@@ -373,7 +406,7 @@ class Database:
         cur.execute("SELECT COUNT(*) as count FROM users")
         n = cur.fetchone()["count"]
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return int(n)
 
     def adopt_orphan_papers(self, user_id: str) -> int:
@@ -383,7 +416,7 @@ class Database:
         n = cur.rowcount
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return n
 
     # â”€â”€ Chunk CRUD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -401,7 +434,7 @@ class Database:
         )
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     def get_chunks_for_paper(self, paper_id: str) -> list[Chunk]:
         conn = self._get_conn()
@@ -411,7 +444,7 @@ class Database:
         )
         rows = cur.fetchall()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return [
             Chunk(id=r["id"], paper_id=r["paper_id"], text=r["text"],
                   chunk_index=r["chunk_index"], section=r["section"],
@@ -432,7 +465,7 @@ class Database:
         )
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return result.id
 
     def get_analyses_for_paper(self, paper_id: str) -> list[AnalysisResult]:
@@ -444,7 +477,7 @@ class Database:
         )
         rows = cur.fetchall()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return [
             AnalysisResult(id=r["id"], paper_id=r["paper_id"],
                            analysis_type=r["analysis_type"],
@@ -482,7 +515,7 @@ class Database:
             return None
         finally:
             cur.close()
-            conn.close()
+            self._put_conn(conn)
 
     @staticmethod
     def _row_to_paper(row) -> Paper:
@@ -513,7 +546,7 @@ class Database:
         )
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     def get_claims_for_paper(self, paper_id: str) -> list[StoredClaim]:
         conn = self._get_conn()
@@ -521,7 +554,7 @@ class Database:
         cur.execute("SELECT * FROM claims WHERE paper_id = %s", (paper_id,))
         rows = cur.fetchall()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return [
             StoredClaim(id=r["id"], paper_id=r["paper_id"], text=r["text"],
                         section=r["section"], confidence=r["confidence"],
@@ -536,7 +569,7 @@ class Database:
         cur.execute("DELETE FROM claims WHERE paper_id = %s", (paper_id,))
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     # â”€â”€ Relationships cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -561,7 +594,7 @@ class Database:
         )
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     def get_relationship(self, claim_a: str, claim_b: str) -> "StoredRelationship | None":
         lo, hi = sorted([claim_a, claim_b])
@@ -572,7 +605,7 @@ class Database:
         )
         row = cur.fetchone()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return self._row_to_rel(row) if row else None
 
     def list_relationships(
@@ -597,7 +630,7 @@ class Database:
         cur.execute("SELECT * FROM relationships ORDER BY created_at DESC")
         rows = cur.fetchall()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         rels = [self._row_to_rel(r) for r in rows]
         if paper_ids:
             pid_set = set(paper_ids)
@@ -643,7 +676,7 @@ class Database:
         )
         row = cur.fetchone()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         if not row:
             return None
         return {"hypotheses": json.loads(row["payload"]), "grounding": row["grounding"]}
@@ -662,7 +695,7 @@ class Database:
         )
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     def list_hypothesis_cache(self, user_paper_ids: list[str]) -> list[dict]:
         """Return all hypothesis cache entries that reference any of the user's papers."""
@@ -673,7 +706,7 @@ class Database:
         )
         rows = cur.fetchall()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         results = []
         pid_set = set(user_paper_ids)
         import json as _json
@@ -701,7 +734,7 @@ class Database:
         cur.execute("DELETE FROM hypothesis_cache WHERE cache_key = %s", (cache_key,))
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     # â”€â”€ Users / Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -730,7 +763,7 @@ class Database:
         )
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return user
 
     def get_user_by_email(self, email: str) -> User | None:
@@ -739,7 +772,7 @@ class Database:
         cur.execute("SELECT * FROM users WHERE email = %s", (email,))
         row = cur.fetchone()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return self._row_to_user(row) if row else None
 
     def get_user_by_id(self, user_id: str) -> User | None:
@@ -748,7 +781,7 @@ class Database:
         cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
         row = cur.fetchone()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return self._row_to_user(row) if row else None
 
     def increment_usage(self, user_id: str, is_sonnet: bool) -> tuple[int, int]:
@@ -770,7 +803,7 @@ class Database:
         row = cur.fetchone()
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return (row["free_actions_used"], row["free_sonnet_used"]) if row else (0, 0)
 
     def update_user_settings(self, user_id: str, **fields) -> None:
@@ -784,7 +817,7 @@ class Database:
         cur.execute(f"UPDATE users SET {set_clause} WHERE id = %s", values)
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     # â”€â”€ Sessions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -807,7 +840,7 @@ class Database:
         )
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return sess
 
     def get_session(self, token: str) -> Session | None:
@@ -816,7 +849,7 @@ class Database:
         cur.execute("SELECT * FROM sessions WHERE token = %s", (token,))
         row = cur.fetchone()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         if not row:
             return None
         return Session(token=row["token"], user_id=row["user_id"],
@@ -828,7 +861,7 @@ class Database:
         cur.execute("DELETE FROM sessions WHERE token = %s", (token,))
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     def delete_sessions_for_user(self, user_id: str) -> None:
         conn = self._get_conn()
@@ -836,7 +869,7 @@ class Database:
         cur.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     # ── Monitor topics ────────────────────────────────────────────────────────
 
@@ -874,7 +907,7 @@ class Database:
         row = cur.fetchone()
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return self._row_to_monitor_topic(row)
 
     def list_monitor_topics(self, user_id: str) -> list[MonitorTopicRow]:
@@ -886,7 +919,7 @@ class Database:
         )
         rows = cur.fetchall()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return [self._row_to_monitor_topic(r) for r in rows]
 
     def delete_monitor_topic(self, topic_id: str, user_id: str) -> bool:
@@ -900,7 +933,7 @@ class Database:
         deleted = cur.fetchone() is not None
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return deleted
 
     def update_topic_scanned_at(self, topic_id: str) -> None:
@@ -913,7 +946,7 @@ class Database:
         )
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     def list_users_with_active_topics(self) -> list[User]:
         """Return all users who have at least one active monitor topic.
@@ -928,6 +961,6 @@ class Database:
         )
         rows = cur.fetchall()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return [self._row_to_user(r) for r in rows]
 

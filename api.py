@@ -1189,17 +1189,20 @@ def import_add(
 
     # Update metadata from the source (better than what PDF extraction finds),
     # and stamp ownership in the same write.
-    import psycopg2
-    conn = psycopg2.connect(db._dsn)
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE papers SET title=%s, authors=%s, abstract=%s, year=%s, source=%s, doi=%s, arxiv_id=%s, user_id=%s WHERE id=%s",
-        (req.title, json.dumps(req.authors), _normalize_abstract(req.abstract), req.year,
-         req.source, req.doi, arxiv_id, user.id, paper.id),
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
+    # Uses db._get_conn()/_put_conn() to go through the shared pool rather
+    # than opening a raw connection that could leak on exception.
+    _conn = db._get_conn()
+    _cur = _conn.cursor()
+    try:
+        _cur.execute(
+            "UPDATE papers SET title=%s, authors=%s, abstract=%s, year=%s, source=%s, doi=%s, arxiv_id=%s, user_id=%s WHERE id=%s",
+            (req.title, json.dumps(req.authors), _normalize_abstract(req.abstract), req.year,
+             req.source, req.doi, arxiv_id, user.id, paper.id),
+        )
+        _conn.commit()
+    finally:
+        _cur.close()
+        db._put_conn(_conn)
 
     # Analyze in background
     background_tasks.add_task(_analyze_paper_bg, paper.id, user_key, model)

@@ -15,6 +15,7 @@ import psycopg2.extras
 from psycopg2.extras import RealDictCursor
 
 from config import settings
+from db.database import _get_pool
 
 
 @dataclass
@@ -33,7 +34,16 @@ class VectorStore:
         self._init_table()
 
     def _get_conn(self):
-        return psycopg2.connect(self._dsn, cursor_factory=RealDictCursor)
+        """Borrow a connection from the shared pool."""
+        conn = _get_pool().getconn()
+        conn.cursor_factory = RealDictCursor
+        return conn
+
+    def _put_conn(self, conn, *, close: bool = False):
+        try:
+            _get_pool().putconn(conn, close=close)
+        except Exception:
+            pass
 
     @property
     def client(self):
@@ -62,7 +72,7 @@ class VectorStore:
         )
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of document texts."""
@@ -107,7 +117,7 @@ class VectorStore:
         )
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     def search(
         self,
@@ -161,7 +171,7 @@ class VectorStore:
         cur.execute(sql, params_full)
         rows = cur.fetchall()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
         results = []
         for r in rows:
@@ -183,7 +193,7 @@ class VectorStore:
         cur.execute("DELETE FROM embeddings WHERE paper_id = %s", (paper_id,))
         conn.commit()
         cur.close()
-        conn.close()
+        self._put_conn(conn)
 
     def count(self) -> int:
         conn = self._get_conn()
@@ -191,5 +201,5 @@ class VectorStore:
         cur.execute("SELECT COUNT(*) as count FROM embeddings")
         n = cur.fetchone()["count"]
         cur.close()
-        conn.close()
+        self._put_conn(conn)
         return int(n)
