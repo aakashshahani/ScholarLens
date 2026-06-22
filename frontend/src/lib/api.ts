@@ -103,6 +103,16 @@ export interface ImportResult {
   url: string;
 }
 
+export interface MonitorTopic {
+  id: string;
+  name: string;
+  keywords: string[];
+  sources: string[];
+  is_active: boolean;
+  last_scanned_at: string | null;
+  created_at: string;
+}
+
 export interface MonitorDigest {
   topic: string;
   papers_found: number;
@@ -423,6 +433,25 @@ export const api = {
         relevance_threshold: opts.relevanceThreshold ?? 0.5,
         max_per_source: opts.maxPerSource ?? 5,
       }),
+    }),
+
+  // ── Monitor topics (saved) ───────────────────────────────
+  listMonitorTopics: () =>
+    apiFetch<MonitorTopic[]>("/api/monitor/topics"),
+
+  createMonitorTopic: (topic: { name: string; keywords: string[]; sources?: string[] }) =>
+    apiFetch<MonitorTopic>("/api/monitor/topics", {
+      method: "POST",
+      body: JSON.stringify({
+        name: topic.name,
+        keywords: topic.keywords,
+        sources: topic.sources ?? ["semantic_scholar", "openalex", "arxiv"],
+      }),
+    }),
+
+  deleteMonitorTopic: (topicId: string) =>
+    apiFetch<{ status: string; id: string }>(`/api/monitor/topics/${topicId}`, {
+      method: "DELETE",
     }),
 
   // ── Graph / Insights ──────────────────────────────────────

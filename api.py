@@ -36,7 +36,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from config import settings, UPLOAD_DIR
 from db import Database, Paper
-from db.database import User
+from db.database import User, MonitorTopicRow
 import auth as authlib
 from agents import (
     PDFAnalysisAgent,
@@ -132,6 +132,58 @@ importer = PaperImporter()
 monitor = MonitoringAgent()
 
 
+# ── Scheduled monitoring job ──────────────────────────────────────────────────
+# Runs daily at 6am UTC. For each user with active saved topics and a
+# digest_email configured, runs a full scan and sends the email digest.
+# APScheduler runs in-process — no broker or worker needed.
+# State is in-memory only: if Render restarts, the scheduler restarts too.
+# This is fine since UptimeRobot keep-alive pings prevent cold starts during
+# active hours, and a missed daily scan is not catastrophic.
+
+def _run_scheduled_monitor():
+    """Background job: scan saved topics for all active users."""
+    print("[scheduler] Starting daily monitor scan...")
+    try:
+        users = db.list_users_with_active_topics()
+        print(f"[scheduler] Found {len(users)} users with active topics")
+        for user in users:
+            if not user.digest_email:
+                continue
+            topics_rows = db.list_monitor_topics(user.id)
+            active = [t for t in topics_rows if t.is_active]
+            if not active:
+                continue
+            monitor_topics = [
+                MonitorTopic(name=t.name, keywords=t.keywords, sources=t.sources)
+                for t in active
+            ]
+            print(f"[scheduler] Scanning {len(active)} topics for {user.email}")
+            try:
+                monitor.run_full_scan(
+                    topics=monitor_topics,
+                    recipient=user.digest_email,
+                    user_id=user.id,
+                )
+                for t in active:
+                    db.update_topic_scanned_at(t.id)
+            except Exception as e:
+                print(f"[scheduler] Scan failed for {user.email}: {e}")
+    except Exception as e:
+        print(f"[scheduler] Job failed: {e}")
+
+
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+    _scheduler = BackgroundScheduler(timezone="UTC")
+    _scheduler.add_job(_run_scheduled_monitor, "cron", hour=6, minute=0,
+                       id="daily_monitor", replace_existing=True)
+    _scheduler.start()
+    print("[scheduler] Daily monitor job scheduled (06:00 UTC)")
+except ImportError:
+    print("[scheduler] apscheduler not installed — scheduled monitoring disabled")
+    _scheduler = None
+
+
 # â”€â”€ Insight feed cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Simple in-process TTL cache â€” no new DB table needed.
 # The feed is pure DB reads so it's cheap to recompute, but repeated
@@ -212,6 +264,14 @@ class MonitorRequest(BaseModel):
     email: Optional[str] = None
     relevance_threshold: float = Field(0.5, ge=0.0, le=1.0)
     max_per_source: int = Field(5, ge=1, le=20)
+
+
+class MonitorTopicRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    keywords: list[str] = Field(..., min_items=1)
+    sources: list[str] = Field(
+        default=["semantic_scholar", "openalex", "arxiv"],
+    )
 
 
 # â”€â”€ Background task helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1214,6 +1274,66 @@ def monitor_scan(request: Request, req: MonitorRequest,
         "email_error": email_error,
         "sources_failed": sources_failed,
     }
+
+
+@app.get("/api/monitor/topics")
+def list_monitor_topics(user: User = Depends(authlib.get_current_user)):
+    """Return all saved monitor topics for the current user."""
+    topics = db.list_monitor_topics(user.id)
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "keywords": t.keywords,
+            "sources": t.sources,
+            "is_active": t.is_active,
+            "last_scanned_at": t.last_scanned_at,
+            "created_at": t.created_at,
+        }
+        for t in topics
+    ]
+
+
+@app.post("/api/monitor/topics")
+def create_monitor_topic(
+    req: MonitorTopicRequest,
+    user: User = Depends(authlib.get_current_user),
+):
+    """Save a new monitor topic for the current user."""
+    valid_sources = {"semantic_scholar", "openalex", "arxiv"}
+    sources = [s for s in req.sources if s in valid_sources]
+    if not sources:
+        sources = ["semantic_scholar", "openalex", "arxiv"]
+    keywords = [k.strip() for k in req.keywords if k.strip()]
+    if not keywords:
+        raise HTTPException(status_code=400, detail="At least one keyword is required.")
+    topic = db.create_monitor_topic(
+        user_id=user.id,
+        name=req.name.strip(),
+        keywords=keywords,
+        sources=sources,
+    )
+    return {
+        "id": topic.id,
+        "name": topic.name,
+        "keywords": topic.keywords,
+        "sources": topic.sources,
+        "is_active": topic.is_active,
+        "last_scanned_at": topic.last_scanned_at,
+        "created_at": topic.created_at,
+    }
+
+
+@app.delete("/api/monitor/topics/{topic_id}")
+def delete_monitor_topic(
+    topic_id: str,
+    user: User = Depends(authlib.get_current_user),
+):
+    """Delete a saved monitor topic. Returns 404 if not found or not owned."""
+    deleted = db.delete_monitor_topic(topic_id, user.id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Topic not found.")
+    return {"status": "deleted", "id": topic_id}
 
 
 # â”€â”€ Knowledge Graph â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

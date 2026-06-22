@@ -138,6 +138,23 @@ class User:
 
 
 @dataclass
+class MonitorTopicRow:
+    """Persisted monitor topic (DB representation)."""
+    id: str
+    user_id: str
+    name: str
+    keywords: list[str]
+    sources: list[str]
+    is_active: bool
+    last_scanned_at: str | None
+    created_at: str
+
+    @staticmethod
+    def new_id() -> str:
+        return str(uuid.uuid4())
+
+
+@dataclass
 class Session:
     token: str
     user_id: str
@@ -820,3 +837,97 @@ class Database:
         conn.commit()
         cur.close()
         conn.close()
+
+    # ── Monitor topics ────────────────────────────────────────────────────────
+
+    def _row_to_monitor_topic(self, r) -> MonitorTopicRow:
+        return MonitorTopicRow(
+            id=r["id"],
+            user_id=r["user_id"],
+            name=r["name"],
+            keywords=json.loads(r["keywords"]) if isinstance(r["keywords"], str) else r["keywords"],
+            sources=json.loads(r["sources"]) if isinstance(r["sources"], str) else r["sources"],
+            is_active=r["is_active"],
+            last_scanned_at=r.get("last_scanned_at"),
+            created_at=r["created_at"],
+        )
+
+    def create_monitor_topic(
+        self,
+        user_id: str,
+        name: str,
+        keywords: list[str],
+        sources: list[str],
+    ) -> MonitorTopicRow:
+        topic_id = MonitorTopicRow.new_id()
+        now = datetime.now(timezone.utc).isoformat()
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO monitor_topics
+               (id, user_id, name, keywords, sources, is_active, created_at)
+               VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, true, %s)
+               RETURNING *""",
+            (topic_id, user_id, name,
+             json.dumps(keywords), json.dumps(sources), now),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return self._row_to_monitor_topic(row)
+
+    def list_monitor_topics(self, user_id: str) -> list[MonitorTopicRow]:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM monitor_topics WHERE user_id = %s ORDER BY created_at ASC",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [self._row_to_monitor_topic(r) for r in rows]
+
+    def delete_monitor_topic(self, topic_id: str, user_id: str) -> bool:
+        """Delete a topic. Checks ownership — returns False if not found/owned."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM monitor_topics WHERE id = %s AND user_id = %s RETURNING id",
+            (topic_id, user_id),
+        )
+        deleted = cur.fetchone() is not None
+        conn.commit()
+        cur.close()
+        conn.close()
+        return deleted
+
+    def update_topic_scanned_at(self, topic_id: str) -> None:
+        """Record when a topic was last scanned by the scheduler."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE monitor_topics SET last_scanned_at = %s WHERE id = %s",
+            (datetime.now(timezone.utc).isoformat(), topic_id),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def list_users_with_active_topics(self) -> list[User]:
+        """Return all users who have at least one active monitor topic.
+        Used by the APScheduler job to know who to scan for."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT DISTINCT u.*
+               FROM users u
+               INNER JOIN monitor_topics mt ON mt.user_id = u.id
+               WHERE mt.is_active = true"""
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [self._row_to_user(r) for r in rows]
+

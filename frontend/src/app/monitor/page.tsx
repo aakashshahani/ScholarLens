@@ -1,71 +1,108 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, MonitorDigest, MonitorScanResponse } from "@/lib/api";
+import { api, MonitorDigest, MonitorScanResponse, MonitorTopic } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, SectionLabel } from "@/components/ui";
-import { Radar, Plus, X, Mail, ExternalLink, AlertCircle, CheckCircle2 } from "lucide-react";
+import { Radar, Plus, X, Mail, ExternalLink, AlertCircle, CheckCircle2, Clock } from "lucide-react";
 import { cache } from "@/lib/cache";
 
-interface Topic { name: string; keywords: string[]; sources: string[]; }
+// Local draft type — what the user is building before saving
+interface DraftTopic { name: string; keywords: string[]; sources: string[]; }
 
 const TIER_META: Record<string, { label: string; color: string }> = {
   highly_relevant: { label: "Highly relevant", color: "var(--support)" },
-  related: { label: "Related", color: "var(--nuance)" },
-  tangential: { label: "Broader field", color: "var(--text-3)" },
+  related:         { label: "Related",          color: "var(--nuance)" },
+  tangential:      { label: "Broader field",    color: "var(--text-3)" },
 };
 
+function formatLastScanned(iso: string | null): string {
+  if (!iso) return "Never scanned";
+  const d = new Date(iso);
+  const now = new Date();
+  const diffH = Math.round((now.getTime() - d.getTime()) / 3600000);
+  if (diffH < 1) return "Just now";
+  if (diffH < 24) return `${diffH}h ago`;
+  const diffD = Math.floor(diffH / 24);
+  return `${diffD}d ago`;
+}
+
 export default function MonitorPage() {
-  const [topics, setTopics] = useState<Topic[]>([]);
+  // Saved topics (from DB)
+  const [savedTopics, setSavedTopics] = useState<MonitorTopic[]>([]);
+  const [loadingTopics, setLoadingTopics] = useState(true);
+
+  // Draft topic input
   const [topicName, setTopicName] = useState("");
   const [topicKeywords, setTopicKeywords] = useState("");
+
+  // Scan config
   const [email, setEmail] = useState("");
   const [results, setResults] = useState<MonitorDigest[]>([]);
-  const [emailStatus, setEmailStatus] = useState<{ sent: boolean; error: string | null; requested: boolean }>({ sent: false, error: null, requested: false });
+  const [emailStatus, setEmailStatus] = useState<{ sent: boolean; error: string | null; requested: boolean }>
+    ({ sent: false, error: null, requested: false });
   const [sourcesFailed, setSourcesFailed] = useState<string[]>([]);
   const [showTangential, setShowTangential] = useState<Record<number, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [showConfig, setShowConfig] = useState(true);
+  const [savingTopic, setSavingTopic] = useState(false);
 
+  // Load saved topics from API on mount
   useEffect(() => {
-    const cachedTopics = cache.read<Topic[]>("monitor_topics");
-    if (cachedTopics) setTopics(cachedTopics);
     const cachedEmail = cache.read<string>("monitor_email");
     if (cachedEmail) setEmail(cachedEmail);
+
     const cachedResults = cache.read<MonitorDigest[]>("monitor_results");
     if (cachedResults && cachedResults.length > 0) {
       setResults(cachedResults);
       setShowConfig(false);
     }
+
+    api.listMonitorTopics()
+      .then((topics) => {
+        setSavedTopics(topics);
+        setLoadingTopics(false);
+      })
+      .catch(() => setLoadingTopics(false));
   }, []);
 
-  const addTopic = () => {
+  const addTopic = async () => {
     if (!topicName.trim() || !topicKeywords.trim()) return;
-    const next = [...topics, {
-      name: topicName.trim(),
-      keywords: topicKeywords.split(",").map((k) => k.trim()).filter(Boolean),
-      sources: ["arxiv", "semantic_scholar"],
-    }];
-    setTopics(next);
-    cache.write("monitor_topics", next);
-    setTopicName(""); setTopicKeywords("");
+    setSavingTopic(true);
+    try {
+      const topic = await api.createMonitorTopic({
+        name: topicName.trim(),
+        keywords: topicKeywords.split(",").map((k) => k.trim()).filter(Boolean),
+        sources: ["semantic_scholar", "openalex", "arxiv"],
+      });
+      setSavedTopics((prev) => [...prev, topic]);
+      setTopicName("");
+      setTopicKeywords("");
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setSavingTopic(false);
+    }
   };
 
-  const removeTopic = (i: number) => {
-    const next = topics.filter((_, idx) => idx !== i);
-    setTopics(next);
-    cache.write("monitor_topics", next);
+  const removeTopic = async (topicId: string) => {
+    try {
+      await api.deleteMonitorTopic(topicId);
+      setSavedTopics((prev) => prev.filter((t) => t.id !== topicId));
+    } catch (e: any) {
+      setError(e.message);
+    }
   };
 
   const runScan = async () => {
-    if (topics.length === 0) { setError("Add at least one topic to monitor."); return; }
+    if (savedTopics.length === 0) { setError("Add at least one topic to monitor."); return; }
     setLoading(true); setError(""); setResults([]);
     if (email) cache.write("monitor_email", email);
     try {
       const res: MonitorScanResponse = await api.monitorScan({
-        topics: topics.map((t) => ({ name: t.name, keywords: t.keywords, sources: t.sources })),
+        topics: savedTopics.map((t) => ({ name: t.name, keywords: t.keywords, sources: t.sources })),
         email: email || undefined,
-        relevanceThreshold: 0.3,
+        relevanceThreshold: 0.5,
         maxPerSource: 5,
       });
       setResults(res.digests);
@@ -78,15 +115,50 @@ export default function MonitorPage() {
   };
 
   const totalStrong = results.reduce(
-    (n, r) => n + r.papers.filter((p) => p.relevance_tier === "highly_relevant" || p.relevance_tier === "related").length,
+    (n, r) => n + r.papers.filter((p) =>
+      p.relevance_tier === "highly_relevant" || p.relevance_tier === "related"
+    ).length,
     0
   );
+
+  const renderPaper = (p: MonitorDigest["papers"][0], idx: number) => {
+    const tier = TIER_META[p.relevance_tier || "tangential"] || TIER_META.tangential;
+    return (
+      <Card key={idx} className="!p-4">
+        <div className="flex items-start justify-between gap-3 mb-2">
+          <div className="text-[13.5px] font-medium text-[var(--text-1)] leading-snug flex-1">{p.title}</div>
+          <a href={p.url} target="_blank" rel="noopener noreferrer"
+            className="shrink-0 p-1.5 text-[var(--text-3)] hover:text-[var(--gen)] t-all">
+            <ExternalLink size={14} />
+          </a>
+        </div>
+        <div className="text-[11.5px] text-[var(--text-3)] mb-2.5">
+          {p.authors?.slice(0, 3).join(", ") || "Unknown authors"}
+          {(p.authors?.length || 0) > 3 && ` +${p.authors.length - 3}`}
+          {p.year ? ` · ${p.year}` : ""}
+          {" · "}
+          <span className="capitalize">{p.source?.replace("_", " ")}</span>
+        </div>
+        <div className="text-[12.5px] text-[var(--text-2)] leading-[1.6] mb-3 line-clamp-3">
+          {p.abstract}
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-medium" style={{ color: tier.color }}>{tier.label}</span>
+          {p.relevance_reason && (
+            <span className="text-[11px] text-[var(--text-3)] italic line-clamp-1 max-w-[60%] text-right">
+              {p.relevance_reason}
+            </span>
+          )}
+        </div>
+      </Card>
+    );
+  };
 
   return (
     <div>
       <PageHeader
         title="Research monitor"
-        subtitle="Search arXiv and Semantic Scholar for new papers, scored against your library. Optionally email yourself a digest."
+        subtitle="Watch arXiv, OpenAlex, and Semantic Scholar for new papers scored against your library. Topics are saved — the scheduler runs daily."
         action={results.length > 0 && (
           <button onClick={() => setShowConfig((s) => !s)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)]">
@@ -97,6 +169,7 @@ export default function MonitorPage() {
 
       {showConfig && (
         <div className="fade-up">
+          {/* Add topic */}
           <Card className="mb-4">
             <SectionLabel>Add a topic to watch</SectionLabel>
             <div className="grid grid-cols-[1fr_2fr_auto] gap-2 mb-1">
@@ -105,29 +178,39 @@ export default function MonitorPage() {
                 className="bg-[var(--surface-1)] border border-[var(--line)] rounded-[var(--r-md)] px-3.5 py-2.5 text-[13.5px] text-[var(--text-1)]" />
               <input value={topicKeywords} onChange={(e) => setTopicKeywords(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && addTopic()}
-                placeholder="Narrow search terms, comma-separated: LLM negotiation, AI negotiation coaching, strategic adaptation"
+                placeholder="Keywords, comma-separated: LLM negotiation, AI coaching, strategic adaptation"
                 className="bg-[var(--surface-1)] border border-[var(--line)] rounded-[var(--r-md)] px-3.5 py-2.5 text-[13.5px] text-[var(--text-1)]" />
-              <button onClick={addTopic}
-                className="flex items-center gap-1.5 px-3 py-2.5 rounded-[var(--r-md)] bg-[var(--gen-dim)] border border-[var(--gen-line)] text-[var(--gen)] text-[12.5px] font-medium t-all hover:opacity-90">
-                <Plus size={14} /> Add
+              <button onClick={addTopic} disabled={savingTopic || !topicName.trim() || !topicKeywords.trim()}
+                className="flex items-center gap-1.5 px-3 py-2.5 rounded-[var(--r-md)] bg-[var(--gen-dim)] border border-[var(--gen-line)] text-[var(--gen)] text-[12.5px] font-medium t-all hover:opacity-90 disabled:opacity-40 disabled:pointer-events-none">
+                <Plus size={14} /> {savingTopic ? "Saving…" : "Save"}
               </button>
             </div>
             <div className="text-[11px] text-[var(--text-3)] mt-1.5">
-              Topics search arXiv and Semantic Scholar, scored for relevance against your library. Specific terms surface closer matches; broad terms show wider field coverage — both are useful.
+              Topics are saved permanently and scanned daily by the scheduler.
+              Sources: Semantic Scholar, OpenAlex (250M+ works), and arXiv.
             </div>
           </Card>
 
-          {topics.length > 0 && (
+          {/* Saved topics list */}
+          {loadingTopics ? (
+            <Card className="mb-4"><Spinner label="Loading saved topics…" /></Card>
+          ) : savedTopics.length > 0 && (
             <Card className="mb-4">
-              <SectionLabel>Topics ({topics.length})</SectionLabel>
+              <SectionLabel>Saved topics ({savedTopics.length})</SectionLabel>
               <div className="space-y-2">
-                {topics.map((t, i) => (
-                  <div key={i} className="flex items-center gap-3 p-3 rounded-[var(--r-md)] bg-[var(--surface-1)] border border-[var(--line)]">
+                {savedTopics.map((t) => (
+                  <div key={t.id} className="flex items-center gap-3 p-3 rounded-[var(--r-md)] bg-[var(--surface-1)] border border-[var(--line)]">
                     <div className="flex-1 min-w-0">
                       <div className="text-[13px] font-medium text-[var(--text-1)]">{t.name}</div>
                       <div className="text-[11.5px] text-[var(--text-3)] mt-0.5">{t.keywords.join(" · ")}</div>
+                      {t.last_scanned_at && (
+                        <div className="flex items-center gap-1 text-[10.5px] text-[var(--text-4)] mt-1">
+                          <Clock size={10} />
+                          {formatLastScanned(t.last_scanned_at)}
+                        </div>
+                      )}
                     </div>
-                    <button onClick={() => removeTopic(i)}
+                    <button onClick={() => removeTopic(t.id)}
                       className="p-1.5 rounded text-[var(--text-3)] hover:text-[var(--contra)] hover:bg-[var(--surface-3)] t-all">
                       <X size={14} />
                     </button>
@@ -137,28 +220,31 @@ export default function MonitorPage() {
             </Card>
           )}
 
+          {/* Email digest */}
           <Card className="mb-4">
             <SectionLabel>Email digest (optional)</SectionLabel>
             <div className="flex items-center gap-2">
               <Mail size={15} className="text-[var(--text-3)] shrink-0" />
               <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com — leave blank to skip email"
+                placeholder="you@example.com — daily digest will be sent here"
                 className="flex-1 bg-[var(--surface-1)] border border-[var(--line)] rounded-[var(--r-md)] px-3.5 py-2 text-[13.5px] text-[var(--text-1)]" />
             </div>
             <div className="text-[11px] text-[var(--text-3)] mt-2">
-              Optional. Emails a digest after the scan. Delivery to arbitrary addresses requires a verified sending domain; otherwise it reaches the configured owner address.
+              Set your digest email in Settings to receive automatic daily summaries.
+              Delivery to arbitrary addresses requires a verified sending domain.
             </div>
           </Card>
 
-          <PrimaryButton onClick={runScan} disabled={loading || topics.length === 0}>
-            <Radar size={15} /> {loading ? "Scanning…" : `Run scan${topics.length > 0 ? ` (${topics.length} topic${topics.length !== 1 ? "s" : ""})` : ""}`}
+          <PrimaryButton onClick={runScan} disabled={loading || savedTopics.length === 0}>
+            <Radar size={15} />
+            {loading ? "Scanning…" : `Run scan now${savedTopics.length > 0 ? ` (${savedTopics.length} topic${savedTopics.length !== 1 ? "s" : ""})` : ""}`}
           </PrimaryButton>
         </div>
       )}
 
       {loading && !showConfig && (
         <Card className="mb-6">
-          <Spinner label="Searching arXiv and Semantic Scholar — this takes 30–60 seconds…" />
+          <Spinner label="Searching Semantic Scholar, OpenAlex, and arXiv — this takes 30–60 seconds…" />
         </Card>
       )}
 
@@ -166,7 +252,7 @@ export default function MonitorPage() {
         <div className="bg-[var(--contra-dim)] border border-[var(--contra-line)] rounded-[var(--r-lg)] p-4 mb-6 flex items-start gap-3">
           <AlertCircle size={16} className="text-[var(--contra)] mt-0.5 shrink-0" />
           <div>
-            <div className="text-[13px] text-[var(--contra)] font-medium">Scan failed</div>
+            <div className="text-[13px] text-[var(--contra)] font-medium">Error</div>
             <div className="text-[12px] text-[var(--text-2)] mt-0.5">{error}</div>
           </div>
         </div>
@@ -182,11 +268,12 @@ export default function MonitorPage() {
               </span>
               {emailStatus.requested && emailStatus.sent && (
                 <span className="text-[12px] text-[var(--support)] ml-auto flex items-center gap-1.5">
-                  <Mail size={12} /> Emailed to {email}
+                  <Mail size={12} /> Digest sent
                 </span>
               )}
               {emailStatus.requested && !emailStatus.sent && (
-                <span className="text-[12px] text-[var(--nuance)] ml-auto flex items-center gap-1.5" title={emailStatus.error || ""}>
+                <span className="text-[12px] text-[var(--nuance)] ml-auto flex items-center gap-1.5"
+                  title={emailStatus.error || ""}>
                   <Mail size={12} /> Email not delivered
                 </span>
               )}
@@ -197,88 +284,62 @@ export default function MonitorPage() {
             <div className="bg-[var(--nuance-dim)] border border-[var(--nuance-line)] rounded-[var(--r-lg)] p-3.5 flex items-start gap-2.5">
               <AlertCircle size={15} className="text-[var(--nuance)] mt-0.5 shrink-0" />
               <div className="text-[12.5px] text-[var(--text-2)] leading-relaxed">
-                {sourcesFailed.join(" and ")} {sourcesFailed.length === 1 ? "was" : "were"} unavailable this scan (likely a temporary timeout). Results shown are from the source{sourcesFailed.length === 1 ? "s" : ""} that responded — re-run to try again.
+                {sourcesFailed.join(" and ")} {sourcesFailed.length === 1 ? "was" : "were"} unavailable this scan — results shown are from the sources that responded.
               </div>
             </div>
           )}
 
           {results.map((digest, di) => {
-            // Split results: strong matches (highly_relevant + related) lead;
-            // tangential ones are tucked under a toggle so weak matches don't
-            // headline and misrepresent the scan's precision.
-            const strong = digest.papers.filter(
-              (p) => p.relevance_tier === "highly_relevant" || p.relevance_tier === "related"
+            const strong = digest.papers.filter((p) =>
+              p.relevance_tier === "highly_relevant" || p.relevance_tier === "related"
             );
-            const tangential = digest.papers.filter((p) => p.relevance_tier === "tangential");
-            const renderPaper = (p: typeof digest.papers[number], pi: number) => {
-              const tier = p.relevance_tier ? TIER_META[p.relevance_tier] : null;
-              return (
-                <Card key={pi}>
-                  <div className="flex items-start justify-between gap-3 mb-2">
-                    <div className="text-[14px] font-medium text-[var(--text-1)] leading-snug flex-1">{p.title}</div>
-                    {tier && (
-                      <span className="text-[11px] font-medium shrink-0" style={{ color: tier.color }}>
-                        {tier.label}
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-[12px] text-[var(--text-3)] mb-2">
-                    {(p.authors || []).slice(0, 3).join(", ")}{p.authors.length > 3 ? " et al." : ""} · {p.year || "?"} · {p.source}
-                  </div>
-                  {p.abstract && (
-                    <div className="text-[12.5px] text-[var(--text-2)] leading-[1.55] mb-3 clamp-2">{p.abstract}</div>
-                  )}
-                  <div className="flex items-center gap-3 text-[11.5px]">
-                    <span className="text-[var(--text-3)] italic">{p.relevance_reason}</span>
-                    <a href={p.url} target="_blank" rel="noopener noreferrer"
-                      className="ml-auto flex items-center gap-1 text-[var(--gen)] hover:underline">
-                      View <ExternalLink size={11} />
-                    </a>
-                  </div>
-                </Card>
-              );
-            };
+            const tangential = digest.papers.filter((p) =>
+              p.relevance_tier === "tangential" || !p.relevance_tier
+            );
 
             return (
-            <div key={di}>
-              <div className="flex items-baseline gap-3 mb-3">
-                <h2 className="font-display text-[17px] text-[var(--text-1)]">{digest.topic}</h2>
-                <span className="text-[11.5px] text-[var(--text-3)]">
-                  {strong.length} strong match{strong.length !== 1 ? "es" : ""} of {digest.papers_found} found
-                </span>
-              </div>
-
-              {digest.papers.length === 0 ? (
-                <Card><div className="text-[13px] text-[var(--text-3)] py-2">No papers found for this topic.</div></Card>
-              ) : strong.length === 0 ? (
-                <>
-                  <div className="text-[12px] text-[var(--text-3)] mb-2.5">
-                    No close matches for this topic — showing broader field papers below.
-                  </div>
-                  <div className="space-y-2.5">{tangential.map(renderPaper)}</div>
-                </>
-              ) : (
-                <div className="space-y-2.5">
-                  {strong.map(renderPaper)}
-                  {tangential.length > 0 && (
-                    <div>
-                      <button onClick={() => setShowTangential((s) => ({ ...s, [di]: !s[di] }))}
-                        className="text-[12px] text-[var(--gen)] font-medium hover:underline my-1">
-                        {showTangential[di] ? "Hide" : "Show"} {tangential.length} broader field match{tangential.length !== 1 ? "es" : ""}
-                      </button>
-                      {showTangential[di] && <div className="space-y-2.5 mt-2.5">{tangential.map(renderPaper)}</div>}
-                    </div>
-                  )}
+              <div key={di}>
+                <div className="flex items-center gap-2 mb-3">
+                  <h2 className="text-[14px] font-semibold text-[var(--text-1)]">{digest.topic}</h2>
+                  <span className="text-[11.5px] text-[var(--text-3)]">
+                    {digest.papers_relevant} relevant · {digest.papers_found} found
+                  </span>
                 </div>
-              )}
-            </div>
+
+                {digest.papers.length === 0 ? (
+                  <Card><div className="text-[13px] text-[var(--text-3)] py-2">No papers found for this topic.</div></Card>
+                ) : strong.length === 0 ? (
+                  <>
+                    <div className="text-[12px] text-[var(--text-3)] mb-2.5">
+                      No close matches — showing broader field papers below.
+                    </div>
+                    <div className="space-y-2.5">{tangential.map(renderPaper)}</div>
+                  </>
+                ) : (
+                  <div className="space-y-2.5">
+                    {strong.map(renderPaper)}
+                    {tangential.length > 0 && (
+                      <div>
+                        <button onClick={() => setShowTangential((s) => ({ ...s, [di]: !s[di] }))}
+                          className="text-[12px] text-[var(--gen)] font-medium hover:underline my-1">
+                          {showTangential[di] ? "Hide" : "Show"} {tangential.length} broader field match{tangential.length !== 1 ? "es" : ""}
+                        </button>
+                        {showTangential[di] && (
+                          <div className="space-y-2.5 mt-2.5">{tangential.map(renderPaper)}</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             );
           })}
         </div>
       )}
 
       {!showConfig && results.length === 0 && !loading && (
-        <EmptyState icon={<Radar size={20} />} title="No results yet" hint="Configure topics and run a scan." />
+        <EmptyState icon={<Radar size={20} />} title="No results yet"
+          hint={savedTopics.length === 0 ? "Add topics above to start monitoring." : "Run a scan to see new papers."} />
       )}
     </div>
   );

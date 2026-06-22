@@ -3,8 +3,12 @@ Paper Import Agent
 
 Searches academic databases and imports papers into ScholarLens.
 Supports:
-- arXiv (free, no auth needed)
-- Semantic Scholar (free, API key recommended)
+- Semantic Scholar (primary — reliable, structured JSON, citation counts)
+- OpenAlex (secondary — 250M+ works, free, no key, fast with polite pool)
+- arXiv (fallback — preprints only, flaky, but catches very new work)
+
+Source priority: S2 → OpenAlex → arXiv. arXiv is last because it's the most
+unreliable; OpenAlex indexes most arXiv preprints anyway with better reliability.
 
 Uses the requests library with built-in retry and backoff.
 """
@@ -30,7 +34,7 @@ def _make_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
         total=3,
-        connect=3,              # retry on connection failures
+        connect=3,
         read=3,                 # retry on read timeouts (the arXiv failure mode)
         backoff_factor=2,       # waits 2s, 4s, 8s between attempts
         status_forcelist=[429, 500, 502, 503, 504],
@@ -48,15 +52,15 @@ def _make_session() -> requests.Session:
 
 _session = _make_session()
 
-# Rate limiter
-_last_request = {"arxiv": 0.0, "s2": 0.0}
+# Per-source rate limiters
+_last_request: dict[str, float] = {"arxiv": 0.0, "s2": 0.0, "openalex": 0.0}
 
-# Search cache
+# In-memory search cache — keyed by (query, sources, max_per_source)
 _cache: dict[str, list] = {}
 
 
 def _wait(source: str, seconds: float = 3.0):
-    elapsed = time.time() - _last_request[source]
+    elapsed = time.time() - _last_request.get(source, 0.0)
     if elapsed < seconds:
         time.sleep(seconds - elapsed)
     _last_request[source] = time.time()
@@ -67,13 +71,14 @@ def _wait(source: str, seconds: float = 3.0):
 class SourceUnavailable(Exception):
     """Raised when an external source fails after retries (e.g. timeout)."""
 
+
 @dataclass
 class ImportResult:
     title: str
     authors: list[str]
     abstract: str
     year: int | None
-    source: str             # "arxiv", "semantic_scholar"
+    source: str             # "arxiv" | "semantic_scholar" | "openalex"
     source_id: str
     doi: str | None
     pdf_url: str | None
@@ -89,13 +94,15 @@ class ArxivSource:
     def search(self, query: str, max_results: int = 10) -> list[ImportResult]:
         _wait("arxiv", 5.0)
         try:
+            # Separate connect timeout (10s) from read timeout (45s).
+            # arXiv's API is slow to respond but usually delivers if given time.
             resp = _session.get(self.BASE, params={
                 "search_query": f"all:{query}",
                 "start": 0,
                 "max_results": max_results,
-                "sortBy": "relevance",
+                "sortBy": "submittedDate",
                 "sortOrder": "descending",
-            }, timeout=30)
+            }, timeout=(10, 45))
             resp.raise_for_status()
         except Exception as e:
             print(f"arXiv search failed: {e}")
@@ -109,7 +116,7 @@ class ArxivSource:
 
         _wait("arxiv", 5.0)
         try:
-            resp = _session.get(self.BASE, params={"id_list": arxiv_id}, timeout=15)
+            resp = _session.get(self.BASE, params={"id_list": arxiv_id}, timeout=(10, 30))
             resp.raise_for_status()
         except Exception as e:
             print(f"arXiv fetch failed: {e}")
@@ -168,12 +175,147 @@ class ArxivSource:
             return path
         try:
             _wait("arxiv", 5.0)
-            resp = _session.get(result.pdf_url, timeout=30)
+            resp = _session.get(result.pdf_url, timeout=(10, 60))
             resp.raise_for_status()
             path.write_bytes(resp.content)
             return path
         except Exception as e:
             print(f"arXiv PDF download failed: {e}")
+            return None
+
+
+# ── OpenAlex ─────────────────────────────────────────────────
+
+class OpenAlexSource:
+    """
+    OpenAlex: 250M+ scholarly works, completely free, no API key required.
+    Include mailto in requests to get into the "polite pool" for faster,
+    more consistent responses (recommended by OpenAlex).
+
+    Key quirk: abstracts come as an inverted index {word: [positions]}.
+    _reconstruct_abstract converts this to plain text.
+
+    Docs: https://docs.openalex.org/api-entities/works/search-works
+    """
+    BASE = "https://api.openalex.org/works"
+
+    def _mailto(self) -> str:
+        """Return mailto param for polite pool — uses CONTACT_EMAIL env var."""
+        return os.getenv("CONTACT_EMAIL", "")
+
+    def _params(self, extra: dict) -> dict:
+        params = {**extra}
+        email = self._mailto()
+        if email:
+            params["mailto"] = email
+        return params
+
+    @staticmethod
+    def _reconstruct_abstract(inv_index: dict | None) -> str:
+        """Convert OpenAlex inverted abstract index to plain text."""
+        if not inv_index:
+            return ""
+        try:
+            # Each entry: word → [position, position, ...]
+            positions = []
+            for word, pos_list in inv_index.items():
+                for pos in pos_list:
+                    positions.append((pos, word))
+            positions.sort(key=lambda x: x[0])
+            return " ".join(word for _, word in positions)
+        except Exception:
+            return ""
+
+    def _to_result(self, work: dict) -> ImportResult | None:
+        title = (work.get("title") or "").strip()
+        if not title:
+            return None
+
+        # Authors
+        authors = []
+        for authorship in work.get("authorships", []):
+            name = authorship.get("author", {}).get("display_name", "")
+            if name:
+                authors.append(name)
+
+        # Abstract
+        abstract = self._reconstruct_abstract(work.get("abstract_inverted_index"))
+
+        # Year
+        year = work.get("publication_year")
+
+        # IDs
+        ids = work.get("ids", {})
+        doi = ids.get("doi", "").replace("https://doi.org/", "") if ids.get("doi") else None
+        openalex_id = work.get("id", "").split("/")[-1]  # W1234567890
+
+        # PDF
+        oa = work.get("open_access", {})
+        pdf_url = oa.get("oa_url")
+
+        # URL
+        url = work.get("doi") or f"https://openalex.org/{openalex_id}"
+
+        # Citation count
+        citation_count = work.get("cited_by_count")
+
+        return ImportResult(
+            title=title,
+            authors=authors,
+            abstract=abstract,
+            year=year,
+            source="openalex",
+            source_id=openalex_id,
+            doi=doi,
+            pdf_url=pdf_url,
+            citation_count=citation_count,
+            url=url,
+        )
+
+    def search(self, query: str, max_results: int = 10) -> list[ImportResult]:
+        _wait("openalex", 1.0)
+        try:
+            resp = _session.get(
+                self.BASE,
+                params=self._params({
+                    "search": query,
+                    "per-page": min(max_results, 25),
+                    "sort": "publication_date:desc",
+                    # Only return works with abstracts — empty abstracts aren't useful
+                    "filter": "has_abstract:true",
+                    "select": "id,title,authorships,abstract_inverted_index,"
+                              "publication_year,ids,open_access,cited_by_count,doi",
+                }),
+                timeout=(8, 20),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"OpenAlex search failed: {e}")
+            raise SourceUnavailable(str(e)) from e
+
+        results = []
+        for work in data.get("results", []):
+            r = self._to_result(work)
+            if r:
+                results.append(r)
+        return results
+
+    def download_pdf(self, result: ImportResult) -> Path | None:
+        if not result.pdf_url:
+            return None
+        safe = re.sub(r"[^\w\s-]", "", result.title)[:80].strip()
+        path = UPLOAD_DIR / f"{safe}.pdf"
+        if path.exists():
+            return path
+        try:
+            _wait("openalex", 1.0)
+            resp = _session.get(result.pdf_url, timeout=(10, 60))
+            resp.raise_for_status()
+            path.write_bytes(resp.content)
+            return path
+        except Exception as e:
+            print(f"OpenAlex PDF download failed: {e}")
             return None
 
 
@@ -249,7 +391,7 @@ class SemanticScholarSource:
             return path
         try:
             _wait("s2", 1.5)
-            resp = _session.get(result.pdf_url, timeout=30)
+            resp = _session.get(result.pdf_url, timeout=(10, 60))
             resp.raise_for_status()
             path.write_bytes(resp.content)
             return path
@@ -263,10 +405,15 @@ class SemanticScholarSource:
 class PaperImporter:
     def __init__(self):
         self.arxiv = ArxivSource()
+        self.openalex = OpenAlexSource()
         self.s2 = SemanticScholarSource()
 
     # Friendly names for surfacing failures to the user.
-    SOURCE_LABELS = {"arxiv": "arXiv", "semantic_scholar": "Semantic Scholar"}
+    SOURCE_LABELS = {
+        "arxiv": "arXiv",
+        "semantic_scholar": "Semantic Scholar",
+        "openalex": "OpenAlex",
+    }
 
     def search(
         self,
@@ -285,16 +432,18 @@ class PaperImporter:
         max_per_source: int = 5,
     ) -> tuple[list[ImportResult], list[str]]:
         """
-        Search across sources and report which sources failed.
+        Search across sources in priority order and report which failed.
+
+        Priority: Semantic Scholar → OpenAlex → arXiv
+        arXiv is last — it's the most flaky and OpenAlex indexes most arXiv
+        preprints anyway with better reliability.
 
         Returns (deduped_results, failed_source_labels). A source that raises
-        (e.g. arXiv read-timeout after retries) is recorded as failed so the
-        caller can tell the user a source was unavailable rather than silently
-        returning a thinner result set. An empty-but-successful source is NOT
-        a failure.
+        is recorded as failed so the caller can surface an honest banner.
+        An empty-but-successful source is NOT a failure.
         """
         if sources is None:
-            sources = ["arxiv", "semantic_scholar"]
+            sources = ["semantic_scholar", "openalex", "arxiv"]
 
         cache_key = f"{query}|{'_'.join(sorted(sources))}|{max_per_source}"
         if cache_key in _cache:
@@ -303,29 +452,30 @@ class PaperImporter:
         all_results: list[ImportResult] = []
         failed: list[str] = []
 
-        if "arxiv" in sources:
+        # Priority order: S2 first, OpenAlex second, arXiv last
+        for source in ["semantic_scholar", "openalex", "arxiv"]:
+            if source not in sources:
+                continue
             try:
-                all_results.extend(self.arxiv.search(query, max_per_source))
+                if source == "semantic_scholar":
+                    all_results.extend(self.s2.search(query, max_per_source))
+                elif source == "openalex":
+                    all_results.extend(self.openalex.search(query, max_per_source))
+                elif source == "arxiv":
+                    all_results.extend(self.arxiv.search(query, max_per_source))
             except SourceUnavailable:
-                failed.append(self.SOURCE_LABELS["arxiv"])
+                failed.append(self.SOURCE_LABELS[source])
 
-        if "semantic_scholar" in sources:
-            try:
-                all_results.extend(self.s2.search(query, max_per_source))
-            except SourceUnavailable:
-                failed.append(self.SOURCE_LABELS["semantic_scholar"])
-
-        # Deduplicate by title
-        seen = set()
-        deduped = []
+        # Deduplicate by title (cross-source)
+        seen: set[str] = set()
+        deduped: list[ImportResult] = []
         for r in all_results:
             key = r.title.lower().strip()[:60]
             if key not in seen:
                 seen.add(key)
                 deduped.append(r)
 
-        # Only cache a fully-successful scan; a partial failure shouldn't be
-        # cached as if it were the complete result for this query.
+        # Only cache fully-successful scans
         if not failed:
             _cache[cache_key] = deduped
         return deduped, failed
@@ -349,4 +499,6 @@ class PaperImporter:
     def download_pdf(self, result: ImportResult) -> Path | None:
         if result.source == "arxiv":
             return self.arxiv.download_pdf(result)
+        if result.source == "openalex":
+            return self.openalex.download_pdf(result)
         return self.s2.download_pdf(result)
