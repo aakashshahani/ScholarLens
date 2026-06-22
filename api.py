@@ -49,13 +49,15 @@ from agents import (
 
 # â”€â”€ App Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+_is_prod = os.getenv("ENV", "production").lower() == "production"
 app = FastAPI(
     title="ScholarLens API",
-    description="Research intelligence platform â€” agentic paper analysis, "
+    description="Research intelligence platform — agentic paper analysis, "
                 "cross-paper contradiction detection, and hypothesis generation.",
     version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
+    # Docs disabled in production by default. Set ENV=development locally.
+    docs_url=None if _is_prod else "/api/docs",
+    redoc_url=None if _is_prod else "/api/redoc",
 )
 
 # â”€â”€ Rate limiting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -63,8 +65,17 @@ app = FastAPI(
 # (correct for a single instance); set RATE_LIMIT_STORAGE_URI=redis://...
 # in settings to share counters across instances. The global default is a
 # coarse backstop â€” the meaningful limits are per-endpoint decorators below.
+def _rate_key(request: Request) -> str:
+    """Use authenticated user ID as the rate-limit key when available,
+    falling back to IP for unauthenticated endpoints (login, register).
+    This prevents users behind shared NAT from consuming each other's quota."""
+    user = getattr(request.state, "user", None)
+    if user and hasattr(user, "id"):
+        return f"user:{user.id}"
+    return get_remote_address(request)
+
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=_rate_key,
     default_limits=[settings.rl_default],
     storage_uri=settings.rate_limit_storage_uri,
 )
@@ -183,8 +194,32 @@ try:
     _scheduler.add_job(_run_scheduled_monitor, "cron",
                        hour=_monitor_hour, minute=_monitor_minute,
                        id="daily_monitor", replace_existing=True)
+    def _cleanup_sessions():
+        """Delete expired sessions nightly — keeps the sessions table lean."""
+        try:
+            _conn = db._get_conn()
+            _cur = _conn.cursor()
+            try:
+                from datetime import datetime, timezone
+                _cur.execute(
+                    "DELETE FROM sessions WHERE expires_at < %s",
+                    (datetime.now(timezone.utc).isoformat(),),
+                )
+                deleted = _cur.rowcount
+                _conn.commit()
+                if deleted:
+                    print(f"[scheduler] Cleaned up {deleted} expired sessions")
+            finally:
+                _cur.close()
+                db._put_conn(_conn)
+        except Exception as e:
+            print(f"[scheduler] Session cleanup failed: {e}")
+
+    _scheduler.add_job(_cleanup_sessions, "cron", hour=3, minute=0,
+                       id="session_cleanup", replace_existing=True)
     _scheduler.start()
     print(f"[scheduler] Daily monitor job scheduled ({_monitor_hour:02d}:{_monitor_minute:02d} UTC)")
+    print("[scheduler] Nightly session cleanup scheduled (03:00 UTC)")
 except ImportError:
     print("[scheduler] apscheduler not installed — scheduled monitoring disabled")
     _scheduler = None
@@ -274,10 +309,14 @@ class MonitorRequest(BaseModel):
 
 class MonitorTopicRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
-    keywords: list[str] = Field(..., min_items=1)
+    keywords: list[str] = Field(..., min_items=1, max_items=10)
     sources: list[str] = Field(
         default=["semantic_scholar", "openalex", "arxiv"],
     )
+
+    @classmethod
+    def validate_keywords(cls, v):
+        return [kw[:100] for kw in v if kw.strip()][:10]
 
 
 # â”€â”€ Background task helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -605,11 +644,14 @@ def normalize_abstracts():
 def list_papers(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
                 user: User = Depends(authlib.get_current_user)):
     papers = db.list_papers(limit=limit, offset=offset, user_id=user.id)
-    results = []
-    for p in papers:
-        analyses = db.get_analyses_for_paper(p.id)
-        claims = db.get_claims_for_paper(p.id)
-        results.append({
+    if not papers:
+        return []
+    paper_ids = [p.id for p in papers]
+    # Batch fetch — 2 DB calls instead of 2N (N+1 fix)
+    analyses_map = db.get_analyses_for_papers(paper_ids)
+    claim_counts = db.get_claim_counts_for_papers(paper_ids)
+    return [
+        {
             "id": p.id,
             "title": p.title,
             "authors": p.authors,
@@ -618,11 +660,11 @@ def list_papers(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=
             "source": p.source,
             "page_count": p.page_count,
             "created_at": p.created_at,
-            "analysis_types": [a.analysis_type for a in analyses],
-            "chunk_count": len(claims),  # extracted claims count â€” meaningful to display
-        })
-    return results
-
+            "analysis_types": [a.analysis_type for a in analyses_map.get(p.id, [])],
+            "chunk_count": claim_counts.get(p.id, 0),
+        }
+        for p in papers
+    ]
 
 import re as _re
 
@@ -685,16 +727,17 @@ def delete_paper(paper_id: str, user: User = Depends(authlib.get_current_user)):
     db.delete_paper(paper_id)
     # Purge relationships referencing this paper's claims (no FK cascade on those)
     if claim_ids:
-        import psycopg2
-        conn = psycopg2.connect(db._dsn)
-        cur = conn.cursor()
-        cur.execute(
-            "DELETE FROM relationships WHERE claim_lo = ANY(%s) OR claim_hi = ANY(%s)",
-            (claim_ids, claim_ids),
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+        _conn = db._get_conn()
+        _cur = _conn.cursor()
+        try:
+            _cur.execute(
+                "DELETE FROM relationships WHERE claim_lo = ANY(%s) OR claim_hi = ANY(%s)",
+                (claim_ids, claim_ids),
+            )
+            _conn.commit()
+        finally:
+            _cur.close()
+            db._put_conn(_conn)
     _invalidate_insight_cache()
     return {"status": "deleted", "id": paper_id}
 
@@ -812,16 +855,17 @@ def reanalyze_paper(paper_id: str, background_tasks: BackgroundTasks = Backgroun
     claim_ids = [c.id for c in db.get_claims_for_paper(paper_id)]
     db.delete_claims_for_paper(paper_id)
     if claim_ids:
-        import psycopg2
-        conn = psycopg2.connect(db._dsn)
-        cur = conn.cursor()
-        cur.execute(
-            "DELETE FROM relationships WHERE claim_lo = ANY(%s) OR claim_hi = ANY(%s)",
-            (claim_ids, claim_ids),
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+        _conn = db._get_conn()
+        _cur = _conn.cursor()
+        try:
+            _cur.execute(
+                "DELETE FROM relationships WHERE claim_lo = ANY(%s) OR claim_hi = ANY(%s)",
+                (claim_ids, claim_ids),
+            )
+            _conn.commit()
+        finally:
+            _cur.close()
+            db._put_conn(_conn)
     background_tasks.add_task(_analyze_paper_bg, paper_id, authlib.resolve_user_api_key(user), _resolve_model_and_meter(user))
     return {"id": paper_id, "status": "analyzing"}
 
@@ -879,12 +923,38 @@ def search_papers(request: Request, req: SearchRequest,
     return response
 
 
+# Simple in-memory Ask cache — keyed by (user_id, question, paper_id).
+# TTL: 1 hour. Prevents re-running the full agentic loop for identical
+# questions. Cache is per-process and resets on Render restart.
+import hashlib as _hashlib
+_ask_cache: dict[str, dict] = {}
+_ASK_CACHE_TTL = 3600  # 1 hour
+
+
 @app.post("/api/ask")
 @limiter.limit(settings.rl_ask)
 def ask_question(request: Request, req: AskRequest,
                  user: User = Depends(authlib.get_current_user)):
-    answer = agent.ask(req.question, paper_id=req.paper_id, paper_ids=_owned_ids(user), api_key=authlib.resolve_user_api_key(user), model=_resolve_model_and_meter(user))
-    return {"answer": answer}
+    # Build cache key from user + question + paper scope
+    _cache_raw = f"{user.id}:{req.question}:{req.paper_id}"
+    _cache_key = _hashlib.sha256(_cache_raw.encode()).hexdigest()[:16]
+    _now = _time.time()
+
+    # Return cached answer if fresh
+    if _cache_key in _ask_cache:
+        entry = _ask_cache[_cache_key]
+        if _now - entry["ts"] < _ASK_CACHE_TTL:
+            return {"answer": entry["answer"], "cached": True}
+
+    answer = agent.ask(
+        req.question,
+        paper_id=req.paper_id,
+        paper_ids=_owned_ids(user),
+        api_key=authlib.resolve_user_api_key(user),
+        model=_resolve_model_and_meter(user),
+    )
+    _ask_cache[_cache_key] = {"answer": answer, "ts": _now}
+    return {"answer": answer, "cached": False}
 
 
 # â”€â”€ Contradictions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

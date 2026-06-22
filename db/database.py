@@ -488,6 +488,49 @@ class Database:
     # â”€â”€ Dedup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @staticmethod
+    def get_analyses_for_papers(self, paper_ids: list[str]) -> dict[str, list]:
+        """Batch fetch analyses for multiple papers — one DB call instead of N.
+        Returns dict: paper_id → list of AnalysisResult."""
+        if not paper_ids:
+            return {}
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM analysis_results WHERE paper_id = ANY(%s) ORDER BY created_at",
+            (paper_ids,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        result: dict[str, list] = {pid: [] for pid in paper_ids}
+        for r in rows:
+            result[r["paper_id"]].append(
+                AnalysisResult(id=r["id"], paper_id=r["paper_id"],
+                               analysis_type=r["analysis_type"],
+                               content=r["content"], created_at=r["created_at"])
+            )
+        return result
+
+    def get_claim_counts_for_papers(self, paper_ids: list[str]) -> dict[str, int]:
+        """Batch fetch claim counts for multiple papers — one DB call instead of N.
+        Returns dict: paper_id → claim count."""
+        if not paper_ids:
+            return {}
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT paper_id, COUNT(*) as cnt FROM claims WHERE paper_id = ANY(%s) GROUP BY paper_id",
+            (paper_ids,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        result = {pid: 0 for pid in paper_ids}
+        for r in rows:
+            result[r["paper_id"]] = int(r["cnt"])
+        return result
+
+
     def _title_key(title: str) -> str:
         return re.sub(r"[^a-z0-9]", "", (title or "").lower())[:80]
 
