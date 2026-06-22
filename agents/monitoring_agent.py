@@ -18,7 +18,9 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-import resend
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from anthropic import Anthropic
 
 from config import settings
@@ -32,7 +34,7 @@ class MonitorTopic:
     """A research topic to monitor."""
     name: str
     keywords: list[str]
-    sources: list[str] = field(default_factory=lambda: ["arxiv", "semantic_scholar"])
+    sources: list[str] = field(default_factory=lambda: ["semantic_scholar", "openalex", "arxiv"])
 
 
 @dataclass
@@ -61,10 +63,7 @@ class MonitoringAgent:
         self.importer = PaperImporter()
         self._failed_sources: set[str] = set()
 
-        # Configure Resend
-        resend_key = os.getenv("RESEND_API_KEY", "")
-        if resend_key:
-            resend.api_key = resend_key
+        # Email via Gmail SMTP — credentials from GMAIL_USER + GMAIL_APP_PASSWORD env vars
 
     def _anthropic(self, api_key: str | None = None):
         """Per-request Anthropic client: the caller's BYOK key when provided,
@@ -241,15 +240,26 @@ class MonitoringAgent:
         results: list[DigestResult],
         summary: str,
     ) -> bool:
-        """Send the digest via Resend."""
-        if not os.getenv("RESEND_API_KEY"):
-            print("No RESEND_API_KEY set, skipping email")
+        """
+        Send the digest via Gmail SMTP.
+
+        Requires GMAIL_USER and GMAIL_APP_PASSWORD environment variables.
+        GMAIL_APP_PASSWORD is a 16-character App Password generated at
+        myaccount.google.com → Security → App Passwords (not your regular
+        Gmail password). Sends to any recipient address — no domain
+        verification required.
+        """
+        gmail_user = os.getenv("GMAIL_USER", "")
+        gmail_password = os.getenv("GMAIL_APP_PASSWORD", "")
+
+        if not gmail_user or not gmail_password:
+            print("GMAIL_USER or GMAIL_APP_PASSWORD not set, skipping email")
             return False
 
         total_papers = sum(r.papers_relevant for r in results)
         topics = ", ".join(r.topic for r in results if r.scored_papers)
 
-        # Build HTML email
+        # Build HTML email — identical to previous Resend version
         html = f"""
         <div style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a;">
             <div style="background: linear-gradient(135deg, #1e3a5f, #0d1b2a); padding: 24px; border-radius: 12px 12px 0 0;">
@@ -298,18 +308,24 @@ class MonitoringAgent:
         </div>
         """
 
-        from_addr = os.getenv("RESEND_FROM", "ScholarLens <onboarding@resend.dev>")
+        # Compose MIME message
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"ScholarLens: {total_papers} new paper{'s' if total_papers != 1 else ''} in {topics}"
+        msg["From"] = f"ScholarLens <{gmail_user}>"
+        msg["To"] = recipient
+        msg.attach(MIMEText(html, "html"))
+
+        # Send via Gmail SMTP with TLS
         try:
-            response = resend.Emails.send({
-                "from": from_addr,
-                "to": [recipient],
-                "subject": f"ScholarLens: {total_papers} new paper{'s' if total_papers != 1 else ''} in {topics}",
-                "html": html,
-            })
-            print(f"Digest email sent: {response}")
+            with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                server.ehlo()
+                server.starttls()
+                server.login(gmail_user, gmail_password)
+                server.sendmail(gmail_user, recipient, msg.as_string())
+            print(f"Digest email sent via Gmail to {recipient}")
             return True
         except Exception as e:
-            print(f"Email send failed: {e}")
+            print(f"Gmail send failed: {e}")
             return False
 
     def run_full_scan(
@@ -359,20 +375,13 @@ class MonitoringAgent:
         email_sent = False
         email_error: str | None = None
         if recipient:
-            if not os.getenv("RESEND_API_KEY"):
-                email_error = "Email is not configured on the server."
+            if not os.getenv("GMAIL_USER") or not os.getenv("GMAIL_APP_PASSWORD"):
+                email_error = "Email is not configured on the server (GMAIL_USER / GMAIL_APP_PASSWORD missing)."
             else:
                 try:
                     email_sent = self.send_digest_email(recipient, results, summary)
                     if not email_sent:
-                        # send_digest_email returned False — most commonly the
-                        # Resend sandbox rejecting a non-owner recipient because
-                        # no sending domain is verified.
-                        email_error = (
-                            "Couldn't deliver. The demo uses a sandbox sender that "
-                            "only emails the account owner; verify a sending domain "
-                            "to email anyone."
-                        )
+                        email_error = "Email send failed — check GMAIL_USER and GMAIL_APP_PASSWORD in server config."
                 except Exception as e:  # noqa: BLE001
                     email_error = f"Email failed: {e}"
 
