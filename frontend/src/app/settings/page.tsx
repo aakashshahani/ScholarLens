@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { api, type UserSettings } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { PageHeader, Card, SectionLabel } from "@/components/ui";
-import { Check, LogOut, ShieldOff } from "lucide-react";
+import { Check, LogOut, ShieldOff, Mail } from "lucide-react";
 
 const inputCls =
   "w-full bg-[var(--surface-1)] border border-[var(--line-2)] rounded-[var(--r-md)] px-3.5 py-2.5 text-[14px] text-[var(--text-1)] placeholder:text-[var(--text-4)] outline-none t-all focus:border-[var(--gen-line)]";
@@ -42,10 +42,14 @@ export default function SettingsPage() {
   const [libName, setLibName] = useState("");
   const [libSaved, setLibSaved] = useState(false);
 
+  const [digestEmail, setDigestEmail] = useState("");
+  const [digestSaved, setDigestSaved] = useState(false);
+
   async function load() {
     const data = await api.getSettings();
     setS(data);
     setLibName(data.library_name);
+    setDigestEmail(data.digest_email || "");
     setLoading(false);
   }
   useEffect(() => { load(); }, []);
@@ -87,27 +91,21 @@ export default function SettingsPage() {
   }
 
   async function changeModel(id: string) {
-    if (!s) return;
-    // Optimistic update — move the checkmark immediately so the UI feels instant.
-    // If the API call fails, revert to the previous model.
-    const prev = s.model;
-    setS({ ...s, model: id });
     setBusy(true);
-    try {
-      await api.updateSettings({ model: id });
-      await refresh();
-      await load();
-    } catch {
-      // Revert on failure
-      setS((cur) => cur ? { ...cur, model: prev } : cur);
-    } finally {
-      setBusy(false);
-    }
+    try { await api.updateSettings({ model: id }); await refresh(); await load(); }
+    finally { setBusy(false); }
   }
 
   async function saveLib() {
     await api.updateSettings({ libraryName: libName.trim() || "My Library" });
     setLibSaved(true); setTimeout(() => setLibSaved(false), 1500);
+    await refresh(); await load();
+  }
+
+  async function saveDigestEmail() {
+    const val = digestEmail.trim() || null;
+    await api.updateSettings({ digestEmail: val });
+    setDigestSaved(true); setTimeout(() => setDigestSaved(false), 1500);
     await refresh(); await load();
   }
 
@@ -118,7 +116,7 @@ export default function SettingsPage() {
 
   return (
     <div className="max-w-[680px]">
-      <PageHeader title="Settings" subtitle="Your API key, model, and account." />
+      <PageHeader title="Settings" subtitle="Your API key, model, digest email, and account." />
 
       {/* ── API key (BYOK) ── */}
       <Card className="mb-5">
@@ -215,6 +213,39 @@ export default function SettingsPage() {
         <div className="flex gap-2">
           <input value={libName} onChange={(e) => setLibName(e.target.value)} className={inputCls} />
           <button onClick={saveLib} className={primaryBtn}>{libSaved ? "Saved" : "Save"}</button>
+        </div>
+      </Card>
+
+      {/* ── Digest email ── */}
+      <Card className="mb-5">
+        <SectionLabel>Daily digest email</SectionLabel>
+        <p className="text-[13px] text-[var(--text-2)] mb-3 leading-[1.5]">
+          Get a daily email when the research monitor finds new relevant papers.
+          Leave blank to disable. The scheduler runs every day at 06:00 UTC.
+        </p>
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <Mail size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-4)]" />
+            <input
+              type="email"
+              value={digestEmail}
+              onChange={(e) => setDigestEmail(e.target.value)}
+              placeholder="you@example.com"
+              className={`${inputCls} pl-9`}
+            />
+          </div>
+          <button onClick={saveDigestEmail} className={primaryBtn}>
+            {digestSaved ? "Saved" : "Save"}
+          </button>
+          {digestEmail && (
+            <button
+              onClick={() => { setDigestEmail(""); saveDigestEmail(); }}
+              className={ghostBtn}
+              style={{ color: "var(--contra)", borderColor: "var(--contra-line)" }}
+            >
+              Clear
+            </button>
+          )}
         </div>
       </Card>
 

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, MonitorDigest, MonitorScanResponse, MonitorTopic } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, SectionLabel } from "@/components/ui";
-import { Radar, Plus, X, Mail, ExternalLink, AlertCircle, CheckCircle2, Clock } from "lucide-react";
+import { Radar, Plus, X, ExternalLink, AlertCircle, CheckCircle2, Clock } from "lucide-react";
 import { cache } from "@/lib/cache";
 
 // Local draft type — what the user is building before saving
@@ -35,11 +35,9 @@ export default function MonitorPage() {
   const [topicName, setTopicName] = useState("");
   const [topicKeywords, setTopicKeywords] = useState("");
 
-  // Scan config
-  const [email, setEmail] = useState("");
+  // Scan config — digest email comes from account settings, not entered here
   const [results, setResults] = useState<MonitorDigest[]>([]);
-  const [emailStatus, setEmailStatus] = useState<{ sent: boolean; error: string | null; requested: boolean }>
-    ({ sent: false, error: null, requested: false });
+
   const [sourcesFailed, setSourcesFailed] = useState<string[]>([]);
   const [showTangential, setShowTangential] = useState<Record<number, boolean>>({});
   const [loading, setLoading] = useState(false);
@@ -49,9 +47,6 @@ export default function MonitorPage() {
 
   // Load saved topics from API on mount
   useEffect(() => {
-    const cachedEmail = cache.read<string>("monitor_email");
-    if (cachedEmail) setEmail(cachedEmail);
-
     const cachedResults = cache.read<MonitorDigest[]>("monitor_results");
     if (cachedResults && cachedResults.length > 0) {
       setResults(cachedResults);
@@ -97,16 +92,14 @@ export default function MonitorPage() {
   const runScan = async () => {
     if (savedTopics.length === 0) { setError("Add at least one topic to monitor."); return; }
     setLoading(true); setError(""); setResults([]);
-    if (email) cache.write("monitor_email", email);
     try {
       const res: MonitorScanResponse = await api.monitorScan({
         topics: savedTopics.map((t) => ({ name: t.name, keywords: t.keywords, sources: t.sources })),
-        email: email || undefined,
+        email: undefined, // digest email is read from account settings by the scheduler
         relevanceThreshold: 0.5,
         maxPerSource: 5,
       });
       setResults(res.digests);
-      setEmailStatus({ sent: res.email_sent, error: res.email_error, requested: res.email_requested });
       setSourcesFailed(res.sources_failed || []);
       cache.write("monitor_results", res.digests);
       setShowConfig(false);
@@ -220,20 +213,11 @@ export default function MonitorPage() {
             </Card>
           )}
 
-          {/* Email digest */}
-          <Card className="mb-4">
-            <SectionLabel>Email digest (optional)</SectionLabel>
-            <div className="flex items-center gap-2">
-              <Mail size={15} className="text-[var(--text-3)] shrink-0" />
-              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com — daily digest will be sent here"
-                className="flex-1 bg-[var(--surface-1)] border border-[var(--line)] rounded-[var(--r-md)] px-3.5 py-2 text-[13.5px] text-[var(--text-1)]" />
-            </div>
-            <div className="text-[11px] text-[var(--text-3)] mt-2">
-              Set your digest email in Settings to receive automatic daily summaries.
-              Delivery to arbitrary addresses requires a verified sending domain.
-            </div>
-          </Card>
+          <div className="mb-4 px-1 text-[12px] text-[var(--text-3)]">
+            Daily digests are sent to the email set in{" "}
+            <a href="/settings" className="text-[var(--gen)] hover:underline">Settings</a>.
+            The scheduler runs automatically every day at 06:00 UTC.
+          </div>
 
           <PrimaryButton onClick={runScan} disabled={loading || savedTopics.length === 0}>
             <Radar size={15} />
@@ -266,17 +250,7 @@ export default function MonitorPage() {
               <span className="text-[13px] text-[var(--text-1)]">
                 Found <span className="font-medium">{totalStrong}</span> strong match{totalStrong !== 1 ? "es" : ""} across {results.length} topic{results.length !== 1 ? "s" : ""}
               </span>
-              {emailStatus.requested && emailStatus.sent && (
-                <span className="text-[12px] text-[var(--support)] ml-auto flex items-center gap-1.5">
-                  <Mail size={12} /> Digest sent
-                </span>
-              )}
-              {emailStatus.requested && !emailStatus.sent && (
-                <span className="text-[12px] text-[var(--nuance)] ml-auto flex items-center gap-1.5"
-                  title={emailStatus.error || ""}>
-                  <Mail size={12} /> Email not delivered
-                </span>
-              )}
+
             </div>
           </Card>
 
