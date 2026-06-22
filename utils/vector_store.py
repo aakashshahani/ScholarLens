@@ -47,14 +47,14 @@ class VectorStore:
         conn = self._get_conn()
         cur = conn.cursor()
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        # 512 dims — voyage-3.5-lite native output dimension
+        # 1024 dims — voyage-3.5-lite default output dimension
         cur.execute("""
             CREATE TABLE IF NOT EXISTS embeddings (
                 chunk_id    TEXT PRIMARY KEY,
                 paper_id    TEXT NOT NULL,
                 text        TEXT NOT NULL,
                 section     TEXT,
-                embedding   vector(512) NOT NULL
+                embedding   vector(1024) NOT NULL
             )
         """)
         cur.execute(
