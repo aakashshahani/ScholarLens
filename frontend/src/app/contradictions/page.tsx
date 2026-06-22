@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, Paper, ContradictionResult } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, Claim, REL } from "@/components/ui";
 import { Zap, Settings2, AlertCircle } from "lucide-react";
@@ -124,33 +124,72 @@ export default function ContradictionsPage() {
 
   const p = PRESETS[preset];
 
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  // Cleanup on unmount
+  useEffect(() => () => stopPolling(), []);
+
   const runScan = async () => {
     setLoading(true); setResults([]); setFilter(null); setSelected(null); setError("");
     setLibraryChanged(false);
     const stages = ["Extracting claims from papers", "Embedding & comparing claims", "Judging relationships"];
     let si = 0; setStage(stages[0]);
     const ticker = setInterval(() => { si = Math.min(si + 1, stages.length - 1); setStage(stages[si]); }, 3000);
+
     try {
-      await api.runContradictions({
+      const { job_id } = await api.runContradictions({
         paperIds: selectedIds.length ? selectedIds : undefined,
         similarityThreshold: p.threshold,
         maxPairs: p.maxPairs,
       });
-      // The scan appended/updated rows. Reload the FULL persisted set so the
-      // view shows everything accumulated, not just this run's slice.
-      const full = await api.listContradictions();
-      setResults(full);
-      cache.write("contradictions", full);
-      api.health().then((h) => {
-        const fp = (h as any).library_fingerprint || "default";
-        localStorage.setItem("sl_contradictions_fp", fp);
-      }).catch(() => {});
-      setShowConfig(false);
-      const firstReal = full.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
-      if (firstReal) setSelected(firstReal);
-    } catch (e: any) { setError(e.message); }
-    clearInterval(ticker); setLoading(false);
-  };
+
+      // Store job_id so we can resume polling if user navigates away and back
+      localStorage.setItem("sl_contradictions_job", job_id);
+
+      stopPolling();
+      pollRef.current = setInterval(async () => {
+        try {
+          const job = await api.getJob<ContradictionResult[]>(job_id);
+          if (job.status === "done") {
+            stopPolling();
+            clearInterval(ticker);
+            localStorage.removeItem("sl_contradictions_job");
+            // Reload the full persisted set so the view shows everything accumulated
+            const full = await api.listContradictions();
+            setResults(full);
+            cache.write("contradictions", full);
+            api.health().then((h) => {
+              const fp = (h as any).library_fingerprint || "default";
+              localStorage.setItem("sl_contradictions_fp", fp);
+            }).catch(() => {});
+            setShowConfig(false);
+            const firstReal = full.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
+            if (firstReal) setSelected(firstReal.id);
+            setLoading(false); setStage("");
+          } else if (job.status === "error") {
+            stopPolling();
+            clearInterval(ticker);
+            localStorage.removeItem("sl_contradictions_job");
+            setError(job.error || "Scan failed.");
+            setLoading(false); setStage("");
+          }
+        } catch (e: any) {
+          stopPolling();
+          clearInterval(ticker);
+          setError(e.message);
+          setLoading(false); setStage("");
+        }
+      }, 2500);
+    } catch (e: any) {
+      clearInterval(ticker);
+      setError(e.message);
+      setLoading(false); setStage("");
+    }
+  }
 
   const counts: Record<string, number> = {};
   results.forEach((r) => { counts[r.relationship] = (counts[r.relationship] || 0) + 1; });
