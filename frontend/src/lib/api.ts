@@ -132,9 +132,8 @@ export interface MonitorScanResponse {
 
 export interface HealthStatus {
   status: "ok" | "degraded";
-  errors: string[];
   papers: number;
-  embeddings: number;
+  library_fingerprint: string;
 }
 
 export interface PaperStatus {

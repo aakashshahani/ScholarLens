@@ -1,4 +1,4 @@
-﻿"""
+"""
 PostgreSQL data layer for ScholarLens (migrated from SQLite).
 
 Uses psycopg2 with a simple connection-per-call pattern matching the
@@ -562,7 +562,19 @@ class Database:
         self,
         paper_ids: list[str] | None = None,
         relationships: list[str] | None = None,
+        strict: bool = False,
     ) -> list["StoredRelationship"]:
+        """
+        Fetch stored relationships, optionally scoped to a set of papers.
+
+        strict=False (default): OR logic — return relationships where either
+            paper is in paper_ids. Used by graph/insights where you want all
+            edges touching any selected paper.
+        strict=True: AND logic — return relationships where BOTH papers are in
+            paper_ids. Used by hypothesis generation and contradiction scan
+            result fetching, where pulling in out-of-scope papers causes
+            hypotheses to reference papers the user never selected.
+        """
         conn = self._get_conn()
         cur = conn.cursor()
         cur.execute("SELECT * FROM relationships ORDER BY created_at DESC")
@@ -572,14 +584,23 @@ class Database:
         rels = [self._row_to_rel(r) for r in rows]
         if paper_ids:
             pid_set = set(paper_ids)
-            rels = [r for r in rels if r.paper_a in pid_set or r.paper_b in pid_set]
+            if strict:
+                rels = [r for r in rels if r.paper_a in pid_set and r.paper_b in pid_set]
+            else:
+                rels = [r for r in rels if r.paper_a in pid_set or r.paper_b in pid_set]
         if relationships:
             rel_set = set(relationships)
             rels = [r for r in rels if r.relationship in rel_set]
         return rels
 
-    def relationships_watermark(self, paper_ids: list[str] | None = None) -> str:
-        rels = self.list_relationships(paper_ids=paper_ids)
+    def relationships_watermark(self, paper_ids: list[str] | None = None, strict: bool = False) -> str:
+        """
+        Returns the max created_at timestamp over the scoped relationships.
+        Used as a cache-bust key for hypothesis generation.
+        strict should match whatever list_relationships call the caller uses —
+        pass strict=True when computing a cache key for conflict-grounded hypotheses.
+        """
+        rels = self.list_relationships(paper_ids=paper_ids, strict=strict)
         if not rels:
             return ""
         return max(r.created_at for r in rels)

@@ -36,28 +36,29 @@ export default function HypothesesPage() {
   const [showConfig, setShowConfig] = useState(false);
   const [libraryChanged, setLibraryChanged] = useState(false);
 
+  // Build a cache key from sorted paper IDs so switching selections
+  // never shows results from a different scope.
+  const selectionCacheKey = (ids: string[]) =>
+    ids.length ? `hypotheses:${[...ids].sort().join(",")}` : "hypotheses:all";
+
   useEffect(() => {
     const cachedPapers = cache.read<Paper[]>("papers");
     if (cachedPapers?.length) setPapers(cachedPapers);
     api.listPapers(50).then((p) => { setPapers(p); cache.write("papers", p); });
 
-    const cached = cache.read<Hypothesis[]>("hypotheses");
-    if (cached && cached.length > 0) {
-      // Serve from localStorage instantly
-      setHypotheses(cached);
-    } else {
-      // Cache miss — try server (hypothesis_cache table, zero LLM calls)
-      api.getCachedHypotheses()
-        .then((hyps) => {
-          if (hyps && hyps.length > 0) {
-            setHypotheses(hyps);
-            cache.write("hypotheses", hyps);
-          } else {
-            setShowConfig(true);
-          }
-        })
-        .catch(() => setShowConfig(true));
-    }
+    // On initial load, no selection is made yet — try the server cache directly.
+    // localStorage is only read once the user has an active selection (in generate).
+    api.getCachedHypotheses()
+      .then((hyps) => {
+        if (hyps && hyps.length > 0) {
+          setHypotheses(hyps);
+          // Write under the "all" key so subsequent loads with no selection hit this
+          cache.write(selectionCacheKey([]), hyps);
+        } else {
+          setShowConfig(true);
+        }
+      })
+      .catch(() => setShowConfig(true));
 
     // Fingerprint check — warn if library changed since last generation
     api.health().then((h) => {
@@ -69,14 +70,29 @@ export default function HypothesesPage() {
 
   const generate = async () => {
     setLoading(true); setHypotheses([]); setError("");
+    const cacheKey = selectionCacheKey(selectedIds);
     try {
+      // Check localStorage for this exact selection before hitting the server.
+      // If found and library hasn't changed, serve instantly.
+      if (!libraryChanged) {
+        const localHit = cache.read<Hypothesis[]>(cacheKey);
+        if (localHit && localHit.length > 0) {
+          setHypotheses(localHit);
+          setShowConfig(false);
+          setLoading(false);
+          return;
+        }
+      }
+      // Explicit generate always passes refresh:true so the backend bypasses
+      // its own cache — the user clicked the button intentionally.
       const res = await api.generateHypotheses({
         researchQuestion: question || undefined,
         paperIds: selectedIds.length ? selectedIds : undefined,
         numHypotheses: count,
+        refresh: true,
       });
       setHypotheses(res);
-      cache.write("hypotheses", res);
+      cache.write(cacheKey, res);
       setShowConfig(false);
       setLibraryChanged(false);
       api.health().then((h) => {

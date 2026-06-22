@@ -1,4 +1,4 @@
-﻿"""
+"""
 ScholarLens API â€” FastAPI Backend
 
 Exposes all agent functionality as REST endpoints.
@@ -49,13 +49,18 @@ from agents import (
 
 # â”€â”€ App Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+_is_prod = os.getenv("ENV", "").lower() == "production"
+
 app = FastAPI(
     title="ScholarLens API",
-    description="Research intelligence platform â€” agentic paper analysis, "
+    description="Research intelligence platform — agentic paper analysis, "
                 "cross-paper contradiction detection, and hypothesis generation.",
     version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
+    # Disable interactive docs in production — they expose the full API schema
+    # and a live "try it" console to anyone with the backend URL.
+    # Set ENV=production in Render env vars to activate.
+    docs_url=None if _is_prod else "/api/docs",
+    redoc_url=None if _is_prod else "/api/redoc",
 )
 
 # â”€â”€ Rate limiting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -454,16 +459,16 @@ def health():
     errors = settings.validate()
     papers = db.list_papers(limit=1000)
     paper_count = len(papers)
-    embedding_count = agent.vector_store.count()
     # Library fingerprint: changes whenever papers are added or removed.
     # Frontend uses this as a cache-bust key for contradiction results.
     latest_paper = papers[0].created_at if papers else ""
     fingerprint = f"{paper_count}:{latest_paper}"
+    # errors and embeddings intentionally omitted from response —
+    # errors leaks config state (which API keys are missing/invalid);
+    # embeddings leaks index size. Neither has a frontend consumer.
     return {
         "status": "ok" if not errors else "degraded",
-        "errors": errors,
         "papers": paper_count,
-        "embeddings": embedding_count,
         "library_fingerprint": fingerprint,
     }
 

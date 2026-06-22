@@ -115,7 +115,8 @@ class HypothesisAgent:
             scoped_ids = sorted(p.id for p in self.db.list_papers(limit=200))
 
         watermark = self.db.relationships_watermark(
-            paper_ids=paper_ids  # None → all papers
+            paper_ids=paper_ids,  # None → all papers
+            strict=True,          # AND logic — cache key must match what generation uses
         )
         question_hash = hashlib.sha256(
             (research_question or "").strip().lower().encode()
@@ -145,6 +146,7 @@ class HypothesisAgent:
         conflicts = self.db.list_relationships(
             paper_ids=paper_ids,
             relationships=["contradiction", "nuance"],
+            strict=True,
         )
 
         if conflicts:
