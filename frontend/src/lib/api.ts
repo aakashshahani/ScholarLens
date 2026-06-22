@@ -420,7 +420,7 @@ export const api = {
       body: JSON.stringify({
         topics: opts.topics,
         email: opts.email || null,
-        relevance_threshold: opts.relevanceThreshold ?? 0.3,
+        relevance_threshold: opts.relevanceThreshold ?? 0.5,
         max_per_source: opts.maxPerSource ?? 5,
       }),
     }),

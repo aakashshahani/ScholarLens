@@ -49,18 +49,13 @@ from agents import (
 
 # â”€â”€ App Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-_is_prod = os.getenv("ENV", "").lower() == "production"
-
 app = FastAPI(
     title="ScholarLens API",
-    description="Research intelligence platform — agentic paper analysis, "
+    description="Research intelligence platform â€” agentic paper analysis, "
                 "cross-paper contradiction detection, and hypothesis generation.",
     version="1.0.0",
-    # Disable interactive docs in production — they expose the full API schema
-    # and a live "try it" console to anyone with the backend URL.
-    # Set ENV=production in Render env vars to activate.
-    docs_url=None if _is_prod else "/api/docs",
-    redoc_url=None if _is_prod else "/api/redoc",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
 )
 
 # â”€â”€ Rate limiting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -215,7 +210,7 @@ class ImportLookupRequest(BaseModel):
 class MonitorRequest(BaseModel):
     topics: list[dict]  # [{name, keywords, sources}]
     email: Optional[str] = None
-    relevance_threshold: float = Field(0.3, ge=0.0, le=1.0)
+    relevance_threshold: float = Field(0.5, ge=0.0, le=1.0)
     max_per_source: int = Field(5, ge=1, le=20)
 
 
@@ -459,16 +454,16 @@ def health():
     errors = settings.validate()
     papers = db.list_papers(limit=1000)
     paper_count = len(papers)
+    embedding_count = agent.vector_store.count()
     # Library fingerprint: changes whenever papers are added or removed.
     # Frontend uses this as a cache-bust key for contradiction results.
     latest_paper = papers[0].created_at if papers else ""
     fingerprint = f"{paper_count}:{latest_paper}"
-    # errors and embeddings intentionally omitted from response —
-    # errors leaks config state (which API keys are missing/invalid);
-    # embeddings leaks index size. Neither has a frontend consumer.
     return {
         "status": "ok" if not errors else "degraded",
+        "errors": errors,
         "papers": paper_count,
+        "embeddings": embedding_count,
         "library_fingerprint": fingerprint,
     }
 
@@ -798,12 +793,18 @@ def search_papers(request: Request, req: SearchRequest,
         paper_ids=owned_ids,
     )
 
+    # Batch paper title lookup — one pass instead of one DB call per result (N+1)
+    unique_pids = list({r.paper_id for r in results})
+    paper_title_map = {}
+    for pid in unique_pids:
+        p = db.get_paper(pid)
+        paper_title_map[pid] = p.title if p else "Unknown"
+
     response = []
     for r in results:
-        paper = db.get_paper(r.paper_id)
         response.append({
             "paper_id": r.paper_id,
-            "paper_title": paper.title if paper else "Unknown",
+            "paper_title": paper_title_map.get(r.paper_id, "Unknown"),
             "section": r.section,
             "text": r.text[:800],
             "relevance_tier": settings.relevance_tier(r.score),
@@ -826,7 +827,7 @@ def ask_question(request: Request, req: AskRequest,
 def contradiction_count(user: User = Depends(authlib.get_current_user)):
     """Lightweight endpoint â€” returns cached relationship counts with no LLM calls."""
     owned = _owned_ids(user)
-    rels = db.list_relationships(paper_ids=owned) if owned else []
+    rels = db.list_relationships(paper_ids=owned, strict=True) if owned else []
     counts = {"contradiction": 0, "support": 0, "nuance": 0, "unrelated": 0}
     for r in rels:
         if r.relationship in counts:
@@ -850,7 +851,7 @@ def list_contradictions(user: User = Depends(authlib.get_current_user)):
     owned = _owned_ids(user)
     if not owned:
         return []
-    rels = db.list_relationships(paper_ids=owned)
+    rels = db.list_relationships(paper_ids=owned, strict=True)
 
     # Build a claim-id -> claim object map once (DB read, no LLM).
     claim_by_id = {}

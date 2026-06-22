@@ -63,13 +63,14 @@ class Settings:
     # Total free actions (Haiku + Sonnet) on the SERVER key before BYOK required.
     free_action_limit: int = field(default_factory=lambda: _env_int("FREE_ACTION_LIMIT", 15))
 
-    # Voyage AI embedding model — voyage-3-lite (1024-dim).
+    # Voyage AI embedding model — voyage-3.5-lite (1024-dim).
     # Replaces local MiniLM to eliminate torch RAM overhead on Render free tier.
-    # voyage-3-lite: fast, 1024 dims, 200M tokens/month free tier.
+    # voyage-3.5-lite: improved retrieval quality over voyage-3-lite at the
+    # same price ($0.02/M tokens). 1024 dims, 200M tokens/month free tier.
     voyage_api_key: str = field(
         default_factory=lambda: os.getenv("VOYAGE_API_KEY", "")
     )
-    embedding_model: str = "voyage-3-lite"
+    embedding_model: str = "voyage-3.5-lite"
 
     # Chunking params
     chunk_size: int = 500          # tokens per chunk
@@ -79,10 +80,13 @@ class Settings:
     chroma_collection: str = "papers"
 
     # Semantic search relevance tiers (cosine distance, lower = more similar).
-    # Calibrated for MiniLM on narrow-domain academic text.
-    relevance_highly_relevant: float = 0.20   # distance < 0.20
-    relevance_related: float = 0.40           # 0.20 <= distance < 0.40
-    # distance >= 0.40 → "tangential"
+    # Recalibrated for voyage-3.5-lite on narrow-domain academic text.
+    # Voyage embeddings cluster tighter than MiniLM — similar content lands
+    # in the 0.1–0.5 range rather than MiniLM's wider spread, so thresholds
+    # are shifted up to match the new distribution.
+    relevance_highly_relevant: float = 0.35   # distance < 0.35
+    relevance_related: float = 0.55           # 0.35 <= distance < 0.55
+    # distance >= 0.55 → "tangential"
 
     # External APIs
     semantic_scholar_key: str = field(
