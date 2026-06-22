@@ -164,17 +164,31 @@ class MonitoringAgent:
                 for p in papers
             ]
 
+        # Cap at 8 papers to score — each scoring call embeds an abstract
+        # via Voyage API and runs a pgvector search over the full embeddings
+        # table. With 1204 chunks at 1024 dims, each search loads ~10MB of
+        # vectors into memory. Scoring 8 papers peak ≈ 80MB — safe on Render's
+        # 512MB free tier. Papers beyond 8 are already filtered by relevance
+        # threshold so they're unlikely to be high-signal anyway.
+        papers = papers[:8]
+
         scored = []
         for paper in papers:
             if not paper.abstract:
                 continue
 
-            # Search library for similar content
-            results = self.vector_store.search(
-                query=paper.abstract[:500],
-                n_results=3,
-                paper_ids=lib_ids,
-            )
+            try:
+                # Search library for similar content.
+                # Passing lib_ids scopes the pgvector scan to the user's papers
+                # only, which keeps the result set small and the query fast.
+                results = self.vector_store.search(
+                    query=paper.abstract[:400],
+                    n_results=3,
+                    paper_ids=lib_ids,
+                )
+            except Exception as e:
+                print(f"[monitor] relevance search failed for '{paper.title[:40]}': {e}")
+                continue
 
             if results:
                 # Average similarity of top 3 matches (convert distance to similarity)
@@ -183,8 +197,11 @@ class MonitoringAgent:
 
                 if avg_sim >= threshold:
                     # Get the most similar paper's title for context
-                    top_match = self.db.get_paper(results[0].paper_id)
-                    match_title = top_match.title if top_match else "unknown"
+                    try:
+                        top_match = self.db.get_paper(results[0].paper_id)
+                        match_title = top_match.title if top_match else "unknown"
+                    except Exception:
+                        match_title = "unknown"
 
                     scored.append(ScoredPaper(
                         paper=paper,
@@ -240,18 +257,9 @@ class MonitoringAgent:
         results: list[DigestResult],
         summary: str,
     ) -> bool:
-        """
-        Send the digest via Gmail SMTP.
-
-        Requires GMAIL_USER and GMAIL_APP_PASSWORD environment variables.
-        GMAIL_APP_PASSWORD is a 16-character App Password generated at
-        myaccount.google.com → Security → App Passwords (not your regular
-        Gmail password). Sends to any recipient address — no domain
-        verification required.
-        """
+        """Send the digest via Gmail SMTP."""
         gmail_user = os.getenv("GMAIL_USER", "")
         gmail_password = os.getenv("GMAIL_APP_PASSWORD", "")
-
         if not gmail_user or not gmail_password:
             print("GMAIL_USER or GMAIL_APP_PASSWORD not set, skipping email")
             return False
@@ -259,7 +267,6 @@ class MonitoringAgent:
         total_papers = sum(r.papers_relevant for r in results)
         topics = ", ".join(r.topic for r in results if r.scored_papers)
 
-        # Build HTML email — identical to previous Resend version
         html = f"""
         <div style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a;">
             <div style="background: linear-gradient(135deg, #1e3a5f, #0d1b2a); padding: 24px; border-radius: 12px 12px 0 0;">
@@ -273,7 +280,6 @@ class MonitoringAgent:
                     {summary.replace(chr(10), '<br>')}
                 </div>
         """
-
         for result in results:
             if result.scored_papers:
                 html += f'<h3 style="color: #1e3a5f; margin-top: 24px; font-size: 15px;">{result.topic}</h3>'
@@ -281,9 +287,7 @@ class MonitoringAgent:
                     pdf_badge = '📄' if sp.paper.pdf_url else ''
                     html += f"""
                     <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px; margin-bottom: 8px;">
-                        <div style="font-weight: 600; font-size: 14px; color: #0f172a;">
-                            {pdf_badge} {sp.paper.title}
-                        </div>
+                        <div style="font-weight: 600; font-size: 14px; color: #0f172a;">{pdf_badge} {sp.paper.title}</div>
                         <div style="font-size: 12px; color: #64748b; margin-top: 4px;">
                             {', '.join(sp.paper.authors[:3])} · {sp.paper.year or '?'}
                             {f' · {sp.paper.citation_count} citations' if sp.paper.citation_count else ''}
@@ -294,12 +298,9 @@ class MonitoringAgent:
                         <div style="font-size: 13px; color: #475569; margin-top: 8px; line-height: 1.5;">
                             {sp.paper.abstract[:200]}{'...' if len(sp.paper.abstract) > 200 else ''}
                         </div>
-                        <a href="{sp.paper.url}" style="font-size: 12px; color: #3b82f6; text-decoration: none;">
-                            View paper →
-                        </a>
+                        <a href="{sp.paper.url}" style="font-size: 12px; color: #3b82f6; text-decoration: none;">View paper →</a>
                     </div>
                     """
-
         html += """
                 <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8;">
                     Sent by ScholarLens · Research Intelligence Platform
@@ -307,15 +308,11 @@ class MonitoringAgent:
             </div>
         </div>
         """
-
-        # Compose MIME message
         msg = MIMEMultipart("alternative")
         msg["Subject"] = f"ScholarLens: {total_papers} new paper{'s' if total_papers != 1 else ''} in {topics}"
         msg["From"] = f"ScholarLens <{gmail_user}>"
         msg["To"] = recipient
         msg.attach(MIMEText(html, "html"))
-
-        # Send via Gmail SMTP with TLS
         try:
             with smtplib.SMTP("smtp.gmail.com", 587) as server:
                 server.ehlo()
@@ -327,6 +324,7 @@ class MonitoringAgent:
         except Exception as e:
             print(f"Gmail send failed: {e}")
             return False
+
 
     def run_full_scan(
         self,
