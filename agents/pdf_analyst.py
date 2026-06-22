@@ -401,14 +401,19 @@ class PDFAnalysisAgent:
 
     def ask(self, question: str, paper_id: str | None = None,
             paper_ids: list[str] | None = None,
-            api_key: str | None = None, model: str | None = None) -> str:
+            api_key: str | None = None, model: str | None = None,
+            history: list[dict] | None = None) -> str:
         """
         Answer a question using retrieved context from the paper library.
 
+        Supports multi-turn conversation via the `history` parameter —
+        a list of {role, content} dicts from prior exchanges. History is
+        prepended to the messages list so the model has full context for
+        follow-up questions like "which of those has the largest sample size?"
+
         Retains the agentic loop: the model doesn't know in advance what
         to search for, so it issues search calls, reads results, and decides
-        whether to search again or answer. This is genuinely open-ended
-        in a way that paper analysis is not.
+        whether to search again or answer.
         """
         system_prompt = """You are a research assistant with access to a library of
 analyzed papers. Answer questions using the search tool to find relevant passages.
@@ -420,13 +425,28 @@ CITATION RULES:
   If a result has an id field, ignore it — it is not for display.
 - Name the section a finding came from when it helps (e.g. "in the results section").
 
+CONVERSATION RULES:
+- You may receive prior conversation history. Use it to understand follow-up questions.
+- References like "those papers", "that finding", "the one you mentioned" refer to
+  content from earlier in the conversation — resolve them using the history provided.
+- Do NOT re-search for things already established in the conversation unless the user
+  explicitly asks to revisit them.
+
 ANSWER STYLE:
-- This is a one-shot answer, not a chat. Do NOT end with follow-up questions like
-  "Would you like more detail?" — the user cannot reply. Just give the complete answer.
+- Do NOT end with follow-up questions — the user will ask if they want more.
 - If the evidence is insufficient, say so plainly and stop.
 - Keep formatting light: short paragraphs, and bullets only when genuinely listing items."""
 
-        messages = [{"role": "user", "content": question}]
+        # Build messages list — prepend conversation history for multi-turn context.
+        # History contains prior {role, content} exchanges from the frontend.
+        # The current question is always the final user message.
+        messages: list[dict] = []
+        if history:
+            for h in history:
+                # Only include valid role/content pairs — guard against malformed history
+                if isinstance(h, dict) and h.get("role") in ("user", "assistant") and h.get("content"):
+                    messages.append({"role": h["role"], "content": h["content"]})
+        messages.append({"role": "user", "content": question})
 
         max_turns = 5
 
