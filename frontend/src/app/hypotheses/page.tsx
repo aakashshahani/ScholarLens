@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, Paper, Hypothesis } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, Slider, SelectChip, PrimaryButton, SectionLabel, Claim } from "@/components/ui";
 import { FlaskConical, TriangleAlert, GitBranch, AlertCircle, CheckCircle2, Zap, RefreshCw } from "lucide-react";
@@ -75,39 +75,68 @@ export default function HypothesesPage() {
     }).catch(() => {});
   }, []);
 
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+  useEffect(() => () => stopPolling(), []);
+
   const generate = async () => {
     setLoading(true); setHypotheses([]); setError("");
     const cacheKey = selectionCacheKey(selectedIds);
-    try {
-      // Check localStorage for this exact selection before hitting the server.
-      // If found and library hasn't changed, serve instantly.
-      if (!libraryChanged) {
-        const localHit = cache.read<Hypothesis[]>(cacheKey);
-        if (localHit && localHit.length > 0) {
-          setHypotheses(localHit);
-          setShowConfig(false);
-          setLoading(false);
-          return;
-        }
+
+    // Serve from localStorage cache if library hasn't changed
+    if (!libraryChanged) {
+      const localHit = cache.read<Hypothesis[]>(cacheKey);
+      if (localHit && localHit.length > 0) {
+        setHypotheses(localHit);
+        setShowConfig(false);
+        setLoading(false);
+        return;
       }
-      // Explicit generate always passes refresh:true so the backend bypasses
-      // its own cache — the user clicked the button intentionally.
-      const res = await api.generateHypotheses({
+    }
+
+    try {
+      const { job_id } = await api.generateHypotheses({
         researchQuestion: question || undefined,
         paperIds: selectedIds.length ? selectedIds : undefined,
         numHypotheses: count,
         refresh: true,
       });
-      setHypotheses(res);
-      cache.write(cacheKey, res);
-      setShowConfig(false);
-      setLibraryChanged(false);
-      api.health().then((h) => {
-        const fp = (h as any).library_fingerprint || "default";
-        localStorage.setItem("sl_hypotheses_fp", fp);
-      }).catch(() => {});
-    } catch (e: any) { setError(e.message); }
-    setLoading(false);
+
+      localStorage.setItem("sl_hypotheses_job", job_id);
+      stopPolling();
+      pollRef.current = setInterval(async () => {
+        try {
+          const job = await api.getJob<Hypothesis[]>(job_id);
+          if (job.status === "done" && job.result) {
+            stopPolling();
+            localStorage.removeItem("sl_hypotheses_job");
+            setHypotheses(job.result);
+            cache.write(cacheKey, job.result);
+            setShowConfig(false);
+            setLibraryChanged(false);
+            api.health().then((h) => {
+              const fp = (h as any).library_fingerprint || "default";
+              localStorage.setItem("sl_hypotheses_fp", fp);
+            }).catch(() => {});
+            setLoading(false);
+          } else if (job.status === "error") {
+            stopPolling();
+            localStorage.removeItem("sl_hypotheses_job");
+            setError(job.error || "Generation failed.");
+            setLoading(false);
+          }
+        } catch (e: any) {
+          stopPolling();
+          setError(e.message);
+          setLoading(false);
+        }
+      }, 2500);
+    } catch (e: any) {
+      setError(e.message);
+      setLoading(false);
+    }
   };
 
   return (
