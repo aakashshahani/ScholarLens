@@ -349,6 +349,16 @@ export const api = {
     return res.json() as Promise<{ id: string; title: string; status: string; message: string }>;
   },
 
+  // ── Background jobs ──────────────────────────────────────
+  getJob: <T = unknown>(jobId: string) =>
+    apiFetch<{
+      job_id: string;
+      status: "running" | "done" | "error";
+      result: T | null;
+      error: string | null;
+      endpoint: string;
+    }>(`/api/jobs/${jobId}`),
+
   // ── Search / Ask ──────────────────────────────────────────
   search: (query: string, nResults = 10, paperId?: string) =>
     apiFetch<SearchResult[]>("/api/search", {
@@ -356,10 +366,14 @@ export const api = {
       body: JSON.stringify({ query, n_results: nResults, paper_id: paperId || null }),
     }),
 
-  ask: (question: string, paperId?: string) =>
-    apiFetch<{ answer: string }>("/api/ask", {
+  ask: (question: string, paperId?: string, history?: {role: string; content: string}[]) =>
+    apiFetch<{ job_id: string; status: string; cached?: boolean }>("/api/ask", {
       method: "POST",
-      body: JSON.stringify({ question, paper_id: paperId || null }),
+      body: JSON.stringify({
+        question,
+        paper_id: paperId || null,
+        history: history || null,
+      }),
     }),
 
   // ── Contradictions ────────────────────────────────────────
@@ -367,7 +381,7 @@ export const api = {
     apiFetch<ContradictionResult[]>("/api/contradictions"),
 
   runContradictions: (opts?: { paperIds?: string[]; similarityThreshold?: number; maxPairs?: number }) =>
-    apiFetch<ContradictionResult[]>("/api/contradictions", {
+    apiFetch<{ job_id: string; status: string }>("/api/contradictions", {
       method: "POST",
       body: JSON.stringify({
         paper_ids: opts?.paperIds || null,
@@ -385,7 +399,7 @@ export const api = {
     apiFetch<Hypothesis[]>("/api/hypotheses"),
 
   generateHypotheses: (opts?: { researchQuestion?: string; paperIds?: string[]; numHypotheses?: number; refresh?: boolean }) =>
-    apiFetch<Hypothesis[]>("/api/hypotheses", {
+    apiFetch<{ job_id: string; status: string }>("/api/hypotheses", {
       method: "POST",
       body: JSON.stringify({
         research_question: opts?.researchQuestion || null,
@@ -425,7 +439,7 @@ export const api = {
     relevanceThreshold?: number;
     maxPerSource?: number;
   }) =>
-    apiFetch<MonitorScanResponse>("/api/monitor/scan", {
+    apiFetch<{ job_id: string; status: string }>("/api/monitor/scan", {
       method: "POST",
       body: JSON.stringify({
         topics: opts.topics,

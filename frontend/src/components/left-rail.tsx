@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import {
-  LayoutDashboard, Library, Network, Zap, FlaskConical, Radar, Plus, LogOut, Settings as SettingsIcon,
+  LayoutDashboard, Library, Zap, FlaskConical, Radar, Plus, LogOut, Settings as SettingsIcon, Search, Sparkles,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { useEffect } from "react";
@@ -13,9 +13,10 @@ import { api, type UserSettings } from "@/lib/api";
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/library", label: "Library", icon: Library },
-  { href: "/graph", label: "Knowledge Graph", icon: Network },
   { href: "/contradictions", label: "Contradictions", icon: Zap },
   { href: "/hypotheses", label: "Hypotheses", icon: FlaskConical },
+  { href: "/ask", label: "Ask", icon: Sparkles },
+  { href: "/search", label: "Search", icon: Search },
   { href: "/monitor", label: "Monitor", icon: Radar },
 ];
 

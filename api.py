@@ -195,7 +195,16 @@ try:
                        hour=_monitor_hour, minute=_monitor_minute,
                        id="daily_monitor", replace_existing=True)
     def _cleanup_sessions():
-        """Delete expired sessions nightly — keeps the sessions table lean."""
+        """Delete expired sessions + stale jobs nightly."""
+        # Purge jobs older than 2 hours from the in-memory store
+        cutoff = _time.time() - 7200
+        stale = [jid for jid, j in list(_jobs.items()) if j.get("created_at", 0) < cutoff]
+        for jid in stale:
+            j = _jobs.pop(jid, {})
+            key = f"{j.get('user_id')}:{j.get('endpoint')}"
+            _active_jobs.pop(key, None)
+        if stale:
+            print(f"[scheduler] Purged {len(stale)} stale jobs")
         try:
             _conn = db._get_conn()
             _cur = _conn.cursor()
@@ -258,6 +267,7 @@ class SearchRequest(BaseModel):
 class AskRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=settings.max_query_len)
     paper_id: Optional[str] = None
+    history: Optional[list[dict]] = None  # [{role, content}, ...] for multi-turn chat
 
 
 class ContradictionRequest(BaseModel):
@@ -930,34 +940,134 @@ import hashlib as _hashlib
 _ask_cache: dict[str, dict] = {}
 _ASK_CACHE_TTL = 3600  # 1 hour
 
+# ── Background job store ──────────────────────────────────────────────────
+# In-memory only — resets on Render restart. Acceptable for the free tier
+# since a missed job just means the user retries.
+#
+# Structure: job_id → {status, result, error, user_id, endpoint, created_at}
+# status: "running" | "done" | "error"
+_jobs: dict[str, dict] = {}
+
+# Per-user active job guard: f"{user_id}:{endpoint}" → job_id
+# Prevents a user from stacking two scans on top of each other.
+_active_jobs: dict[str, str] = {}
+
+
+def _new_job(user_id: str, endpoint: str) -> str:
+    """Create a new job entry. Returns job_id."""
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {
+        "status": "running",
+        "result": None,
+        "error": None,
+        "user_id": user_id,
+        "endpoint": endpoint,
+        "created_at": _time.time(),
+    }
+    _active_jobs[f"{user_id}:{endpoint}"] = job_id
+    return job_id
+
+
+def _finish_job(job_id: str, result: dict):
+    """Mark a job as done with its result."""
+    if job_id in _jobs:
+        _jobs[job_id]["status"] = "done"
+        _jobs[job_id]["result"] = result
+    # Remove from active tracker
+    job = _jobs.get(job_id, {})
+    key = f"{job.get('user_id')}:{job.get('endpoint')}"
+    _active_jobs.pop(key, None)
+
+
+def _fail_job(job_id: str, error: str):
+    """Mark a job as failed."""
+    if job_id in _jobs:
+        _jobs[job_id]["status"] = "error"
+        _jobs[job_id]["error"] = error
+    job = _jobs.get(job_id, {})
+    key = f"{job.get('user_id')}:{job.get('endpoint')}"
+    _active_jobs.pop(key, None)
+
+
+def _get_or_reuse_job(user_id: str, endpoint: str) -> str | None:
+    """Return existing running job_id for this user+endpoint, or None."""
+    key = f"{user_id}:{endpoint}"
+    existing = _active_jobs.get(key)
+    if existing and existing in _jobs and _jobs[existing]["status"] == "running":
+        return existing
+    return None
+
+
+def _ask_bg(job_id: str, question: str, paper_id: str | None,
+             paper_ids: list[str], api_key: str | None, model: str,
+             cache_key: str, history: list[dict] | None = None):
+    """Background task for Ask — runs the agentic RAG loop off the main thread."""
+    try:
+        answer = agent.ask(
+            question,
+            paper_id=paper_id,
+            paper_ids=paper_ids,
+            api_key=api_key,
+            model=model,
+            history=history,
+        )
+        _ask_cache[cache_key] = {"answer": answer, "ts": _time.time()}
+        _finish_job(job_id, {"answer": answer, "cached": False})
+    except Exception as e:
+        _fail_job(job_id, str(e))
+
 
 @app.post("/api/ask")
 @limiter.limit(settings.rl_ask)
 def ask_question(request: Request, req: AskRequest,
+                 background_tasks: BackgroundTasks,
                  user: User = Depends(authlib.get_current_user)):
-    # Build cache key from user + question + paper scope
+    # Check cache first — no job needed if we have a fresh answer
     _cache_raw = f"{user.id}:{req.question}:{req.paper_id}"
     _cache_key = _hashlib.sha256(_cache_raw.encode()).hexdigest()[:16]
     _now = _time.time()
-
-    # Return cached answer if fresh
     if _cache_key in _ask_cache:
         entry = _ask_cache[_cache_key]
         if _now - entry["ts"] < _ASK_CACHE_TTL:
-            return {"answer": entry["answer"], "cached": True}
+            job_id = _new_job(user.id, "ask")
+            _finish_job(job_id, {"answer": entry["answer"], "cached": True})
+            return {"job_id": job_id, "status": "done", "cached": True}
 
-    answer = agent.ask(
-        req.question,
-        paper_id=req.paper_id,
-        paper_ids=_owned_ids(user),
-        api_key=authlib.resolve_user_api_key(user),
-        model=_resolve_model_and_meter(user),
+    # Reuse existing running job for same question
+    existing = _get_or_reuse_job(user.id, "ask")
+    if existing:
+        return {"job_id": existing, "status": "running"}
+
+    job_id = _new_job(user.id, "ask")
+    history = getattr(req, "history", None)
+    background_tasks.add_task(
+        _ask_bg, job_id, req.question, req.paper_id,
+        _owned_ids(user), authlib.resolve_user_api_key(user),
+        _resolve_model_and_meter(user), _cache_key, history,
     )
-    _ask_cache[_cache_key] = {"answer": answer, "ts": _now}
-    return {"answer": answer, "cached": False}
+    return {"job_id": job_id, "status": "running"}
 
 
 # â”€â”€ Contradictions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+# ── Job polling ──────────────────────────────────────────────────────────
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str, user: User = Depends(authlib.get_current_user)):
+    """Poll a background job. Returns status + result when done."""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["user_id"] != user.id:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "result": job["result"],
+        "error": job["error"],
+        "endpoint": job["endpoint"],
+    }
+
 
 @app.get("/api/contradictions/count")
 def contradiction_count(user: User = Depends(authlib.get_current_user)):
@@ -1034,48 +1144,64 @@ def list_contradictions(user: User = Depends(authlib.get_current_user)):
     return out
 
 
+def _contradiction_bg(job_id: str, scope: list[str], similarity_threshold: float,
+                       max_pairs: int, api_key: str | None, model: str):
+    try:
+        results = contradiction_agent.run_contradiction_scan(
+            paper_ids=scope,
+            similarity_threshold=similarity_threshold,
+            max_pairs=max_pairs,
+            api_key=api_key,
+            model=model,
+        )
+        _invalidate_insight_cache()
+        _finish_job(job_id, [
+            {
+                "id": r.id,
+                "relationship": r.relationship,
+                "category": r.category,
+                "explanation": r.explanation,
+                "resolution": r.resolution,
+                "stronger_evidence": r.stronger_evidence,
+                "similarity": round(r.similarity, 3),
+                "claim_a": {
+                    "paper_id": r.claim_a.paper_id,
+                    "paper_title": r.claim_a.paper_title,
+                    "text": r.claim_a.text,
+                    "confidence": r.claim_a.confidence,
+                },
+                "claim_b": {
+                    "paper_id": r.claim_b.paper_id,
+                    "paper_title": r.claim_b.paper_title,
+                    "text": r.claim_b.text,
+                    "confidence": r.claim_b.confidence,
+                },
+                "created_at": r.created_at,
+            }
+            for r in results
+        ])
+    except Exception as e:
+        _fail_job(job_id, str(e))
+
+
 @app.post("/api/contradictions")
 @limiter.limit(settings.rl_contradictions)
 def run_contradictions(request: Request, req: ContradictionRequest,
+                       background_tasks: BackgroundTasks,
                        user: User = Depends(authlib.get_current_user)):
     scope = _scope_ids(user, req.paper_ids)
     if not scope:
-        return []
-    results = contradiction_agent.run_contradiction_scan(
-        paper_ids=scope,
-        similarity_threshold=req.similarity_threshold,
-        max_pairs=req.max_pairs,
-        api_key=authlib.resolve_user_api_key(user),
-        model=_resolve_model_and_meter(user),
+        return {"job_id": None, "status": "done", "result": []}
+    existing = _get_or_reuse_job(user.id, "contradictions")
+    if existing:
+        return {"job_id": existing, "status": "running"}
+    job_id = _new_job(user.id, "contradictions")
+    background_tasks.add_task(
+        _contradiction_bg, job_id, scope,
+        req.similarity_threshold, req.max_pairs,
+        authlib.resolve_user_api_key(user), _resolve_model_and_meter(user),
     )
-    # Invalidate insight cache so research wire reflects new relationships immediately
-    _invalidate_insight_cache()
-
-    return [
-        {
-            "id": r.id,
-            "relationship": r.relationship,
-            "category": r.category,
-            "explanation": r.explanation,
-            "resolution": r.resolution,
-            "stronger_evidence": r.stronger_evidence,
-            "similarity": round(r.similarity, 3),
-            "claim_a": {
-                "paper_id": r.claim_a.paper_id,
-                "paper_title": r.claim_a.paper_title,
-                "text": r.claim_a.text,
-                "confidence": r.claim_a.confidence,
-            },
-            "claim_b": {
-                "paper_id": r.claim_b.paper_id,
-                "paper_title": r.claim_b.paper_title,
-                "text": r.claim_b.text,
-                "confidence": r.claim_b.confidence,
-            },
-            "created_at": r.created_at,
-        }
-        for r in results
-    ]
+    return {"job_id": job_id, "status": "running"}
 
 
 # â”€â”€ Hypotheses â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1096,53 +1222,57 @@ def get_cached_hypotheses(user: User = Depends(authlib.get_current_user)):
     return latest["hypotheses"]
 
 
+def _hypothesis_bg(job_id: str, research_question: str | None, scope: list[str],
+                    num_hypotheses: int, refresh: bool, api_key: str | None, model: str):
+    try:
+        hypotheses = hypothesis_agent.generate(
+            research_question=research_question,
+            paper_ids=scope,
+            num_hypotheses=num_hypotheses,
+            force_refresh=refresh,
+            api_key=api_key,
+            model=model,
+        )
+        _finish_job(job_id, [
+            {
+                "id": h.id,
+                "statement": h.statement,
+                "rationale": h.rationale,
+                "source_conflicts": h.source_conflicts,
+                "supporting_papers": h.supporting_papers,
+                "methodology": h.methodology,
+                "challenges": h.challenges,
+                "novelty_score": h.novelty_score,
+                "novelty_tier": h.novelty_tier,
+                "grounding": h.grounding,
+                "research_question": h.research_question,
+                "created_at": h.created_at,
+            }
+            for h in hypotheses
+        ])
+    except Exception as e:
+        _fail_job(job_id, str(e))
+
+
 @app.post("/api/hypotheses")
 @limiter.limit(settings.rl_hypotheses)
 def generate_hypotheses(request: Request, req: HypothesisRequest,
+                        background_tasks: BackgroundTasks,
                         user: User = Depends(authlib.get_current_user)):
-    """
-    Generate testable hypotheses from the library.
-
-    Response changes from previous version:
-      - source_conflicts: list of validated relationship IDs the hypothesis draws from
-      - grounding: "detected_conflicts" | "single_paper_gaps"
-      - novelty_score: cosine distance from nearest library chunk (0â€“1, higher = more novel)
-      - novelty_tier: "high" | "medium" | "low" | "unknown"
-      - impact: REMOVED (no reliable signal â€” no citation data in DB)
-      - novelty_explanation: REMOVED (replaced by novelty_score + novelty_tier)
-
-    Pass refresh=true to bypass the output cache.
-    Cache auto-invalidates when a new contradiction scan runs.
-    """
+    """Generate testable hypotheses — runs as a background task, returns job_id."""
     scope = _scope_ids(user, req.paper_ids)
     if not scope:
-        return []
-    hypotheses = hypothesis_agent.generate(
-        research_question=req.research_question,
-        paper_ids=scope,
-        num_hypotheses=req.num_hypotheses,
-        force_refresh=req.refresh,
-        api_key=authlib.resolve_user_api_key(user),
-        model=_resolve_model_and_meter(user),
+        return {"job_id": None, "status": "done", "result": []}
+    existing = _get_or_reuse_job(user.id, "hypotheses")
+    if existing:
+        return {"job_id": existing, "status": "running"}
+    job_id = _new_job(user.id, "hypotheses")
+    background_tasks.add_task(
+        _hypothesis_bg, job_id, req.research_question, scope,
+        req.num_hypotheses, req.refresh,
+        authlib.resolve_user_api_key(user), _resolve_model_and_meter(user),
     )
-
-    return [
-        {
-            "id": h.id,
-            "statement": h.statement,
-            "rationale": h.rationale,
-            "source_conflicts": h.source_conflicts,
-            "supporting_papers": h.supporting_papers,
-            "methodology": h.methodology,
-            "challenges": h.challenges,
-            "novelty_score": h.novelty_score,
-            "novelty_tier": h.novelty_tier,
-            "grounding": h.grounding,
-            "research_question": h.research_question,
-            "created_at": h.created_at,
-        }
-        for h in hypotheses
-    ]
+    return {"job_id": job_id, "status": "running"}
 
 
 # â”€â”€ Import â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1294,65 +1424,80 @@ def import_add(
 
 # â”€â”€ Monitor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+def _monitor_scan_bg(job_id: str, topics: list, recipient: str | None,
+                      max_per_source: int, relevance_threshold: float,
+                      user_id: str, api_key: str | None, model: str):
+    try:
+        results, email_sent, email_error, sources_failed = monitor.run_full_scan(
+            topics=topics,
+            recipient=recipient,
+            max_per_source=max_per_source,
+            relevance_threshold=relevance_threshold,
+            user_id=user_id,
+            api_key=api_key,
+            model=model,
+        )
+        digests = [
+            {
+                "topic": r.topic,
+                "papers_found": r.papers_found,
+                "papers_relevant": r.papers_relevant,
+                "scan_time": r.scan_time,
+                "papers": [
+                    {
+                        "title": sp.paper.title,
+                        "authors": sp.paper.authors,
+                        "year": sp.paper.year,
+                        "source": sp.paper.source,
+                        "abstract": sp.paper.abstract or "",
+                        "url": sp.paper.url,
+                        "pdf_url": sp.paper.pdf_url,
+                        "relevance_score": sp.relevance_score,
+                        "relevance_tier": settings.relevance_tier(sp.relevance_score)
+                                           if hasattr(settings, "relevance_tier") else None,
+                        "relevance_reason": sp.relevance_reason,
+                    }
+                    for sp in r.scored_papers
+                ],
+            }
+            for r in results
+        ]
+        _finish_job(job_id, {
+            "digests": digests,
+            "email_requested": bool(recipient),
+            "email_sent": email_sent,
+            "email_error": email_error,
+            "sources_failed": sources_failed,
+        })
+    except Exception as e:
+        _fail_job(job_id, str(e))
+
+
 @app.post("/api/monitor/scan")
 @limiter.limit(settings.rl_monitor)
 def monitor_scan(request: Request, req: MonitorRequest,
+                 background_tasks: BackgroundTasks,
                  user: User = Depends(authlib.get_current_user)):
+    """Run monitoring scan — returns job_id immediately, scans in background."""
+    existing = _get_or_reuse_job(user.id, "monitor_scan")
+    if existing:
+        return {"job_id": existing, "status": "running"}
+
     topics = [
         MonitorTopic(
             name=t["name"],
             keywords=t["keywords"],
-            sources=t.get("sources", ["arxiv", "semantic_scholar"]),
+            sources=t.get("sources", ["semantic_scholar", "openalex", "arxiv"]),
         )
         for t in req.topics
     ]
-
-    results, email_sent, email_error, sources_failed = monitor.run_full_scan(
-        topics=topics,
-        recipient=req.email,
-        max_per_source=req.max_per_source,
-        relevance_threshold=req.relevance_threshold,
-        user_id=user.id,
-        api_key=authlib.resolve_user_api_key(user),
-        model=_resolve_model_and_meter(user),
+    job_id = _new_job(user.id, "monitor_scan")
+    background_tasks.add_task(
+        _monitor_scan_bg, job_id, topics, req.email,
+        req.max_per_source, req.relevance_threshold,
+        user.id, authlib.resolve_user_api_key(user), _resolve_model_and_meter(user),
     )
-
-    digests = [
-        {
-            "topic": r.topic,
-            "papers_found": r.papers_found,
-            "papers_relevant": r.papers_relevant,
-            "scan_time": r.scan_time,
-            "papers": [
-                {
-                    "title": sp.paper.title,
-                    "authors": sp.paper.authors,
-                    "year": sp.paper.year,
-                    "source": sp.paper.source,
-                    "abstract": sp.paper.abstract or "",
-                    "url": sp.paper.url,
-                    "pdf_url": sp.paper.pdf_url,
-                    "relevance_score": sp.relevance_score,
-                    "relevance_tier": settings.relevance_tier(sp.relevance_score)
-                                       if hasattr(settings, "relevance_tier") else None,
-                    "relevance_reason": sp.relevance_reason,
-                }
-                for sp in r.scored_papers
-            ],
-        }
-        for r in results
-    ]
-
-    # Wrap digests with truthful email status so the UI never claims a send
-    # that didn't actually happen. email_requested lets the UI distinguish
-    # "no email entered" from "email entered but failed".
-    return {
-        "digests": digests,
-        "email_requested": bool(req.email),
-        "email_sent": email_sent,
-        "email_error": email_error,
-        "sources_failed": sources_failed,
-    }
+    return {"job_id": job_id, "status": "running"}
 
 
 @app.get("/api/monitor/topics")
