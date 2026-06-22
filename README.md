@@ -64,9 +64,9 @@ Naïvely comparing every claim against every other claim is O(n²) in LLM calls.
 
 #### Stage 1: Hybrid retrieval pre-filter (cheap)
 
-All claims are embedded using `sentence-transformers` (MiniLM-L6-v2). Stage 1 runs **two retrievers in parallel** and unions their candidate pairs:
+All claims are embedded using **Voyage AI** (`voyage-3.5-lite`, 1024 dims). Stage 1 runs **two retrievers in parallel** and unions their candidate pairs:
 
-- **Dense (MiniLM):** cosine similarity between every cross-paper claim pair via pgvector's `<=>` operator; pairs above a configurable threshold survive.
+- **Dense (Voyage AI):** cosine similarity between every cross-paper claim pair, computed via numpy matrix multiply then filtered by threshold; pairs above the threshold survive.
 - **BM25 (`rank-bm25`):** lexical retrieval over the same claim set, catching pairs that share key terms but sit far apart in embedding space.
 
 Each surviving pair is tagged with a `retrieval_source` (`dense`, `bm25`, or `both`) so coverage from each retriever is measurable. The dense pass alone misses vocabulary-distant but conceptually related claims; BM25 recovers them (e.g. "transformer attention degrades on long sequences" vs "BERT fails beyond 512 tokens"). The two together feed Stage 2.
@@ -76,7 +76,7 @@ The dense threshold is exposed as three presets in the UI:
 - **Balanced** (0.50, default): good coverage for most libraries
 - **Deep** (0.40): catches more distant relationships, takes longer
 
-**Why MiniLM over BGE-base:** BGE-base was evaluated as a replacement. Its retrieval-tuned training compresses similarity scores upward, reducing the separation between related and unrelated pairs on narrow-domain academic text (separation dropped from +0.274 to +0.141 on the eval corpus). MiniLM's general-purpose similarity distribution better separates the claim pairs that need LLM judgment from those that don't. The asymmetric `embed_query`/`embed_texts` split remains in the codebase for future experiments.
+**Embedding model history:** The system was originally built with local `sentence-transformers` (MiniLM-L6-v2), then evaluated BGE-base as a potential upgrade (BGE-base compressed similarity scores upward, reducing class separation on the narrow-domain corpus — separation dropped from +0.274 to +0.141 — so MiniLM was retained). The current model is **Voyage AI** (`voyage-3.5-lite`), migrated to eliminate the ~400MB torch RAM overhead that caused OOM crashes on Render's free tier. Voyage produces higher-quality embeddings and runs as an API call, removing the local model dependency entirely. The `embed_query`/`embed_texts` split is preserved for any future model experiments.
 
 #### Stage 2: LLM judgment (expensive, rare)
 
@@ -153,11 +153,11 @@ The frontend runs a custom JavaScript force simulation with centering, repulsion
 
 ### 8. Semantic search and relevance tiers
 
-Search queries are embedded using MiniLM (bare document embedding, no instruction prefix — MiniLM, unlike BGE retrieval models, needs no query prefix). pgvector returns the top-k nearest chunks by **cosine distance** (lower = more similar) using the `<=>` operator. Relevance is reported as a tier rather than a percentage, using thresholds calibrated for MiniLM on narrow-domain academic text:
+Search queries are embedded using **Voyage AI** (`voyage-3.5-lite`, `input_type="query"`). pgvector returns the top-k nearest chunks by **cosine distance** (lower = more similar) using the `<=>` operator. Relevance is reported as a tier rather than a percentage, using thresholds calibrated for voyage-3.5-lite on narrow-domain academic text:
 
-- **Highly relevant** — distance < 0.20
-- **Related** — 0.20 ≤ distance < 0.40
-- **Tangential** — distance ≥ 0.40
+- **Highly relevant** — distance < 0.35
+- **Related** — 0.35 ≤ distance < 0.55
+- **Tangential** — distance ≥ 0.55
 
 The previous implementation showed `(1 - cosine_distance) * 100` as a percentage. This implied calibrated precision that doesn't exist — tiers are honest about what the model actually knows. The raw distance is still returned (`relevance_score`) so the frontend can sort or filter, but it isn't shown as a headline number.
 
@@ -228,7 +228,7 @@ ScholarLens is multi-user: every account has its own private library, and the ba
 │  users · sessions · papers (user_id)                   │
 │  analysis_results · chunks · claims                    │
 │  relationships · hypothesis_cache                      │
-│  embeddings (vector(384), MiniLM-L6-v2)                │
+│  embeddings (vector(1024), voyage-3.5-lite)             │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -241,7 +241,7 @@ ScholarLens is multi-user: every account has its own private library, and the ba
 | LLM | Claude Haiku (Anthropic API) | Tool use support, strong structured extraction, cost-effective |
 | Backend | FastAPI | Async, typed, automatic OpenAPI docs at `/api/docs` |
 | Frontend | Next.js 16 + TypeScript + Tailwind v4 | App Router, server components, Turbopack, fast iteration |
-| Embeddings | sentence-transformers MiniLM-L6-v2 | Runs locally, no API cost, better score separation than BGE on narrow-domain text |
+| Embeddings | Voyage AI voyage-3.5-lite (1024 dims) | API-based, eliminates ~400MB torch RAM overhead on Render free tier, higher retrieval quality than MiniLM or BGE on narrow-domain text |
 | Lexical retrieval | rank-bm25 | Hybrid Stage-1 pass alongside dense retrieval; recovers vocabulary-distant claim pairs |
 | Vector store | pgvector (Supabase) | Native Postgres extension, `<=>` cosine operator, no separate vector DB process |
 | Database | Postgres via psycopg2 (Supabase) | Persistent, free tier, FK cascades, scales beyond SQLite |
@@ -272,6 +272,7 @@ pip install -r requirements.txt
 # ANTHROPIC_API_KEY=sk-ant-xxxxx
 # DATABASE_URL=postgresql://postgres:[password]@[host]:5432/postgres
 # FERNET_KEY=<generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
+# VOYAGE_API_KEY=pa-...          (required — get from voyageai.com)
 # SEMANTIC_SCHOLAR_KEY=...       (optional — higher rate limits)
 # RESEND_API_KEY=re_...          (optional — for email digests)
 
@@ -335,7 +336,7 @@ All endpoints except `/api/health` and the `/api/auth/{register,login,logout}` r
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Bare health check for Render probe |
-| GET | `/api/health` | System status, paper count, embedding count, library fingerprint |
+| GET | `/api/health` | System status, paper count, library fingerprint |
 | POST | `/api/auth/register` | Create account, set session cookie (first account adopts pre-auth papers) |
 | POST | `/api/auth/login` | Authenticate, rotate + set session cookie |
 | POST | `/api/auth/logout` | Clear the current session |
