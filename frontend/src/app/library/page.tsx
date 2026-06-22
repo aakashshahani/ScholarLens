@@ -3,85 +3,19 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, Paper, SearchResult as SR } from "@/lib/api";
+import { api, Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { PageHeader, EmptyState, SkeletonCard, FilterChip, Card, Spinner, ProgressRing, AnalysisTag, Claim } from "@/components/ui";
-import { Search, MessageCircleQuestion, BookOpen, ArrowUpDown, FileText, ArrowRight, Sparkles } from "lucide-react";
-
-const ASK_CACHE_KEY = "library_ask";
+import { Search, MessageCircleQuestion, BookOpen, ArrowUpDown, FileText, ArrowRight } from "lucide-react";
 
 // ── Markdown renderer ─────────────────────────────────────────
-function MarkdownAnswer({ text }: { text: string }) {
-  const lines = text.split("\n");
-  const elements: React.ReactNode[] = [];
-  let listBuffer: string[] = [];
 
-  const inlineMd = (s: string) =>
-    s
-      .replace(/\*\*(.+?)\*\*/g, '<strong class="text-[var(--text-1)] font-semibold">$1</strong>')
-      .replace(/\*(.+?)\*/g, '<em>$1</em>')
-      .replace(/`(.+?)`/g, '<code class="mono text-[12px] bg-[var(--surface-3)] px-1.5 py-0.5 rounded text-[var(--gen)]">$1</code>');
-
-  const flushList = (key: string) => {
-    if (!listBuffer.length) return;
-    elements.push(
-      <ul key={key} className="list-none space-y-1 mb-3 pl-0">
-        {listBuffer.map((item, i) => (
-          <li key={i} className="flex items-start gap-2 text-[13px] text-[var(--text-2)] leading-[1.6]">
-            <span className="mt-[6px] w-[4px] h-[4px] rounded-full bg-[var(--gen)] shrink-0" />
-            <span dangerouslySetInnerHTML={{ __html: inlineMd(item) }} />
-          </li>
-        ))}
-      </ul>
-    );
-    listBuffer = [];
-  };
-
-  lines.forEach((raw, idx) => {
-    const line = raw.trim();
-    if (!line) { flushList(`list-${idx}`); return; }
-    if (line.startsWith("## ")) {
-      flushList(`list-${idx}`);
-      elements.push(<h2 key={idx} className="text-[14px] font-semibold text-[var(--text-1)] mt-4 mb-1.5">{line.slice(3)}</h2>);
-      return;
-    }
-    if (line.startsWith("### ")) {
-      flushList(`list-${idx}`);
-      elements.push(<h3 key={idx} className="text-[12.5px] font-semibold text-[var(--text-2)] uppercase tracking-wide mt-3 mb-1">{line.slice(4)}</h3>);
-      return;
-    }
-    if (line.startsWith("- ") || line.startsWith("* ")) { listBuffer.push(line.slice(2)); return; }
-    const numbered = line.match(/^\d+\.\s+(.+)/);
-    if (numbered) { listBuffer.push(numbered[1]); return; }
-    flushList(`list-${idx}`);
-    elements.push(<p key={idx} className="text-[13px] text-[var(--text-2)] leading-[1.7] mb-2" dangerouslySetInnerHTML={{ __html: inlineMd(line) }} />);
-  });
-  flushList("list-end");
-  return <div className="space-y-0.5">{elements}</div>;
-}
-
-// Canonical badge order — same on every card so badges read consistently.
-const ANALYSIS_ORDER = ["summary", "findings", "methods", "key_claims", "limitations", "research_gaps"];
-const orderAnalyses = (types: string[] = []) =>
-  [...types].sort((a, b) => {
-    const ia = ANALYSIS_ORDER.indexOf(a);
-    const ib = ANALYSIS_ORDER.indexOf(b);
-    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
-  });
-
-
-const ACCENTS = ["var(--gen)", "var(--support)", "var(--nuance)", "#5B9BE0", "#D86FB0", "var(--contra)"];
 
 export default function LibraryPage() {
   const router = useRouter();
   const [papers, setPapers]                 = useState<Paper[]>([]);
   const [loading, setLoading]               = useState(true);
-  const [query, setQuery]                   = useState("");
-  const [answer, setAnswer]                 = useState("");
-  const [passages, setPassages]             = useState<SR[]>([]);
-  const [asking, setAsking]                 = useState(false);
-  const [askError, setAskError]             = useState("");
-  const [hasAsked, setHasAsked]             = useState(false);
+
   const [filter, setFilter]                 = useState("all");
   const [selected, setSelected]             = useState<Paper | null>(null);
   const [sortBy, setSortBy]                 = useState<"recent" | "coverage">("recent");
@@ -103,40 +37,12 @@ export default function LibraryPage() {
         if (p[0] && !cachedPapers?.length) setSelected(p[0]);
       })
       .catch(() => setLoading(false));
-    // Restore last Ask result from cache so it survives navigation
-    const cached = cache.read<{ query: string; answer: string; passages: SR[] }>(ASK_CACHE_KEY);
-    if (cached?.answer) {
-      setQuery(cached.query || "");
-      setAnswer(cached.answer);
-      setPassages(cached.passages || []);
-      setHasAsked(true);
-    }
+
   }, []);
 
   useEffect(() => { setAbstractExpanded(false); }, [selected?.id]);
 
-  // Single action: Ask fires both the synthesized answer and source passages in parallel.
-  // Answer is the headline; passages are collapsible evidence below it.
-  const doAsk = async () => {
-    if (!query.trim()) return;
-    setAsking(true); setAnswer(""); setPassages([]); setAskError(""); setHasAsked(true);
-    try {
-      const [a, p] = await Promise.all([
-        api.ask(query),
-        api.search(query, 6).catch(() => [] as SR[]),
-      ]);
-      setAnswer(a.answer);
-      setPassages(p);
-      // Persist so the answer survives navigation and comes back when returning
-      cache.write(ASK_CACHE_KEY, { query, answer: a.answer, passages: p });
-    } catch (e: any) { setAskError(e.message); }
-    setAsking(false);
-  };
 
-  const clearAsk = () => {
-    setQuery(""); setAnswer(""); setPassages([]); setHasAsked(false); setAskError("");
-    cache.clear(ASK_CACHE_KEY);
-  };
 
   const totalAnalyses = papers.reduce((n, p) => n + (p.analysis_types?.length || 0), 0);
   const totalClaims   = papers.reduce((n, p) => n + (p.chunk_count || 0), 0);
@@ -174,62 +80,7 @@ export default function LibraryPage() {
         subtitle={`${papers.length} paper${papers.length !== 1 ? "s" : ""} · ${totalAnalyses} analyses${totalClaims > 0 ? ` · ${totalClaims} chunks indexed` : ""}`}
       />
 
-      {/* ── Ask bar (merged Search + Ask) ───────────────── */}
-      <div className="flex gap-2 mb-2">
-        <div className="relative flex-1">
-          <Sparkles size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--gen)]" />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && doAsk()}
-            placeholder="Ask anything about your library — e.g. how do these papers measure negotiation skill?"
-            className="w-full bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-md)] pl-10 pr-4 py-2.5 text-[13.5px] text-[var(--text-1)] focus:outline-none focus:border-[var(--line-2)]"
-          />
-        </div>
-        <button onClick={doAsk} disabled={asking}
-          className="flex items-center gap-1.5 px-4 py-2.5 rounded-[var(--r-md)] bg-[var(--gen)] text-white text-[13px] font-medium t-all hover:opacity-90 disabled:opacity-50">
-          <Sparkles size={14} /> {asking ? "Thinking…" : "Ask"}
-        </button>
-        {hasAsked && (
-          <button onClick={clearAsk}
-            className="px-3 py-2.5 rounded-[var(--r-md)] border border-[var(--line)] text-[13px] text-[var(--text-3)] t-all hover:text-[var(--text-1)] hover:border-[var(--line-2)]">
-            Clear
-          </button>
-        )}
-      </div>
-      <p className="text-[11px] text-[var(--text-4)] mb-5">
-        Answers are synthesized from your papers. Source passages are shown below each response.
-      </p>
 
-      {asking && <div className="mb-5"><Spinner label="Reading your library…" /></div>}
-
-      {askError && (
-        <div className="bg-[var(--contra-dim)] border border-[var(--contra-line)] rounded-[var(--r-md)] px-4 py-3 mb-5 text-[13px] text-[var(--contra)]">
-          Couldn't answer — {askError}
-        </div>
-      )}
-
-      {/* ── Answer + collapsible source passages ────────── */}
-      {answer && !asking && (
-        <Card className="mb-6 fade-up">
-          <div className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--gen)] uppercase tracking-wider mb-3">
-            <Sparkles size={12} /> Answer
-          </div>
-          <MarkdownAnswer text={answer} />
-
-          {passages.length > 0 && (
-            <div className="mt-4 pt-3 border-t border-[var(--line)] flex items-start gap-2 flex-wrap">
-              <span className="text-[11px] text-[var(--text-4)] shrink-0 mt-0.5">Sources:</span>
-              {Array.from(new Set(passages.map((p) => p.paper_title))).map((title, i) => (
-                <span key={i}
-                  className="inline-flex items-center px-2 py-0.5 rounded-full bg-[var(--surface-3)] border border-[var(--line)] text-[11px] text-[var(--text-2)]">
-                  {title.length > 48 ? title.slice(0, 48) + "…" : title}
-                </span>
-              ))}
-            </div>
-          )}
-        </Card>
-      )}
 
       {/* ── Filters ─────────────────────────────────────── */}
       <div className="flex items-center gap-2 mb-4">
