@@ -44,9 +44,13 @@ from utils import VectorStore
 
 # ── Novelty thresholds ───────────────────────────────────────
 # Cosine distance in [0, 1] where higher = more different from corpus.
-# Tuned for MiniLM on academic text; adjust if embedding model changes.
-NOVELTY_HIGH = 0.45    # distance > 0.45 → high novelty
-NOVELTY_LOW  = 0.25    # distance < 0.25 → low novelty (well-covered territory)
+# Tuned for voyage-3.5-lite on narrow-domain academic text.
+# Voyage embeddings cluster tighter than MiniLM — similar academic content
+# lands in the 0.10–0.45 range rather than MiniLM's wider spread.
+# Recalibrate after regenerating hypotheses if the distribution shifts.
+NOVELTY_HIGH = 0.30    # distance > 0.30 → explores genuinely new territory
+NOVELTY_LOW  = 0.12    # distance < 0.12 → very close to existing library coverage
+# 0.12–0.30 → medium
 
 
 @dataclass
@@ -115,8 +119,7 @@ class HypothesisAgent:
             scoped_ids = sorted(p.id for p in self.db.list_papers(limit=200))
 
         watermark = self.db.relationships_watermark(
-            paper_ids=paper_ids,  # None → all papers
-            strict=True,          # AND logic — cache key must match what generation uses
+            paper_ids=paper_ids  # None → all papers
         )
         question_hash = hashlib.sha256(
             (research_question or "").strip().lower().encode()
@@ -146,7 +149,6 @@ class HypothesisAgent:
         conflicts = self.db.list_relationships(
             paper_ids=paper_ids,
             relationships=["contradiction", "nuance"],
-            strict=True,
         )
 
         if conflicts:

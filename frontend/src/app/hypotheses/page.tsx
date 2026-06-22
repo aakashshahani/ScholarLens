@@ -6,22 +6,29 @@ import { PageHeader, Card, EmptyState, Spinner, Slider, SelectChip, PrimaryButto
 import { FlaskConical, TriangleAlert, GitBranch, AlertCircle, CheckCircle2, Zap, RefreshCw } from "lucide-react";
 import { cache } from "@/lib/cache";
 
-// Novelty rank pill. On a tight corpus every hypothesis lands in the same raw
-// tier ("medium"), so the tier label stops discriminating — five identical
-// pills read as broken. Rank is always distinct and honest: it answers "which
-// of these is furthest from what the library already covers." Colour still
-// tracks absolute score so a genuinely high-novelty batch reads green.
-function NoveltyPill({ rank, total, score }: { rank: number; total: number; score: number }) {
-  const color = score > 0.45 ? "var(--support)" : score > 0.25 ? "var(--nuance)" : "var(--text-3)";
-  const label =
-    rank === 1 ? "Most novel" :
-    rank === total ? "Least novel" :
-    `#${rank} most novel`;
-  return (
-    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[var(--surface-3)]" style={{ color }}>
-      {label}
-    </span>
-  );
+// Novelty tier badge — shows only when the hypothesis is genuinely high
+// novelty (score > 0.30 for voyage-3.5-lite). Medium and low are silent:
+// showing "Medium novelty" on every card adds no signal. The novelty rail
+// on the right already communicates relative ordering visually.
+function NoveltyBadge({ score }: { score: number }) {
+  if (score > 0.30) {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium"
+        style={{ background: "var(--support-dim)", color: "var(--support)" }}>
+        High novelty
+      </span>
+    );
+  }
+  if (score > 0.12) {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[var(--surface-3)]"
+        style={{ color: "var(--text-3)" }}>
+        Explores covered ground
+      </span>
+    );
+  }
+  // Low novelty — say nothing, the bar rail communicates it
+  return null;
 }
 
 export default function HypothesesPage() {
@@ -177,13 +184,8 @@ export default function HypothesesPage() {
           )}
 
           {hypotheses.length > 0 && (() => {
-            // Rank hypotheses by novelty (highest score = rank 1). Built once
-            // so each card and the rail agree. id -> 1-based rank.
-            const novRank = new Map<string, number>();
-            [...hypotheses]
-              .sort((a, b) => (b.novelty_score || 0) - (a.novelty_score || 0))
-              .forEach((h, idx) => novRank.set(h.id, idx + 1));
-            const total = hypotheses.length;
+            // No rank map needed — NoveltyBadge uses absolute score, not rank.
+            // The rail sorts and displays relative ordering visually.
 
             return (
             <div className="grid grid-cols-[1fr_240px] gap-4 fade-up">
@@ -211,7 +213,7 @@ export default function HypothesesPage() {
                       </div>
 
                       <div className="mb-3">
-                        <NoveltyPill rank={novRank.get(h.id) || total} total={total} score={h.novelty_score || 0} />
+                        <NoveltyBadge score={h.novelty_score || 0} />
                       </div>
 
                       <div className="font-display text-[17px] text-[var(--text-1)] leading-[1.35] mb-2.5">{h.statement}</div>
@@ -263,8 +265,8 @@ export default function HypothesesPage() {
                   <div className="text-[11px] text-[var(--text-3)] mb-3 leading-[1.5]">
                     How different each hypothesis is from what your library already covers. Longer bars sit in less-explored territory.
                   </div>
-                  <div className="flex items-center justify-between text-[9.5px] text-[var(--text-4)] uppercase tracking-wider mb-2.5">
-                    <span>Most novel</span><span>Least</span>
+                  <div className="text-[9.5px] text-[var(--text-4)] uppercase tracking-wider mb-2.5">
+                    Sorted by distance from library
                   </div>
                   <div className="space-y-2.5">
                     {[...hypotheses]
@@ -272,7 +274,7 @@ export default function HypothesesPage() {
                       .map((h, rankIdx) => {
                         const cardNum = hypotheses.indexOf(h) + 1;
                         const score = h.novelty_score || 0;
-                        const color = score > 0.45 ? "var(--support)" : score > 0.25 ? "var(--nuance)" : "var(--text-3)";
+                        const color = score > 0.30 ? "var(--support)" : score > 0.12 ? "var(--nuance)" : "var(--text-3)";
                         // Width is relative to the top-ranked bar so differences
                         // are visible even when absolute scores cluster tightly.
                         const maxScore = Math.max(...hypotheses.map((x) => x.novelty_score || 0), 0.0001);
@@ -283,7 +285,6 @@ export default function HypothesesPage() {
                             <div className="flex-1 h-[6px] bg-[var(--surface-3)] rounded-full overflow-hidden">
                               <div className="h-full rounded-full t-all" style={{ width: `${width}%`, background: color }} />
                             </div>
-                            <span className="mono text-[10px] text-[var(--text-4)] w-4 shrink-0 text-right">{rankIdx + 1}</span>
                           </div>
                         );
                       })}
