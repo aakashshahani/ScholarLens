@@ -91,9 +91,21 @@ export default function SettingsPage() {
   }
 
   async function changeModel(id: string) {
+    if (!s) return;
+    // Optimistic update — move the checkmark immediately so the UI feels instant.
+    // If the API call fails, revert to the previous model.
+    const prev = s.model;
+    setS({ ...s, model: id });
     setBusy(true);
-    try { await api.updateSettings({ model: id }); await refresh(); await load(); }
-    finally { setBusy(false); }
+    try {
+      await api.updateSettings({ model: id });
+      await refresh();
+      await load();
+    } catch {
+      setS((cur) => cur ? { ...cur, model: prev } : cur);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function saveLib() {
