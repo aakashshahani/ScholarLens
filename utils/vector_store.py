@@ -4,8 +4,8 @@ pgvector-backed vector store for ScholarLens using Voyage AI embeddings.
 Replaces local sentence-transformers (MiniLM) with Voyage AI API calls,
 eliminating the ~400MB torch RAM overhead on Render free tier.
 
-Model: voyage-3-lite — 1024 dims, fast, generous free tier (200M tokens/month).
-Requires: VOYAGE_API_KEY in environment.
+Model: voyage-3.5-lite — 512 dims, improved retrieval quality over voyage-3-lite
+at the same price ($0.02/M tokens). Requires: VOYAGE_API_KEY in environment.
 """
 
 from dataclasses import dataclass
@@ -47,7 +47,7 @@ class VectorStore:
         conn = self._get_conn()
         cur = conn.cursor()
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        # 1024 dims for voyage-3-lite
+        # 512 dims — voyage-3.5-lite native output dimension
         cur.execute("""
             CREATE TABLE IF NOT EXISTS embeddings (
                 chunk_id    TEXT PRIMARY KEY,
@@ -71,13 +71,13 @@ class VectorStore:
         batch_size = 128
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
-            result = self.client.embed(batch, model="voyage-3-lite", input_type="document")
+            result = self.client.embed(batch, model="voyage-3.5-lite", input_type="document")
             all_embeddings.extend(result.embeddings)
         return all_embeddings
 
     def embed_query(self, query: str) -> list[float]:
         """Embed a single search query."""
-        result = self.client.embed([query], model="voyage-3-lite", input_type="query")
+        result = self.client.embed([query], model="voyage-3.5-lite", input_type="query")
         return result.embeddings[0]
 
     def add_chunks(
