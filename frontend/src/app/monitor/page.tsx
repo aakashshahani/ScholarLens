@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api, MonitorDigest, MonitorScanResponse, MonitorTopic } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { api, MonitorDigest, MonitorTopic } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, SectionLabel } from "@/components/ui";
 import { Radar, Plus, X, ExternalLink, AlertCircle, CheckCircle2, Clock } from "lucide-react";
 import { cache } from "@/lib/cache";
@@ -89,22 +89,52 @@ export default function MonitorPage() {
     }
   };
 
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+  useEffect(() => () => stopPolling(), []);
+
   const runScan = async () => {
     if (savedTopics.length === 0) { setError("Add at least one topic to monitor."); return; }
     setLoading(true); setError(""); setResults([]);
     try {
-      const res: MonitorScanResponse = await api.monitorScan({
+      const { job_id } = await api.monitorScan({
         topics: savedTopics.map((t) => ({ name: t.name, keywords: t.keywords, sources: t.sources })),
-        email: undefined, // digest email is read from account settings by the scheduler
+        email: undefined,
         relevanceThreshold: 0.5,
         maxPerSource: 5,
       });
-      setResults(res.digests);
-      setSourcesFailed(res.sources_failed || []);
-      cache.write("monitor_results", res.digests);
-      setShowConfig(false);
-    } catch (e: any) { setError(e.message); }
-    setLoading(false);
+
+      localStorage.setItem("sl_monitor_job", job_id);
+      stopPolling();
+      pollRef.current = setInterval(async () => {
+        try {
+          const job = await api.getJob<{ digests: MonitorDigest[]; sources_failed: string[] }>(job_id);
+          if (job.status === "done" && job.result) {
+            stopPolling();
+            localStorage.removeItem("sl_monitor_job");
+            setResults(job.result.digests);
+            setSourcesFailed(job.result.sources_failed || []);
+            cache.write("monitor_results", job.result.digests);
+            setShowConfig(false);
+            setLoading(false);
+          } else if (job.status === "error") {
+            stopPolling();
+            localStorage.removeItem("sl_monitor_job");
+            setError(job.error || "Scan failed.");
+            setLoading(false);
+          }
+        } catch (e: any) {
+          stopPolling();
+          setError(e.message);
+          setLoading(false);
+        }
+      }, 2500);
+    } catch (e: any) {
+      setError(e.message);
+      setLoading(false);
+    }
   };
 
   const totalStrong = results.reduce(
