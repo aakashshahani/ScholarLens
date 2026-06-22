@@ -454,6 +454,15 @@ export const api = {
       method: "DELETE",
     }),
 
+  testDigest: () =>
+    apiFetch<{
+      email_sent: boolean;
+      email_error: string | null;
+      papers_relevant: number;
+      topics_scanned: number;
+      sources_failed: string[];
+    }>("/api/monitor/test-digest", { method: "POST" }),
+
   // ── Graph / Insights ──────────────────────────────────────
   graph: (opts?: { paperIds?: string[]; similarityThreshold?: number; maxPairs?: number; compute?: boolean }) =>
     apiFetch<GraphPayload>("/api/graph", {

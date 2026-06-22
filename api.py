@@ -175,10 +175,16 @@ def _run_scheduled_monitor():
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     _scheduler = BackgroundScheduler(timezone="UTC")
-    _scheduler.add_job(_run_scheduled_monitor, "cron", hour=6, minute=0,
+    # MONITOR_HOUR and MONITOR_MINUTE are UTC. Default 9:00 UTC (5am ET / 2am PT /
+    # 10am London) — a reasonable wake-up time for global researchers.
+    # Set MONITOR_HOUR=6 in Render env to revert to original behavior.
+    _monitor_hour = int(os.getenv("MONITOR_HOUR", "9"))
+    _monitor_minute = int(os.getenv("MONITOR_MINUTE", "0"))
+    _scheduler.add_job(_run_scheduled_monitor, "cron",
+                       hour=_monitor_hour, minute=_monitor_minute,
                        id="daily_monitor", replace_existing=True)
     _scheduler.start()
-    print("[scheduler] Daily monitor job scheduled (06:00 UTC)")
+    print(f"[scheduler] Daily monitor job scheduled ({_monitor_hour:02d}:{_monitor_minute:02d} UTC)")
 except ImportError:
     print("[scheduler] apscheduler not installed — scheduled monitoring disabled")
     _scheduler = None
@@ -1337,6 +1343,53 @@ def delete_monitor_topic(
     if not deleted:
         raise HTTPException(status_code=404, detail="Topic not found.")
     return {"status": "deleted", "id": topic_id}
+
+
+@app.post("/api/monitor/test-digest")
+def test_digest(user: User = Depends(authlib.get_current_user)):
+    """
+    Immediately trigger the scheduled digest for the current user.
+    Sends to the user's configured digest_email. Returns 400 if no
+    digest email is set or no active topics exist.
+    Used to verify Gmail SMTP is working without waiting for 9am UTC.
+    """
+    if not user.digest_email:
+        raise HTTPException(
+            status_code=400,
+            detail="No digest email set. Go to Settings and add your email first."
+        )
+    topics_rows = db.list_monitor_topics(user.id)
+    active = [t for t in topics_rows if t.is_active]
+    if not active:
+        raise HTTPException(
+            status_code=400,
+            detail="No active monitor topics. Add a topic on the Monitor page first."
+        )
+    monitor_topics = [
+        MonitorTopic(name=t.name, keywords=t.keywords, sources=t.sources)
+        for t in active
+    ]
+    try:
+        results, email_sent, email_error, sources_failed = monitor.run_full_scan(
+            topics=monitor_topics,
+            recipient=user.digest_email,
+            user_id=user.id,
+            api_key=authlib.resolve_user_api_key(user),
+            model=_resolve_model_and_meter(user),
+        )
+        for t in active:
+            db.update_topic_scanned_at(t.id)
+        return {
+            "status": "ok",
+            "email_sent": email_sent,
+            "email_error": email_error,
+            "topics_scanned": len(active),
+            "papers_found": sum(r.papers_found for r in results),
+            "papers_relevant": sum(r.papers_relevant for r in results),
+            "sources_failed": sources_failed,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Test digest failed: {e}")
 
 
 # â”€â”€ Knowledge Graph â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

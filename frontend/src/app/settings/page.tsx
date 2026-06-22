@@ -44,6 +44,8 @@ export default function SettingsPage() {
 
   const [digestEmail, setDigestEmail] = useState("");
   const [digestSaved, setDigestSaved] = useState(false);
+  const [testDigestState, setTestDigestState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [testDigestMsg, setTestDigestMsg] = useState("");
 
   async function load() {
     const data = await api.getSettings();
@@ -119,6 +121,24 @@ export default function SettingsPage() {
     await api.updateSettings({ digestEmail: val });
     setDigestSaved(true); setTimeout(() => setDigestSaved(false), 1500);
     await refresh(); await load();
+  }
+
+  async function testDigest() {
+    setTestDigestState("sending"); setTestDigestMsg("");
+    try {
+      const r = await api.testDigest();
+      if (r.email_sent) {
+        setTestDigestState("sent");
+        setTestDigestMsg(`Digest sent — ${r.papers_relevant} relevant papers across ${r.topics_scanned} topic${r.topics_scanned !== 1 ? "s" : ""}.`);
+      } else {
+        setTestDigestState("error");
+        setTestDigestMsg(r.email_error || "Email not delivered.");
+      }
+    } catch (e: any) {
+      setTestDigestState("error");
+      setTestDigestMsg(e.message || "Test failed.");
+    }
+    setTimeout(() => { setTestDigestState("idle"); setTestDigestMsg(""); }, 8000);
   }
 
   async function signOutEverywhere() {
@@ -233,7 +253,7 @@ export default function SettingsPage() {
         <SectionLabel>Daily digest email</SectionLabel>
         <p className="text-[13px] text-[var(--text-2)] mb-3 leading-[1.5]">
           Get a daily email when the research monitor finds new relevant papers.
-          Leave blank to disable. The scheduler runs every day at 06:00 UTC.
+          Leave blank to disable. The scheduler runs every day at 09:00 UTC.
         </p>
         <div className="flex gap-2">
           <div className="relative flex-1">
@@ -259,6 +279,27 @@ export default function SettingsPage() {
             </button>
           )}
         </div>
+        {testDigestMsg && (
+          <div className="mt-2 text-[12.5px]" style={{
+            color: testDigestState === "sent" ? "var(--support)" : "var(--contra)"
+          }}>
+            {testDigestMsg}
+          </div>
+        )}
+        {digestEmail && (
+          <div className="mt-3">
+            <button
+              onClick={testDigest}
+              disabled={testDigestState === "sending"}
+              className={ghostBtn}
+            >
+              {testDigestState === "sending" ? "Sending…" : testDigestState === "sent" ? "✓ Sent" : "Send test digest now"}
+            </button>
+            <div className="text-[11px] text-[var(--text-3)] mt-1.5">
+              Triggers an immediate scan and sends the digest to your email. Scheduler runs daily at 09:00 UTC.
+            </div>
+          </div>
+        )}
       </Card>
 
       {/* ── Account ── */}

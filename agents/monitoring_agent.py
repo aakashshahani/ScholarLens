@@ -363,11 +363,15 @@ class MonitoringAgent:
             )
             results.append(result)
 
-        # Generate digest summary if there are relevant papers
-        if any(r.scored_papers for r in results):
+        # Only generate LLM summary when actually sending an email.
+        # Manual scans show a paper list in the UI — the summary is never
+        # displayed there, so generating it wastes RAM and burns an action.
+        if recipient and any(r.scored_papers for r in results):
             summary = self.generate_digest_summary(results, api_key=api_key, model=model)
-        else:
+        elif recipient:
             summary = "No new relevant papers found in today's scan."
+        else:
+            summary = ""
 
         # Send email if configured, and report what actually happened.
         email_sent = False
