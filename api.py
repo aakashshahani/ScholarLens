@@ -1840,10 +1840,12 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
     # Contradiction / consensus / nuance insights â€” from the relationships table.
     try:
         cached_rels = db.list_relationships(paper_ids=owned) if owned else []
-        claim_paper: dict[str, str] = {}
-        for p in db.list_papers(limit=200, user_id=user.id):
-            for c in db.get_claims_for_paper(p.id):
-                claim_paper[c.id] = p.title
+        # Build paper ID → title map in one DB call.
+        # Relationships store paper_a/paper_b as paper IDs so we use
+        # title_map directly instead of the old claim_id → title loop
+        # which opened N DB connections (one per paper).
+        all_lib_papers = db.list_papers(limit=200, user_id=user.id)
+        title_map = {p.id: p.title for p in all_lib_papers}
 
         def _strip_paper_prefix(sentence: str, title_a: str, title_b: str) -> str:
             """
@@ -1873,8 +1875,8 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
             if rel.relationship in ("error", "unrelated"):
                 continue
 
-            ta = claim_paper.get(rel.claim_lo, "Unknown paper")
-            tb = claim_paper.get(rel.claim_hi, "Unknown paper")
+            ta = title_map.get(rel.paper_a, "Unknown paper")
+            tb = title_map.get(rel.paper_b, "Unknown paper")
             explanation = rel.explanation or ""
             first_sentence = explanation.split(".")[0].strip() if explanation else ""
             first_sentence = _strip_paper_prefix(first_sentence, ta, tb)
@@ -1911,8 +1913,6 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
     # already represented by a relationship insight above. This is the dedup
     # that stops one paper from headlining multiple cells on the dashboard.
     for p in papers[:8]:
-        if p.title in papers_in_relationships:
-            continue
         analyses = db.get_analyses_for_paper(p.id)
         for a in analyses:
             if a.analysis_type == "research_gaps" and a.content:
