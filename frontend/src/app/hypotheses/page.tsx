@@ -65,7 +65,7 @@ export default function HypothesesPage() {
         if (hyps && hyps.length > 0) {
           setHypotheses(hyps);
           // Write under the "all" key so subsequent loads with no selection hit this
-          cache.write(selectionCacheKey([]), hyps);
+          cache.write(selectionCacheKey([], papers), hyps);
         } else {
           setShowConfig(true);
         }

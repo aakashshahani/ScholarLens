@@ -116,9 +116,20 @@ export default function Dashboard() {
       .then((rows) => { cache.write("insights_long", rows); applyInsightsLong(rows); })
       .catch(() => {});
 
-    // Hypotheses (already cache-first)
+    // Hypotheses — localStorage first, then API fallback.
+    // The dashboard uses a flat "hypotheses" key but the hypotheses page
+    // writes under "hypotheses:all" or "hypotheses:<ids>" — so localStorage
+    // may miss it. Always fetch from the API to get the real cached value.
     const cachedHypos = cache.read<Hypothesis[]>("hypotheses");
     if (cachedHypos?.length) setTopHypo(cachedHypos[0]);
+    api.getCachedHypotheses()
+      .then((hyps) => {
+        if (hyps && hyps.length > 0) {
+          setTopHypo(hyps[0]);
+          cache.write("hypotheses", hyps);
+        }
+      })
+      .catch(() => {});
 
     // Graph topics (already cache-first)
     const cachedGraph = cache.read<GraphPayload>("graph");
@@ -156,9 +167,11 @@ export default function Dashboard() {
   const usedPaperTitles = new Set<string>();
   if (topContra) { usedPaperTitles.add(topContra.paper_a); usedPaperTitles.add(topContra.paper_b); }
 
-  const gapInsight = insights.find(
-    (i) => i.type === "gap" && !(i.papers || []).some((t) => usedPaperTitles.has(t))
-  ) || insights.find((i) => i.type === "gap") || null;
+  // Show gap insights regardless of which papers appeared in contradiction cards.
+  // The previous dedup skipped all papers in relationships — with an active scan,
+  // that meant zero gap insights ever surfaced. Gap and contradiction insights
+  // can share papers; they show different signals.
+  const gapInsight = insights.find((i) => i.type === "gap") || null;
   if (gapInsight) (gapInsight.papers || []).forEach((t) => usedPaperTitles.add(t));
 
   if (error) return (
