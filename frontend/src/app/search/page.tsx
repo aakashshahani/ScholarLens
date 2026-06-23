@@ -3,15 +3,15 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type SearchResult } from "@/lib/api";
 import { cache } from "@/lib/cache";
-import { Card, EmptyState } from "@/components/ui";
-import { Search, Sparkles, Trash2, ChevronDown, ChevronUp } from "lucide-react";
+import { Card } from "@/components/ui";
+import { Sparkles, Trash2, ChevronDown, ChevronUp, ArrowUp } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface Exchange {
   id: string;
   question: string;
-  answer: string | null;       // null while loading
+  answer: string | null;
   sources: SearchResult[];
   answerLoading: boolean;
   answerError: string | null;
@@ -20,12 +20,18 @@ interface Exchange {
 const CACHE_KEY = "search_conversation";
 const POLL_INTERVAL = 2500;
 
-// ── Source passages (collapsed by default) ────────────────────────────────────
+const SUGGESTIONS = [
+  "What are the main contradictions across these papers?",
+  "How do these papers measure negotiation outcomes?",
+  "What research gaps do these papers identify?",
+  "Which methodologies are most common in this literature?",
+];
+
+// ── Source passages ───────────────────────────────────────────────────────────
 
 function SourcePassages({ sources }: { sources: SearchResult[] }) {
   const [open, setOpen] = useState(false);
 
-  // Group by paper
   const byPaper = sources.reduce<Record<string, SearchResult[]>>((acc, s) => {
     if (!acc[s.paper_id]) acc[s.paper_id] = [];
     acc[s.paper_id].push(s);
@@ -36,27 +42,28 @@ function SourcePassages({ sources }: { sources: SearchResult[] }) {
   if (sources.length === 0) return null;
 
   return (
-    <div className="mt-3 pt-3 border-t border-[var(--line)]">
+    <div className="mt-4 pt-3 border-t border-[var(--line)]">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1.5 text-[11px] text-[var(--text-3)] hover:text-[var(--text-2)] t-all"
+        className="flex items-center gap-1.5 text-[11.5px] text-[var(--text-3)] hover:text-[var(--gen)] t-all font-medium"
       >
         {open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-        {papers.length} source paper{papers.length !== 1 ? "s" : ""} · {sources.length} passage{sources.length !== 1 ? "s" : ""}
+        {papers.length} source{papers.length !== 1 ? "s" : ""} · {sources.length} passage{sources.length !== 1 ? "s" : ""}
       </button>
       {open && (
-        <div className="mt-2.5 space-y-3">
+        <div className="mt-3 space-y-4">
           {papers.map((group) => (
             <div key={group[0].paper_id}>
-              <div className="text-[12px] font-medium text-[var(--text-1)] mb-1.5">
+              <div className="text-[12px] font-semibold text-[var(--text-1)] mb-2 flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-[var(--gen)] shrink-0" />
                 {group[0].paper_title}
               </div>
               {group.map((s, i) => (
-                <div key={i} className="ml-2 pl-2.5 border-l border-[var(--line-2)] mb-2">
-                  <div className="text-[10.5px] text-[var(--text-4)] uppercase tracking-wide mb-0.5">
+                <div key={i} className="ml-3 pl-3 border-l-2 border-[var(--gen-line)] mb-2.5">
+                  <div className="text-[10px] text-[var(--text-4)] uppercase tracking-widest mb-1 font-medium">
                     {s.section || "general"}
                   </div>
-                  <div className="text-[12.5px] text-[var(--text-2)] leading-relaxed">
+                  <div className="text-[12.5px] text-[var(--text-2)] leading-[1.65]">
                     {s.text}
                   </div>
                 </div>
@@ -69,48 +76,112 @@ function SourcePassages({ sources }: { sources: SearchResult[] }) {
   );
 }
 
-// ── Single exchange (question + answer + sources) ─────────────────────────────
+// ── Exchange ──────────────────────────────────────────────────────────────────
 
 function ExchangeCard({ exchange }: { exchange: Exchange }) {
   return (
-    <div className="mb-6">
-      {/* Question */}
-      <div className="flex justify-end mb-3">
-        <div className="max-w-[80%] px-4 py-2.5 rounded-[var(--r-lg)] bg-[var(--gen)] text-white text-[13.5px] leading-[1.6]">
+    <div className="mb-8">
+      {/* Question bubble */}
+      <div className="flex justify-end mb-4">
+        <div className="max-w-[75%] px-4 py-3 rounded-2xl rounded-br-sm bg-[var(--gen)] text-white text-[14px] leading-[1.6] shadow-sm">
           {exchange.question}
         </div>
       </div>
 
-      {/* Answer + sources */}
+      {/* Answer */}
       <div className="flex gap-3">
-        <div className="w-7 h-7 rounded-[7px] bg-[var(--gen-dim)] border border-[var(--gen-line)] shrink-0 flex items-center justify-center mt-0.5">
-          <Sparkles size={13} className="text-[var(--gen)]" />
+        {/* Avatar */}
+        <div className="w-8 h-8 rounded-[9px] bg-[var(--gen)] shrink-0 flex items-center justify-center mt-0.5 shadow-sm">
+          <span className="w-3 h-3 rounded-full border-[1.5px] border-white opacity-90" />
         </div>
+
         <div className="flex-1 min-w-0">
-          <Card className="!p-4">
-            {exchange.answerLoading ? (
-              <div className="flex items-center gap-2">
-                <div className="flex gap-1">
-                  {[0, 1, 2].map((i) => (
-                    <span key={i} className="w-1.5 h-1.5 rounded-full bg-[var(--gen)] animate-pulse"
-                      style={{ animationDelay: `${i * 150}ms` }} />
-                  ))}
-                </div>
-                <span className="text-[12.5px] text-[var(--text-3)]">Searching your library…</span>
+          {exchange.answerLoading ? (
+            <div className="flex items-center gap-3 py-3">
+              <div className="flex gap-1.5">
+                {[0, 1, 2].map((i) => (
+                  <span
+                    key={i}
+                    className="w-2 h-2 rounded-full bg-[var(--gen)] opacity-60"
+                    style={{
+                      animation: "pulse 1.4s ease-in-out infinite",
+                      animationDelay: `${i * 0.2}s`,
+                    }}
+                  />
+                ))}
               </div>
-            ) : exchange.answerError ? (
-              <div className="text-[13px] text-[var(--contra)]">{exchange.answerError}</div>
-            ) : (
-              <>
-                <div className="text-[13.5px] text-[var(--text-1)] leading-[1.75] whitespace-pre-wrap">
-                  {exchange.answer}
-                </div>
-                <SourcePassages sources={exchange.sources} />
-              </>
-            )}
-          </Card>
+              <span className="text-[13px] text-[var(--text-3)]">Searching your library…</span>
+            </div>
+          ) : exchange.answerError ? (
+            <div className="text-[13px] text-[var(--contra)] py-2">{exchange.answerError}</div>
+          ) : (
+            <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-2xl rounded-tl-sm p-4 shadow-sm">
+              <div className="text-[14px] text-[var(--text-1)] leading-[1.8] whitespace-pre-wrap">
+                {exchange.answer}
+              </div>
+              <SourcePassages sources={exchange.sources} />
+            </div>
+          )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Input bar (shared between hero and bottom) ────────────────────────────────
+
+function InputBar({
+  inputRef,
+  value,
+  onChange,
+  onSubmit,
+  submitting,
+  autoFocus,
+  size = "default",
+}: {
+  inputRef: React.RefObject<HTMLInputElement>;
+  value: string;
+  onChange: (v: string) => void;
+  onSubmit: () => void;
+  submitting: boolean;
+  autoFocus?: boolean;
+  size?: "hero" | "default";
+}) {
+  const isHero = size === "hero";
+
+  return (
+    <div
+      className={`flex items-center gap-2 rounded-2xl border bg-[var(--surface-1)] t-all shadow-sm ${
+        isHero
+          ? "p-3 border-[var(--line-2)] focus-within:border-[var(--gen-line)] focus-within:shadow-[0_0_0_3px_var(--gen-dim)]"
+          : "p-2.5 border-[var(--line)] focus-within:border-[var(--gen-line)]"
+      }`}
+    >
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        autoFocus={autoFocus}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+        placeholder={isHero ? "Ask anything about your research…" : "Ask a follow-up…"}
+        className={`flex-1 bg-transparent text-[var(--text-1)] placeholder:text-[var(--text-4)] outline-none ${
+          isHero ? "text-[15px] px-1 py-0.5" : "text-[13.5px] px-1"
+        }`}
+      />
+      <button
+        onClick={onSubmit}
+        disabled={submitting || !value.trim()}
+        className={`flex items-center justify-center rounded-[10px] bg-[var(--gen)] text-white t-all hover:opacity-90 disabled:opacity-35 disabled:pointer-events-none shrink-0 ${
+          isHero ? "w-10 h-10" : "w-8 h-8"
+        }`}
+      >
+        {submitting ? (
+          <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+        ) : (
+          <ArrowUp size={isHero ? 17 : 14} strokeWidth={2.5} />
+        )}
+      </button>
     </div>
   );
 }
@@ -123,24 +194,20 @@ export default function SearchPage() {
   const [submitting, setSubmitting] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const heroInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Load history from cache on mount
   useEffect(() => {
     const saved = cache.read<Exchange[]>(CACHE_KEY);
-    if (saved?.length) {
-      setExchanges(saved.filter((e) => !e.answerLoading));
-    }
+    if (saved?.length) setExchanges(saved.filter((e) => !e.answerLoading));
   }, []);
 
-  // Persist history on change (skip loading states)
   useEffect(() => {
     if (exchanges.length > 0) {
       cache.write(CACHE_KEY, exchanges.filter((e) => !e.answerLoading));
     }
   }, [exchanges]);
 
-  // Scroll to bottom on new exchanges
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [exchanges]);
@@ -164,27 +231,23 @@ export default function SearchPage() {
     if (!q || submitting) return;
 
     const exchangeId = crypto.randomUUID();
-    const newExchange: Exchange = {
+    setExchanges((prev) => [...prev, {
       id: exchangeId,
       question: q,
       answer: null,
       sources: [],
       answerLoading: true,
       answerError: null,
-    };
-
-    setExchanges((prev) => [...prev, newExchange]);
+    }]);
     setInput("");
     setSubmitting(true);
 
-    // Run semantic search immediately (fast, no LLM)
     const sourcesPromise = api.search(q, 6).catch(() => [] as SearchResult[]);
 
     try {
       const history = buildHistory();
       const { job_id } = await api.ask(q, undefined, history);
 
-      // Poll for answer
       stopPolling();
       pollRef.current = setInterval(async () => {
         try {
@@ -192,47 +255,39 @@ export default function SearchPage() {
           if (job.status === "done" && job.result) {
             stopPolling();
             const sources = await sourcesPromise;
-            setExchanges((prev) =>
-              prev.map((e) =>
-                e.id === exchangeId
-                  ? { ...e, answer: job.result!.answer, sources, answerLoading: false }
-                  : e
-              )
-            );
+            setExchanges((prev) => prev.map((e) =>
+              e.id === exchangeId
+                ? { ...e, answer: job.result!.answer, sources, answerLoading: false }
+                : e
+            ));
             setSubmitting(false);
           } else if (job.status === "error") {
             stopPolling();
             const sources = await sourcesPromise;
-            setExchanges((prev) =>
-              prev.map((e) =>
-                e.id === exchangeId
-                  ? { ...e, sources, answerLoading: false, answerError: job.error || "Something went wrong." }
-                  : e
-              )
-            );
+            setExchanges((prev) => prev.map((e) =>
+              e.id === exchangeId
+                ? { ...e, sources, answerLoading: false, answerError: job.error || "Something went wrong." }
+                : e
+            ));
             setSubmitting(false);
           }
         } catch (e: any) {
           stopPolling();
-          setExchanges((prev) =>
-            prev.map((ex) =>
-              ex.id === exchangeId
-                ? { ...ex, answerLoading: false, answerError: e.message }
-                : ex
-            )
-          );
+          setExchanges((prev) => prev.map((ex) =>
+            ex.id === exchangeId
+              ? { ...ex, answerLoading: false, answerError: e.message }
+              : ex
+          ));
           setSubmitting(false);
         }
       }, POLL_INTERVAL);
     } catch (e: any) {
       const sources = await sourcesPromise;
-      setExchanges((prev) =>
-        prev.map((ex) =>
-          ex.id === exchangeId
-            ? { ...ex, sources, answerLoading: false, answerError: e.message }
-            : ex
-        )
-      );
+      setExchanges((prev) => prev.map((ex) =>
+        ex.id === exchangeId
+          ? { ...ex, sources, answerLoading: false, answerError: e.message }
+          : ex
+      ));
       setSubmitting(false);
     }
   }
@@ -242,94 +297,114 @@ export default function SearchPage() {
     setExchanges([]);
     cache.clear(CACHE_KEY);
     setSubmitting(false);
-    inputRef.current?.focus();
+    setTimeout(() => heroInputRef.current?.focus(), 50);
   }
 
   useEffect(() => () => stopPolling(), []);
 
   const isEmpty = exchanges.length === 0;
 
-  const SUGGESTIONS = [
-    "What are the main contradictions across these papers?",
-    "How do these papers measure negotiation outcomes?",
-    "What methodologies are most common in this literature?",
-    "What research gaps do these papers identify?",
-  ];
-
-  return (
-    <div className="flex flex-col h-[calc(100vh-64px)] max-w-[800px]">
-      {/* Header */}
-      <div className="flex items-center justify-between py-5 shrink-0">
-        <div>
-          <h1 className="font-display text-[22px] text-[var(--text-1)]">Search</h1>
-          <p className="text-[13px] text-[var(--text-3)] mt-0.5">
-            Ask questions or search for passages across your library.
-            Answers are grounded in your papers — sources shown below each response.
-          </p>
+  // ── Empty state: hero centered layout ─────────────────────────────────────
+  if (isEmpty) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[calc(100vh-120px)] max-w-[680px] mx-auto px-4">
+        {/* Logo mark */}
+        <div className="mb-8 flex flex-col items-center gap-4">
+          <div className="w-14 h-14 rounded-[16px] bg-[var(--gen)] flex items-center justify-center shadow-lg"
+            style={{ boxShadow: "0 8px 32px var(--gen-dim), 0 0 0 1px var(--gen-line)" }}>
+            <Sparkles size={24} className="text-white" />
+          </div>
+          <div className="text-center">
+            <h1 className="font-display text-[28px] text-[var(--text-1)] tracking-tight leading-tight mb-2">
+              Ask your library
+            </h1>
+            <p className="text-[14px] text-[var(--text-3)] max-w-[360px] leading-relaxed">
+              Get synthesized answers from your research papers.
+              Every response cites its sources.
+            </p>
+          </div>
         </div>
-        {!isEmpty && (
-          <button onClick={clear}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] text-[12.5px] text-[var(--text-3)] t-all hover:text-[var(--contra)] hover:border-[var(--contra-line)]">
-            <Trash2 size={13} /> Clear
-          </button>
-        )}
-      </div>
 
-      {/* Exchange list */}
-      <div className="flex-1 overflow-y-auto py-2">
-        {isEmpty ? (
-          <div className="flex flex-col items-center justify-center h-full gap-5 pb-20">
-            <div className="w-12 h-12 rounded-[12px] bg-[var(--surface-2)] border border-[var(--line)] flex items-center justify-center">
-              <Search size={20} className="text-[var(--text-3)]" />
-            </div>
-            <div className="text-center">
-              <div className="text-[15px] font-medium text-[var(--text-1)] mb-1.5">
-                Search your research library
-              </div>
-              <div className="text-[13px] text-[var(--text-3)] max-w-[400px] leading-relaxed">
-                Ask questions and get synthesized answers, or search for specific passages.
-                Source papers are shown below every answer.
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-2 w-full max-w-[520px]">
-              {SUGGESTIONS.map((s) => (
-                <button key={s} onClick={() => { setInput(s); inputRef.current?.focus(); }}
-                  className="text-left px-3.5 py-2.5 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-1)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--gen-line)] hover:text-[var(--text-1)] leading-snug">
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="py-2">
-            {exchanges.map((ex) => <ExchangeCard key={ex.id} exchange={ex} />)}
-            <div ref={bottomRef} />
-          </div>
-        )}
-      </div>
-
-      {/* Input */}
-      <div className="shrink-0 pb-4 pt-2">
-        <div className="flex gap-2 items-center p-2 rounded-[var(--r-lg)] border border-[var(--line)] bg-[var(--surface-1)] focus-within:border-[var(--gen-line)] t-all">
-          <Search size={15} className="text-[var(--text-4)] shrink-0 ml-1.5" />
-          <input
-            ref={inputRef}
-            type="text"
+        {/* Hero input */}
+        <div className="w-full mb-5">
+          <InputBar
+            inputRef={heroInputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submit()}
-            placeholder="Ask a question or search for a topic…"
-            className="flex-1 bg-transparent text-[13.5px] text-[var(--text-1)] placeholder:text-[var(--text-4)] outline-none py-1.5"
+            onChange={setInput}
+            onSubmit={submit}
+            submitting={submitting}
+            autoFocus
+            size="hero"
           />
-          <button onClick={submit} disabled={submitting || !input.trim()}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-[var(--r-md)] bg-[var(--gen)] text-white text-[12.5px] font-medium t-all hover:opacity-90 disabled:opacity-40 disabled:pointer-events-none shrink-0">
-            <Sparkles size={13} />
-            {submitting ? "Thinking…" : "Ask"}
-          </button>
         </div>
-        <div className="text-[11px] text-[var(--text-4)] mt-1.5 px-1">
-          Press Enter to submit · answers are grounded in your library · follow-up questions work
+
+        {/* Suggestion chips */}
+        <div className="w-full grid grid-cols-2 gap-2">
+          {SUGGESTIONS.map((s) => (
+            <button
+              key={s}
+              onClick={() => {
+                setInput(s);
+                heroInputRef.current?.focus();
+              }}
+              className="text-left px-4 py-3 rounded-[14px] border border-[var(--line)] bg-[var(--surface-1)] text-[13px] text-[var(--text-2)] t-all hover:border-[var(--gen-line)] hover:bg-[var(--surface-2)] hover:text-[var(--text-1)] leading-snug group"
+            >
+              <span className="text-[var(--gen)] text-[11px] font-medium uppercase tracking-wide block mb-0.5 opacity-0 group-hover:opacity-100 t-all">
+                Try this
+              </span>
+              {s}
+            </button>
+          ))}
         </div>
+
+        <p className="mt-5 text-[11.5px] text-[var(--text-4)] text-center">
+          Follow-up questions work · answers stay in sync with your library
+        </p>
+      </div>
+    );
+  }
+
+  // ── Conversation state ────────────────────────────────────────────────────
+  return (
+    <div className="flex flex-col h-[calc(100vh-64px)] max-w-[760px]">
+      {/* Compact header */}
+      <div className="flex items-center justify-between pt-4 pb-3 shrink-0 border-b border-[var(--line)] mb-1">
+        <div className="flex items-center gap-2.5">
+          <div className="w-6 h-6 rounded-[7px] bg-[var(--gen)] flex items-center justify-center">
+            <Sparkles size={12} className="text-white" />
+          </div>
+          <span className="text-[13.5px] font-medium text-[var(--text-1)]">Search</span>
+          <span className="text-[11.5px] text-[var(--text-4)]">
+            {exchanges.length} exchange{exchanges.length !== 1 ? "s" : ""}
+          </span>
+        </div>
+        <button
+          onClick={clear}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12px] text-[var(--text-3)] border border-[var(--line)] t-all hover:text-[var(--contra)] hover:border-[var(--contra-line)]"
+        >
+          <Trash2 size={12} /> Clear
+        </button>
+      </div>
+
+      {/* Conversation */}
+      <div className="flex-1 overflow-y-auto py-4 px-1">
+        {exchanges.map((ex) => <ExchangeCard key={ex.id} exchange={ex} />)}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Anchored input */}
+      <div className="shrink-0 pb-4 pt-2">
+        <InputBar
+          inputRef={inputRef}
+          value={input}
+          onChange={setInput}
+          onSubmit={submit}
+          submitting={submitting}
+          size="default"
+        />
+        <p className="text-[11px] text-[var(--text-4)] mt-2 px-1">
+          Follow-up questions work — the model remembers this conversation
+        </p>
       </div>
     </div>
   );
