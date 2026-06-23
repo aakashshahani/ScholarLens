@@ -164,7 +164,7 @@ export default function LibraryPage() {
                       )}
                       {done > 0 && (
                         <div className="flex flex-wrap gap-1">
-                          {orderAnalyses(p.analysis_types).map((t) => <AnalysisTag key={t} type={t} />)}
+                          {orderAnalyses(p.analysis_types || []).map((t) => <AnalysisTag key={t} type={t} />)}
                         </div>
                       )}
                       {done === 0 && <span className="text-[11px] text-[var(--text-4)]">Analysis pending…</span>}
@@ -213,7 +213,7 @@ export default function LibraryPage() {
                   <div className="mb-5">
                     <div className="text-[10.5px] font-medium text-[var(--text-4)] uppercase tracking-wider mb-2">Analyses</div>
                     <div className="flex flex-wrap gap-1">
-                      {orderAnalyses(selected.analysis_types).map((t) => <AnalysisTag key={t} type={t} />)}
+                      {orderAnalyses(selected.analysis_types || []).map((t) => <AnalysisTag key={t} type={t} />)}
                       {(selected.analysis_types?.length || 0) === 0 && (
                         <span className="text-[12px] text-[var(--text-3)]">None yet — analysis pending</span>
                       )}
