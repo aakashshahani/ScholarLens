@@ -139,7 +139,7 @@ function InputBar({
   autoFocus,
   size = "default",
 }: {
-  inputRef: React.RefObject<HTMLInputElement>;
+  inputRef: React.RefObject<HTMLInputElement | null>;
   value: string;
   onChange: (v: string) => void;
   onSubmit: () => void;
