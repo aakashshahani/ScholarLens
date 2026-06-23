@@ -46,6 +46,7 @@ from agents import (
     MonitoringAgent,
     MonitorTopic,
 )
+from agents.paper_import import ImportResult
 
 # â”€â”€ App Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -249,6 +250,10 @@ _INSIGHT_CACHE_TTL = 2 * 60 * 60  # 2 hours in seconds
 # user so one account's feed is never served to another.
 _insight_cache: dict[str, dict] = {}
 
+# Embedding count cache: pgvector COUNT(*) is called on every /health probe
+# (Render UptimeRobot pings every minute). Cache for 60s to avoid constant load.
+_embedding_count_cache: dict[str, object] = {"value": 0, "ts": 0.0}
+
 
 def _invalidate_insight_cache():
     """Call this any time the library changes so the feed reflects it
@@ -323,10 +328,6 @@ class MonitorTopicRequest(BaseModel):
     sources: list[str] = Field(
         default=["semantic_scholar", "openalex", "arxiv"],
     )
-
-    @classmethod
-    def validate_keywords(cls, v):
-        return [kw[:100] for kw in v if kw.strip()][:10]
 
 
 # â”€â”€ Background task helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -567,12 +568,14 @@ def health_root():
 @limiter.exempt
 def health():
     errors = settings.validate()
-    papers = db.list_papers(limit=1000)
-    paper_count = len(papers)
-    embedding_count = agent.vector_store.count()
+    paper_count, latest_paper = db.paper_stats()
+    now_ts = _time.time()
+    if now_ts - _embedding_count_cache["ts"] > 60:
+        _embedding_count_cache["value"] = agent.vector_store.count()
+        _embedding_count_cache["ts"] = now_ts
+    embedding_count = _embedding_count_cache["value"]
     # Library fingerprint: changes whenever papers are added or removed.
     # Frontend uses this as a cache-bust key for contradiction results.
-    latest_paper = papers[0].created_at if papers else ""
     fingerprint = f"{paper_count}:{latest_paper}"
     return {
         "status": "ok" if not errors else "degraded",
@@ -605,47 +608,18 @@ def fix_abstracts():
             result = importer.lookup(p.title)
             if result and result.abstract and len(result.abstract) > len(p.abstract or ""):
                 clean = _normalize_abstract(result.abstract)
-                import psycopg2
-                conn = psycopg2.connect(db._dsn)
-                cur = conn.cursor()
-                cur.execute("UPDATE papers SET abstract=%s WHERE id=%s", (clean, p.id))
-                conn.commit()
-                cur.close()
-                conn.close()
+                _conn = db._get_conn()
+                _cur = _conn.cursor()
+                _cur.execute("UPDATE papers SET abstract=%s WHERE id=%s", (clean, p.id))
+                _conn.commit()
+                _cur.close()
+                db._put_conn(_conn)
                 updated += 1
                 print(f"Fixed abstract for: {p.title[:60]}")
         except Exception as e:
             print(f"Failed to fix abstract for {p.title[:40]}: {e}")
     return {"updated": updated, "checked": sum(1 for p in papers if p.source == "arxiv")}
 
-
-
-def normalize_abstracts():
-    """
-    One-time migration: normalize abstracts already in the DB.
-
-    arXiv and Semantic Scholar return abstracts with embedded newlines
-    (line-wrapped at ~80 chars). This cleans all existing records so
-    the UI truncates at sentence boundaries rather than mid-word.
-
-    Safe to run multiple times â€” idempotent.
-    """
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-    conn = psycopg2.connect(db._dsn, cursor_factory=RealDictCursor)
-    cur = conn.cursor()
-    cur.execute("SELECT id, abstract FROM papers WHERE abstract IS NOT NULL")
-    papers = cur.fetchall()
-    updated = 0
-    for row in papers:
-        cleaned = _normalize_abstract(row["abstract"])
-        if cleaned != row["abstract"]:
-            cur.execute("UPDATE papers SET abstract=%s WHERE id=%s", (cleaned, row["id"]))
-            updated += 1
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"updated": updated, "total": len(papers)}
 
 
 # â”€â”€ Papers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -736,18 +710,7 @@ def delete_paper(paper_id: str, user: User = Depends(authlib.get_current_user)):
     agent.vector_store.delete_paper_chunks(paper_id)
     db.delete_paper(paper_id)
     # Purge relationships referencing this paper's claims (no FK cascade on those)
-    if claim_ids:
-        _conn = db._get_conn()
-        _cur = _conn.cursor()
-        try:
-            _cur.execute(
-                "DELETE FROM relationships WHERE claim_lo = ANY(%s) OR claim_hi = ANY(%s)",
-                (claim_ids, claim_ids),
-            )
-            _conn.commit()
-        finally:
-            _cur.close()
-            db._put_conn(_conn)
+    db.delete_relationships_for_claims(claim_ids)
     _invalidate_insight_cache()
     return {"status": "deleted", "id": paper_id}
 
@@ -913,12 +876,8 @@ def search_papers(request: Request, req: SearchRequest,
         paper_ids=owned_ids,
     )
 
-    # Batch paper title lookup — one pass instead of one DB call per result (N+1)
-    unique_pids = list({r.paper_id for r in results})
-    paper_title_map = {}
-    for pid in unique_pids:
-        p = db.get_paper(pid)
-        paper_title_map[pid] = p.title if p else "Unknown"
+    # Batch paper title lookup — one query instead of one DB call per result
+    paper_title_map = db.get_paper_titles(list({r.paper_id for r in results}))
 
     response = []
     for r in results:
@@ -1094,13 +1053,15 @@ def list_contradictions(user: User = Depends(authlib.get_current_user)):
         return []
     rels = db.list_relationships(paper_ids=owned, strict=True)
 
-    # Build a claim-id -> claim object map once (DB read, no LLM).
+    # Build claim-id → claim map in two queries (one for titles, one for all claims)
+    title_map = db.paper_title_map(user.id)
+    claims_by_paper = db.get_claims_for_papers(list(title_map.keys()))
     claim_by_id = {}
     claim_paper_title = {}
-    for p in db.list_papers(limit=200, user_id=user.id):
-        for c in db.get_claims_for_paper(p.id):
+    for pid, ptitle in title_map.items():
+        for c in claims_by_paper.get(pid, []):
             claim_by_id[c.id] = c
-            claim_paper_title[c.id] = p.title
+            claim_paper_title[c.id] = ptitle
 
     out = []
     for r in rels:
@@ -1209,7 +1170,7 @@ def get_cached_hypotheses(user: User = Depends(authlib.get_current_user)):
     Returns [] if no cache exists yet.
     """
     paper_ids = db.list_paper_ids_for_user(user.id)
-    entries = db.list_hypothesis_cache(paper_ids)
+    entries = db.list_hypothesis_cache(paper_ids, user_id=user.id)
     if not entries:
         return []
     # Return the most recent entry's hypotheses
@@ -1218,7 +1179,8 @@ def get_cached_hypotheses(user: User = Depends(authlib.get_current_user)):
 
 
 def _hypothesis_bg(job_id: str, research_question: str | None, scope: list[str],
-                    num_hypotheses: int, refresh: bool, api_key: str | None, model: str):
+                    num_hypotheses: int, refresh: bool, api_key: str | None, model: str,
+                    user_id: str | None = None):
     try:
         hypotheses = hypothesis_agent.generate(
             research_question=research_question,
@@ -1227,6 +1189,7 @@ def _hypothesis_bg(job_id: str, research_question: str | None, scope: list[str],
             force_refresh=refresh,
             api_key=api_key,
             model=model,
+            user_id=user_id,
         )
         _finish_job(job_id, [
             {
@@ -1266,6 +1229,7 @@ def generate_hypotheses(request: Request, req: HypothesisRequest,
         _hypothesis_bg, job_id, req.research_question, scope,
         req.num_hypotheses, req.refresh,
         authlib.resolve_user_api_key(user), _resolve_model_and_meter(user),
+        user.id,
     )
     return {"job_id": job_id, "status": "running"}
 
@@ -1334,9 +1298,8 @@ def _normalize_abstract(text: str | None) -> str:
     """
     if not text:
         return ""
-    import re as _re
     text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-    text = _re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
     return text.strip()
 
 
@@ -1348,8 +1311,6 @@ def import_add(
     background_tasks: BackgroundTasks = BackgroundTasks(),
     user: User = Depends(authlib.get_current_user),
 ):
-    from agents.paper_import import ImportResult
-
     result = ImportResult(
         title=req.title,
         authors=req.authors,
@@ -1836,7 +1797,6 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
     (default 2 hours). Invalidated immediately on any paper add or delete so
     the feed always reflects the current library state after writes.
     """
-    import uuid
 
     # â”€â”€ Cache read â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     now = _time.time()
@@ -1882,8 +1842,7 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
         # Relationships store paper_a/paper_b as paper IDs so we use
         # title_map directly instead of the old claim_id → title loop
         # which opened N DB connections (one per paper).
-        all_lib_papers = db.list_papers(limit=200, user_id=user.id)
-        title_map = {p.id: p.title for p in all_lib_papers}
+        title_map = db.paper_title_map(user.id)
 
         def _strip_paper_prefix(sentence: str, title_a: str, title_b: str) -> str:
             """
@@ -1962,6 +1921,13 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
             if a.analysis_type == "research_gaps" and a.content:
                 lines = [l.strip() for l in a.content.strip().split("\n") if l.strip()]
                 first = lines[0][:180] if lines else ""
+                # Fix Windows-1252 mojibake stored by older pipeline runs
+                first = (first
+                         .replace('\u00e2\u20ac\u00a6', '\u2026')  # ae... -> ...
+                         .replace('\u00e2\u20ac\u2122', '\u2019')  # ae(tm) -> '
+                         .replace('\u00e2\u20ac\u0153', '\u201c')  # aeoelig -> ldquo
+                         .replace('\u00e2\u20ac\u201d', '\u2014')  # ae'' -> mdash
+                         )
                 insights.append({
                     "id": str(uuid.uuid4()),
                     "type": "gap",
