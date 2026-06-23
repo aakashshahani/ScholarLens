@@ -8,6 +8,11 @@ import { cache } from "@/lib/cache";
 import { PageHeader, EmptyState, SkeletonCard, FilterChip, Card, Spinner, ProgressRing, AnalysisTag, Claim } from "@/components/ui";
 import { Search, MessageCircleQuestion, BookOpen, ArrowUpDown, FileText, ArrowRight } from "lucide-react";
 
+const ACCENTS = [
+  "var(--gen)", "var(--support)", "var(--nuance)", "var(--contra)",
+  "#a78bfa", "#f59e0b", "#06b6d4", "#ec4899",
+];
+
 // ── Markdown renderer ─────────────────────────────────────────
 
 
