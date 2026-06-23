@@ -98,12 +98,30 @@ export default function PaperDetailPage() {
     if (!question.trim()) return;
     setAsking(true); setAnswer("");
     try {
-      const r = await api.ask(`Regarding "${paper?.title}": ${question}`, paperId);
-      setAnswer(r.answer);
+      const { job_id } = await api.ask(`Regarding "${paper?.title}": ${question}`, paperId);
+      // Poll for answer
+      const interval = setInterval(async () => {
+        try {
+          const job = await api.getJob<{ answer: string }>(job_id);
+          if (job.status === "done" && job.result) {
+            clearInterval(interval);
+            setAnswer(job.result.answer);
+            setAsking(false);
+          } else if (job.status === "error") {
+            clearInterval(interval);
+            setAnswer(`Error: ${job.error || "Something went wrong."}`);
+            setAsking(false);
+          }
+        } catch (e: any) {
+          clearInterval(interval);
+          setAnswer(`Error: ${e.message}`);
+          setAsking(false);
+        }
+      }, 2500);
     } catch (e: any) {
       setAnswer(`Error: ${e.message}`);
+      setAsking(false);
     }
-    setAsking(false);
   };
 
   const handleDelete = async () => {
