@@ -13,6 +13,14 @@ const ACCENTS = [
   "#a78bfa", "#f59e0b", "#06b6d4", "#ec4899",
 ];
 
+const ANALYSIS_ORDER = ["summary", "findings", "methods", "key_claims", "limitations", "research_gaps"];
+const orderAnalyses = (types: string[]) =>
+  [...types].sort((a, b) => {
+    const ai = ANALYSIS_ORDER.indexOf(a);
+    const bi = ANALYSIS_ORDER.indexOf(b);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
+
 // ── Markdown renderer ─────────────────────────────────────────
 
 
