@@ -45,8 +45,13 @@ export default function HypothesesPage() {
 
   // Build a cache key from sorted paper IDs so switching selections
   // never shows results from a different scope.
-  const selectionCacheKey = (ids: string[]) =>
-    ids.length ? `hypotheses:${[...ids].sort().join(",")}` : "hypotheses:all";
+  const selectionCacheKey = (ids: string[], allPapers: Paper[]) => {
+    // Treat "all papers explicitly selected" the same as "none selected (= all)"
+    // so the cache hit works regardless of how the user made the selection.
+    const allSelected = ids.length === allPapers.length && allPapers.length > 0;
+    return (ids.length === 0 || allSelected) ? "hypotheses:all"
+      : `hypotheses:${[...ids].sort().join(",")}`;
+  };
 
   useEffect(() => {
     const cachedPapers = cache.read<Paper[]>("papers");
@@ -83,7 +88,7 @@ export default function HypothesesPage() {
 
   const generate = async () => {
     setLoading(true); setHypotheses([]); setError("");
-    const cacheKey = selectionCacheKey(selectedIds);
+    const cacheKey = selectionCacheKey(selectedIds, papers);
 
     // Serve from localStorage cache if library hasn't changed
     if (!libraryChanged) {
@@ -99,7 +104,10 @@ export default function HypothesesPage() {
     try {
       const { job_id } = await api.generateHypotheses({
         researchQuestion: question || undefined,
-        paperIds: selectedIds.length ? selectedIds : undefined,
+        // If all papers are selected or none are, pass undefined (= all papers).
+        paperIds: (selectedIds.length === 0 || selectedIds.length === papers.length)
+          ? undefined
+          : selectedIds,
         numHypotheses: count,
         refresh: true,
       });
@@ -181,15 +189,28 @@ export default function HypothesesPage() {
                   className="w-full bg-[var(--surface-1)] border border-[var(--line)] rounded-[var(--r-md)] px-3.5 py-2.5 text-[13.5px] text-[var(--text-1)]" />
               </div>
               <div className="mb-5">
-                <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2.5">Focus papers · leave empty for all</div>
-                <div className="flex flex-wrap gap-1.5">
-                  {papers.map((p) => (
-                    <SelectChip key={p.id}
-                      label={p.title.length > 44 ? p.title.slice(0, 44) + "…" : p.title}
-                      active={selectedIds.includes(p.id)}
-                      onClick={() => setSelectedIds((ids) => ids.includes(p.id) ? ids.filter((x) => x !== p.id) : [...ids, p.id])} />
-                  ))}
+                <div className="flex items-center justify-between mb-2.5">
+                <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider">Focus papers · leave empty for all</div>
+                <div className="flex gap-2">
+                  <button onClick={() => setSelectedIds(papers.map(p => p.id))}
+                    className="text-[11px] text-[var(--gen)] hover:underline t-all">
+                    Select all
+                  </button>
+                  <span className="text-[11px] text-[var(--text-4)]">·</span>
+                  <button onClick={() => setSelectedIds([])}
+                    className="text-[11px] text-[var(--text-3)] hover:underline t-all">
+                    Clear
+                  </button>
                 </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {papers.map((p) => (
+                  <SelectChip key={p.id}
+                    label={p.title.length > 44 ? p.title.slice(0, 44) + "…" : p.title}
+                    active={selectedIds.includes(p.id)}
+                    onClick={() => setSelectedIds((ids) => ids.includes(p.id) ? ids.filter((x) => x !== p.id) : [...ids, p.id])} />
+                ))}
+              </div>
               </div>
               <div className="mb-5 max-w-[280px]">
                 <Slider label="Number of hypotheses" value={count} min={3} max={8} step={1} onChange={(v) => setCount(Math.round(v))} />
