@@ -12,6 +12,7 @@ This is the feature that turns ScholarLens from a tool into infrastructure.
 A researcher configures their topics once, and ScholarLens watches the field for them.
 """
 
+import html as _html
 import json
 import os
 import time
@@ -120,7 +121,7 @@ class MonitoringAgent:
                 unique.append(r)
 
         # Filter out papers already in library (by title similarity)
-        existing_titles = lib_titles if lib_titles is not None else {p.title.lower().strip()[:60] for p in self.db.list_papers(limit=500)}
+        existing_titles = lib_titles if lib_titles is not None else {t.lower().strip()[:60] for t in self.db.paper_title_map().values()}
         new_papers = [r for r in unique if r.title.lower().strip()[:60] not in existing_titles]
 
         if not new_papers:
@@ -282,7 +283,7 @@ class MonitoringAgent:
             </div>
             <div style="background: #f8fafc; padding: 24px; border: 1px solid #e2e8f0; border-top: none;">
                 <div style="line-height: 1.7; font-size: 14px; color: #334155;">
-                    {summary.replace(chr(10), '<br>')}
+                    {_html.escape(summary).replace(chr(10), '<br>')}
                 </div>
         """
         for result in results:
@@ -290,18 +291,23 @@ class MonitoringAgent:
                 html += f'<h3 style="color: #1e3a5f; margin-top: 24px; font-size: 15px;">{result.topic}</h3>'
                 for sp in result.scored_papers[:5]:
                     pdf_badge = '📄' if sp.paper.pdf_url else ''
+                    title_safe = _html.escape(sp.paper.title)
+                    authors_safe = _html.escape(', '.join(sp.paper.authors[:3]))
+                    abstract_safe = _html.escape(sp.paper.abstract[:200])
+                    reason_safe = _html.escape(sp.relevance_reason)
+                    ellipsis = '...' if len(sp.paper.abstract) > 200 else ''
                     html += f"""
                     <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px; margin-bottom: 8px;">
-                        <div style="font-weight: 600; font-size: 14px; color: #0f172a;">{pdf_badge} {sp.paper.title}</div>
+                        <div style="font-weight: 600; font-size: 14px; color: #0f172a;">{pdf_badge} {title_safe}</div>
                         <div style="font-size: 12px; color: #64748b; margin-top: 4px;">
-                            {', '.join(sp.paper.authors[:3])} · {sp.paper.year or '?'}
+                            {authors_safe} · {sp.paper.year or '?'}
                             {f' · {sp.paper.citation_count} citations' if sp.paper.citation_count else ''}
                         </div>
                         <div style="font-size: 12px; color: #06b6d4; margin-top: 4px;">
-                            Relevance: {sp.relevance_score:.0%} · {sp.relevance_reason}
+                            Relevance: {sp.relevance_score:.0%} · {reason_safe}
                         </div>
                         <div style="font-size: 13px; color: #475569; margin-top: 8px; line-height: 1.5;">
-                            {sp.paper.abstract[:200]}{'...' if len(sp.paper.abstract) > 200 else ''}
+                            {abstract_safe}{ellipsis}
                         </div>
                         <a href="{sp.paper.url}" style="font-size: 12px; color: #3b82f6; text-decoration: none;">View paper →</a>
                     </div>
@@ -353,13 +359,10 @@ class MonitoringAgent:
         limits) so the UI never claims a send that didn't happen.
         """
         self._failed_sources: set[str] = set()
-        # Scope the comparison library to this user's papers.
-        if user_id is not None:
-            lib_papers = self.db.list_papers(limit=500, user_id=user_id)
-        else:
-            lib_papers = self.db.list_papers(limit=500)
-        lib_ids = [p.id for p in lib_papers]
-        lib_titles = {p.title.lower().strip()[:60] for p in lib_papers}
+        # Fetch only id+title — avoids loading full_text for every paper in the library.
+        title_map = self.db.paper_title_map(user_id=user_id)
+        lib_ids = list(title_map.keys())
+        lib_titles = {t.lower().strip()[:60] for t in title_map.values()}
         results = []
         for topic in topics:
             result = self.scan_topic(

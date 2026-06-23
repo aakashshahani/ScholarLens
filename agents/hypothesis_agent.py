@@ -113,10 +113,7 @@ class HypothesisAgent:
 
         Changing any of these three things means the cached result is stale.
         """
-        if paper_ids:
-            scoped_ids = sorted(paper_ids)
-        else:
-            scoped_ids = sorted(p.id for p in self.db.list_papers(limit=200))
+        scoped_ids = sorted(paper_ids) if paper_ids else []
 
         watermark = self.db.relationships_watermark(
             paper_ids=paper_ids  # None → all papers
@@ -213,9 +210,7 @@ class HypothesisAgent:
                 label_to_real[label] = rel.id
                 conflict_ids.append(rel.id)
 
-            # Store mapping so post-parse can convert labels back to real IDs
-            self._label_to_real = label_to_real
-            return "\n\n".join(parts), conflict_ids, "detected_conflicts"
+            return "\n\n".join(parts), conflict_ids, "detected_conflicts", label_to_real
 
         # ── Fallback: use research_gaps from stored analyses ──
         if paper_ids:
@@ -236,8 +231,7 @@ class HypothesisAgent:
                     )
                     break  # one section per paper is enough for the fallback
 
-        self._label_to_real = {}
-        return "\n\n---\n\n".join(gap_parts), [], "single_paper_gaps"
+        return "\n\n---\n\n".join(gap_parts), [], "single_paper_gaps", {}
 
     # ── Novelty scoring ──────────────────────────────────────
 
@@ -276,12 +270,17 @@ class HypothesisAgent:
     # ── Paper map helper ─────────────────────────────────────
 
     def _build_paper_map(self, paper_ids: list[str] | None) -> dict[str, str]:
-        """Return {title: paper_id} for the scoped papers."""
+        """Return {title: paper_id} with both exact and lowercase-normalized keys
+        so LLM-generated titles that differ in case/whitespace still resolve."""
         if paper_ids:
-            papers = [self.db.get_paper(pid) for pid in paper_ids]
+            id_to_title = self.db.get_paper_titles(paper_ids)
         else:
-            papers = self.db.list_papers(limit=50)
-        return {p.title: p.id for p in papers if p is not None}
+            id_to_title = self.db.paper_title_map()
+        result = {}
+        for pid, title in id_to_title.items():
+            result[title.lower().strip()] = pid  # normalized (lower priority)
+            result[title] = pid                  # exact (wins on collision)
+        return result
 
     # ── Main entry point ─────────────────────────────────────
 
@@ -299,6 +298,7 @@ class HypothesisAgent:
         force_refresh: bool = False,
         api_key: str | None = None,
         model: str | None = None,
+        user_id: str | None = None,
     ) -> list[Hypothesis]:
         """
         Generate testable hypotheses from the library.
@@ -338,7 +338,7 @@ class HypothesisAgent:
                     # Fall through to regeneration
 
         # ── Gather grounding inputs ───────────────────────────
-        context_text, conflict_ids, grounding = self._gather_conflict_context(paper_ids)
+        context_text, conflict_ids, grounding, label_to_real = self._gather_conflict_context(paper_ids)
         if not context_text:
             return []
 
@@ -420,11 +420,21 @@ class HypothesisAgent:
 
         # ── Post-parse: validate, score, assemble ─────────────
         valid_conflict_ids = set(conflict_ids)
-        label_to_real = getattr(self, "_label_to_real", {})
         rq = research_question or "Generated from library analysis"
 
+        # Batch-embed all hypothesis statements in one Voyage call instead of
+        # one call per hypothesis inside _score_novelty.
+        statements = [item.get("statement", "") for item in parsed]
+        novelty_embeddings: list[list[float] | None] = [None] * len(statements)
+        try:
+            if statements and any(statements):
+                embeddings = self.vector_store.embed_texts(statements)
+                novelty_embeddings = embeddings  # type: ignore[assignment]
+        except Exception as e:
+            print(f"Batch novelty embedding failed (will fall back per-item): {e}")
+
         hypotheses = []
-        for item in parsed:
+        for idx, item in enumerate(parsed):
             # Validate cited conflict labels — convert CONFLICT_N → real UUID,
             # drop any the model fabricated or that don't map to real IDs
             cited = []
@@ -435,20 +445,39 @@ class HypothesisAgent:
                 if real_id and real_id in valid_conflict_ids:
                     cited.append(real_id)
 
-            # Map paper titles to IDs
+            # Map paper titles to IDs — try exact then lowercase-normalized
             supporting = []
             for sp in item.get("supporting_papers", []):
                 title = sp.get("title", "")
-                pid = paper_map.get(title, "")
+                pid = paper_map.get(title) or paper_map.get(title.lower().strip(), "")
                 supporting.append({
                     "paper_id": pid,
                     "title": title,
                     "relevant_finding": sp.get("relevant_finding", ""),
                 })
 
-            # Compute novelty via vector search — no LLM call needed
-            statement = item.get("statement", "")
-            novelty_score, novelty_tier = self._score_novelty(statement)
+            # Score novelty using pre-computed embedding when available
+            statement = statements[idx]
+            emb = novelty_embeddings[idx] if idx < len(novelty_embeddings) else None
+            if emb is not None:
+                try:
+                    results = self.vector_store.search_by_embedding(emb, n_results=3)
+                    if results:
+                        min_distance = min(r.score for r in results)
+                        score = round(min_distance, 4)
+                        if score > NOVELTY_HIGH:
+                            tier = "high"
+                        elif score < NOVELTY_LOW:
+                            tier = "low"
+                        else:
+                            tier = "medium"
+                        novelty_score, novelty_tier = score, tier
+                    else:
+                        novelty_score, novelty_tier = 0.0, "unknown"
+                except Exception:
+                    novelty_score, novelty_tier = self._score_novelty(statement)
+            else:
+                novelty_score, novelty_tier = self._score_novelty(statement)
 
             hypotheses.append(Hypothesis(
                 id=str(uuid.uuid4()),
@@ -471,6 +500,7 @@ class HypothesisAgent:
                     cache_key,
                     [h.to_dict() for h in hypotheses],
                     grounding,
+                    user_id=user_id,
                 )
             except Exception as e:
                 print(f"Hypothesis cache write failed (non-fatal): {e}")

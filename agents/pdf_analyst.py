@@ -306,8 +306,8 @@ class PDFAnalysisAgent:
         Run one targeted analysis call and persist the result.
 
         Called concurrently by analyze_paper — each invocation gets its own
-        Anthropic client call. Thread-safe: db.insert_analysis uses a new
-        SQLite connection per call (WAL mode handles concurrent writes).
+        Anthropic client call. Thread-safe: db.insert_analysis uses a
+        connection borrowed from the shared pool per call.
 
         Returns a status dict for logging.
         """
@@ -440,18 +440,16 @@ class PDFAnalysisAgent:
             )
 
         # Step 2: Format retrieved chunks as context
-        # Resolve paper titles once to avoid N DB calls
-        title_cache: dict[str, str] = {}
+        # Batch-fetch titles in one query instead of one get_paper() per unique paper
+        unique_ids = list({r.paper_id for r in results})
+        try:
+            title_map = self.db.get_paper_titles(unique_ids)
+        except Exception:
+            title_map = {}
         context_parts = []
         for r in results:
-            if r.paper_id not in title_cache:
-                try:
-                    paper = self.db.get_paper(r.paper_id)
-                    title_cache[r.paper_id] = paper.title if paper else "Unknown paper"
-                except Exception:
-                    title_cache[r.paper_id] = "Unknown paper"
+            paper_title = title_map.get(r.paper_id, "Unknown paper")
             section_label = r.section or "general"
-            paper_title = title_cache[r.paper_id]
             chunk_text = r.text[:600]
             context_parts.append(
                 f"[{paper_title} — {section_label}]\n{chunk_text}"
@@ -493,35 +491,3 @@ class PDFAnalysisAgent:
         except Exception as e:
             return f"Could not generate an answer: {e}"
 
-    def _execute_search_tool(self, tool_input: dict, paper_ids: list[str] | None = None) -> str:
-        """
-        Execute the search_paper_chunks tool for the ask() loop.
-
-        Each result is given a human-readable paper_title (resolved from the DB)
-        so the model cites by title. The raw paper_id (a UUID) and the cosine
-        score are deliberately NOT returned — exposing them caused the model to
-        echo UUID strings into its answers, and the raw score is meaningless to
-        an end user.
-        """
-        try:
-            results = self.vector_store.search(
-                query=tool_input["query"],
-                n_results=tool_input.get("n_results", 3),
-                paper_id=tool_input.get("paper_id"),
-                paper_ids=paper_ids,
-            )
-            # Resolve titles once, cache within this call
-            title_cache: dict[str, str] = {}
-            payload = []
-            for r in results:
-                if r.paper_id not in title_cache:
-                    paper = self.db.get_paper(r.paper_id)
-                    title_cache[r.paper_id] = paper.title if paper else "Unknown paper"
-                payload.append({
-                    "paper_title": title_cache[r.paper_id],
-                    "section": r.section,
-                    "text": r.text[:500],
-                })
-            return json.dumps(payload)
-        except Exception as e:
-            return json.dumps({"error": str(e)})
