@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { api, Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { Card, Spinner, EmptyState, AnalysisTag, SectionLabel } from "@/components/ui";
-import { ArrowLeft, RefreshCw, Trash2, FileText, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, RefreshCw, Trash2, FileText, CheckCircle2, SendHorizontal } from "lucide-react";
 
 export default function PaperDetailPage() {
   const params = useParams();
@@ -15,6 +15,11 @@ export default function PaperDetailPage() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState(0);
 
+
+  // Ask state
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [asking, setAsking] = useState(false);
 
   // Reanalyze state
   const [reanalyzing, setReanalyzing] = useState(false);
@@ -92,6 +97,37 @@ export default function PaperDetailPage() {
     }, 3000);
   };
 
+
+  const handleAsk = async () => {
+    if (!question.trim()) return;
+    setAsking(true); setAnswer("");
+    try {
+      const { job_id } = await api.ask(
+        `Regarding "${paper?.title}": ${question}`, paperId
+      );
+      const interval = setInterval(async () => {
+        try {
+          const job = await api.getJob<{ answer: string }>(job_id);
+          if (job.status === "done" && job.result) {
+            clearInterval(interval);
+            setAnswer(job.result.answer);
+            setAsking(false);
+          } else if (job.status === "error") {
+            clearInterval(interval);
+            setAnswer("Could not answer — try rephrasing.");
+            setAsking(false);
+          }
+        } catch {
+          clearInterval(interval);
+          setAnswer("Connection error — try again.");
+          setAsking(false);
+        }
+      }, 2000);
+    } catch (e: any) {
+      setAnswer(`Error: ${e.message}`);
+      setAsking(false);
+    }
+  };
 
   const handleDelete = async () => {
     if (!confirm("Delete this paper and all its analyses?")) return;
@@ -206,6 +242,35 @@ export default function PaperDetailPage() {
           )}
 
 
+          {/* Ask about this paper */}
+          <div className="mt-2">
+            <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2">
+              Ask about this paper
+            </div>
+            <div className="flex gap-2 mb-3">
+              <input
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleAsk()}
+                placeholder="e.g. What was the sample size? What were the main findings?"
+                className="flex-1 bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-md)] px-3.5 py-2.5 text-[13.5px] text-[var(--text-1)] outline-none focus:border-[var(--gen-line)] t-all"
+              />
+              <button
+                onClick={handleAsk}
+                disabled={asking || !question.trim()}
+                className="flex items-center gap-1.5 px-4 py-2.5 rounded-[var(--r-md)] bg-[var(--gen)] text-white text-[13px] font-medium t-all hover:opacity-90 disabled:opacity-50"
+              >
+                {asking ? "…" : <><SendHorizontal size={14} /> Ask</>}
+              </button>
+            </div>
+            {answer && (
+              <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4">
+                <div className="text-[13.5px] text-[var(--text-1)] leading-[1.7] whitespace-pre-wrap">
+                  {answer}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* ── Right sidebar ── */}

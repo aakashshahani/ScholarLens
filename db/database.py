@@ -34,8 +34,8 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     if _pool is None or _pool.closed:
         from config import settings as _s
         _pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=1,
-            maxconn=5,
+            minconn=2,
+            maxconn=10,
             dsn=_s.database_url,
         )
     return _pool

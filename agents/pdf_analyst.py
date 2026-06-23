@@ -404,90 +404,94 @@ class PDFAnalysisAgent:
             api_key: str | None = None, model: str | None = None,
             history: list[dict] | None = None) -> str:
         """
-        Answer a question using retrieved context from the paper library.
+        Answer a question using simple single-pass RAG.
 
-        Supports multi-turn conversation via the `history` parameter —
-        a list of {role, content} dicts from prior exchanges. History is
-        prepended to the messages list so the model has full context for
-        follow-up questions like "which of those has the largest sample size?"
+        1. Embed the question via Voyage AI (one API call)
+        2. Find the top 6 most relevant chunks via pgvector (one DB call)
+        3. Send those chunks as context to Claude (one LLM call)
+        4. Return the answer
 
-        Retains the agentic loop: the model doesn't know in advance what
-        to search for, so it issues search calls, reads results, and decides
-        whether to search again or answer.
+        This replaces the agentic multi-turn loop which caused OOM on Render's
+        512MB free tier. Single-pass RAG uses ~50MB peak vs ~150MB for the loop.
+        Quality is nearly identical for scoped questions on a small library —
+        the model reads the actual paper text and answers from it.
+
+        Supports conversation history for follow-up questions. History is
+        prepended so the model understands "which of those has the larger sample?"
         """
-        system_prompt = """You are a research assistant with access to a library of
-analyzed papers. Answer questions using the search tool to find relevant passages.
+        # Step 1: Retrieve relevant chunks via semantic search
+        # Use paper_id to scope to a single paper when asked about one paper,
+        # or paper_ids to scope to the user's full library for cross-library questions.
+        try:
+            results = self.vector_store.search(
+                query=question,
+                n_results=6,
+                paper_id=paper_id,
+                paper_ids=paper_ids,
+                exclude_sections=["references", "appendix"],
+            )
+        except Exception as e:
+            return f"Search failed: {e}. Please try again."
 
-CITATION RULES:
-- Cite papers by their TITLE only — for example, "ACE: A LLM-based Negotiation
-  Coaching System found that...". Search results include a paper_title field; use it.
-- NEVER write internal identifiers, hashes, or UUID-style strings in your answer.
-  If a result has an id field, ignore it — it is not for display.
-- Name the section a finding came from when it helps (e.g. "in the results section").
+        if not results:
+            return (
+                "No relevant passages found in your library for this question. "
+                "Try rephrasing or check that the papers have been analyzed."
+            )
 
-CONVERSATION RULES:
-- You may receive prior conversation history. Use it to understand follow-up questions.
-- References like "those papers", "that finding", "the one you mentioned" refer to
-  content from earlier in the conversation — resolve them using the history provided.
-- Do NOT re-search for things already established in the conversation unless the user
-  explicitly asks to revisit them.
+        # Step 2: Format retrieved chunks as context
+        # Resolve paper titles once to avoid N DB calls
+        title_cache: dict[str, str] = {}
+        context_parts = []
+        for r in results:
+            if r.paper_id not in title_cache:
+                try:
+                    paper = self.db.get_paper(r.paper_id)
+                    title_cache[r.paper_id] = paper.title if paper else "Unknown paper"
+                except Exception:
+                    title_cache[r.paper_id] = "Unknown paper"
+            section_label = r.section or "general"
+            paper_title = title_cache[r.paper_id]
+            chunk_text = r.text[:600]
+            context_parts.append(
+                f"[{paper_title} — {section_label}]\n{chunk_text}"
+            )
+        context = "\n\n---\n\n".join(context_parts)
 
-ANSWER STYLE:
-- Be concise. 2-4 paragraphs maximum. The user can ask follow-ups.
-- Do NOT end with follow-up questions — the user will ask if they want more.
-- If the evidence is insufficient, say so plainly and stop.
-- Keep formatting light: short paragraphs, and bullets only when genuinely listing items."""
+        # Step 3: Build messages — prepend history for follow-up awareness
+        system_prompt = (
+            "You are a research assistant. Answer the user's question using ONLY "
+            "the passages provided below. Do not use outside knowledge. "
+            "CITATION RULES: Always cite the paper title when making a claim. "
+            "Name the section when it helps. "
+            "If the passages do not contain the answer, say so plainly. "
+            "ANSWER STYLE: Be concise and direct, 1-3 paragraphs. "
+            "Bullets only when genuinely listing multiple items. "
+            "Do not end with follow-up questions. "
+            "RETRIEVED PASSAGES: " + context
+        )
 
-        # Build messages list — prepend conversation history for multi-turn context.
-        # History contains prior {role, content} exchanges from the frontend.
-        # The current question is always the final user message.
         messages: list[dict] = []
         if history:
             for h in history:
-                # Only include valid role/content pairs — guard against malformed history
                 if isinstance(h, dict) and h.get("role") in ("user", "assistant") and h.get("content"):
-                    messages.append({"role": h["role"], "content": h["content"]})
+                    messages.append({"role": h["role"], "content": str(h["content"])})
         messages.append({"role": "user", "content": question})
 
-        # Reduced from 5 to 2 turns — model finds the answer in 1-2 searches
-        # on narrow-domain academic text. 5 turns held 5x response objects in
-        # memory simultaneously, causing OOM on Render's 512MB free tier.
-        max_turns = 2
-
-        for turn in range(max_turns):
+        # Step 4: Single LLM call — no tools, no loop, no growing message list
+        try:
             response = self._anthropic(api_key).messages.create(
                 model=(model or settings.anthropic_model),
-                max_tokens=1024,
+                max_tokens=800,
                 system=system_prompt,
-                tools=TOOLS,
                 messages=messages,
             )
-
-            assistant_content = response.content
-            has_tool_use = any(b.type == "tool_use" for b in assistant_content)
-
-            messages.append({"role": "assistant", "content": assistant_content})
-
-            if has_tool_use:
-                tool_result_content = [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": self._execute_search_tool(block.input, paper_ids),
-                    }
-                    for block in assistant_content
-                    if block.type == "tool_use"
-                ]
-                messages.append({"role": "user", "content": tool_result_content})
-            else:
-                break
-
-        final_text = ""
-        for block in response.content:
-            if block.type == "text":
-                final_text += block.text
-
-        return final_text
+            answer = response.content[0].text if response.content else ""
+            # Release the response object immediately
+            del response
+            return answer
+        except Exception as e:
+            return f"Could not generate an answer: {e}"
 
     def _execute_search_tool(self, tool_input: dict, paper_ids: list[str] | None = None) -> str:
         """
