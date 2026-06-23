@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type SearchResult } from "@/lib/api";
 import { cache } from "@/lib/cache";
-import { Card, EmptyState, Spinner } from "@/components/ui";
+import { Card, EmptyState } from "@/components/ui";
 import { Search, Sparkles, Trash2, ChevronDown, ChevronUp } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
