@@ -27,50 +27,76 @@ const SUGGESTIONS = [
   "Which methodologies are most common in this literature?",
 ];
 
-// ── Source passages ───────────────────────────────────────────────────────────
+// ── Relevance tier badge ──────────────────────────────────────────────────────
 
-function SourcePassages({ sources }: { sources: SearchResult[] }) {
-  const [open, setOpen] = useState(false);
+const TIER_STYLES: Record<string, { label: string; color: string; bg: string }> = {
+  highly_relevant: { label: "Highly relevant", color: "var(--support)", bg: "var(--support-dim)" },
+  related:         { label: "Related",          color: "var(--nuance)",  bg: "var(--nuance-dim)"  },
+  tangential:      { label: "Broader field",    color: "var(--text-3)",  bg: "var(--surface-3)"   },
+};
 
-  const byPaper = sources.reduce<Record<string, SearchResult[]>>((acc, s) => {
-    if (!acc[s.paper_id]) acc[s.paper_id] = [];
-    acc[s.paper_id].push(s);
-    return acc;
-  }, {});
-  const papers = Object.values(byPaper);
+function TierBadge({ tier }: { tier?: string }) {
+  const t = TIER_STYLES[tier || "tangential"] || TIER_STYLES.tangential;
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10.5px] font-medium"
+      style={{ color: t.color, background: t.bg }}>
+      {t.label}
+    </span>
+  );
+}
 
-  if (sources.length === 0) return null;
+// ── Paper result card ─────────────────────────────────────────────────────────
+
+function PaperResult({ title, passages }: { title: string; passages: SearchResult[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? passages : passages.slice(0, 1);
+  const best = passages[0];
 
   return (
-    <div className="mt-4 pt-3 border-t border-[var(--line)]">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1.5 text-[11.5px] text-[var(--text-3)] hover:text-[var(--gen)] t-all font-medium"
-      >
-        {open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-        {papers.length} source{papers.length !== 1 ? "s" : ""} · {sources.length} passage{sources.length !== 1 ? "s" : ""}
-      </button>
-      {open && (
-        <div className="mt-3 space-y-4">
-          {papers.map((group) => (
-            <div key={group[0].paper_id}>
-              <div className="text-[12px] font-semibold text-[var(--text-1)] mb-2 flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-[var(--gen)] shrink-0" />
-                {group[0].paper_title}
-              </div>
-              {group.map((s, i) => (
-                <div key={i} className="ml-3 pl-3 border-l-2 border-[var(--gen-line)] mb-2.5">
-                  <div className="text-[10px] text-[var(--text-4)] uppercase tracking-widest mb-1 font-medium">
-                    {s.section || "general"}
-                  </div>
-                  <div className="text-[12.5px] text-[var(--text-2)] leading-[1.65]">
-                    {s.text}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ))}
+    <div className="border border-[var(--line)] rounded-[var(--r-lg)] overflow-hidden bg-[var(--surface-1)] hover:border-[var(--line-2)] t-all">
+      {/* Paper header */}
+      <div className="flex items-start justify-between gap-3 px-4 pt-4 pb-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+            <TierBadge tier={best.relevance_tier} />
+            <span className="text-[10.5px] text-[var(--text-4)] capitalize">
+              {best.section || "general"}
+            </span>
+          </div>
+          <div className="text-[14px] font-semibold text-[var(--text-1)] leading-snug">
+            {title}
+          </div>
         </div>
+        <span className="text-[11px] text-[var(--text-4)] shrink-0 mt-1">
+          {passages.length} passage{passages.length !== 1 ? "s" : ""}
+        </span>
+      </div>
+
+      {/* Passages */}
+      <div className="px-4 pb-3 space-y-3">
+        {shown.map((s, i) => (
+          <div key={i} className={i > 0 ? "pt-3 border-t border-[var(--line)]" : ""}>
+            {i > 0 && (
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <TierBadge tier={s.relevance_tier} />
+                <span className="text-[10.5px] text-[var(--text-4)] capitalize">{s.section || "general"}</span>
+              </div>
+            )}
+            <p className="text-[13.5px] text-[var(--text-2)] leading-[1.7]">
+              {s.text}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      {/* Expand / collapse */}
+      {passages.length > 1 && (
+        <button
+          onClick={() => setExpanded((e) => !e)}
+          className="w-full flex items-center justify-center gap-1.5 py-2.5 border-t border-[var(--line)] text-[12px] text-[var(--gen)] font-medium t-all hover:bg-[var(--surface-2)]"
+        >
+          {expanded ? <><ChevronUp size={13} /> Show less</> : <><ChevronDown size={13} /> Show {passages.length - 1} more passage{passages.length - 1 !== 1 ? "s" : ""}</>}
+        </button>
       )}
     </div>
   );
@@ -79,51 +105,65 @@ function SourcePassages({ sources }: { sources: SearchResult[] }) {
 // ── Exchange ──────────────────────────────────────────────────────────────────
 
 function ExchangeCard({ exchange }: { exchange: Exchange }) {
+  // Group sources by paper
+  const byPaper = exchange.sources.reduce<Record<string, SearchResult[]>>((acc, s) => {
+    const key = s.paper_id;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(s);
+    return acc;
+  }, {});
+  const paperGroups = Object.values(byPaper);
+
   return (
     <div className="mb-8">
-      {/* Question bubble */}
+      {/* Query */}
       <div className="flex justify-end mb-4">
-        <div className="max-w-[75%] px-4 py-3 rounded-2xl rounded-br-sm bg-[var(--gen)] text-white text-[14px] leading-[1.6] shadow-sm">
+        <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-sm bg-[var(--gen)] text-white text-[14px] leading-[1.6]">
           {exchange.question}
         </div>
       </div>
 
-      {/* Answer */}
-      <div className="flex gap-3">
-        {/* Avatar */}
-        <div className="w-8 h-8 rounded-[9px] bg-[var(--gen)] shrink-0 flex items-center justify-center mt-0.5 shadow-sm">
-          <span className="w-3 h-3 rounded-full border-[1.5px] border-white opacity-90" />
+      {/* Results */}
+      {exchange.answerLoading ? (
+        <div className="flex items-center gap-3 py-2 pl-1">
+          <div className="flex gap-1.5">
+            {[0, 1, 2].map((i) => (
+              <span key={i} className="w-2 h-2 rounded-full bg-[var(--gen)] opacity-60"
+                style={{ animation: "pulse 1.4s ease-in-out infinite", animationDelay: `${i * 0.2}s` }} />
+            ))}
+          </div>
+          <span className="text-[13px] text-[var(--text-3)]">Searching your library…</span>
         </div>
-
-        <div className="flex-1 min-w-0">
-          {exchange.answerLoading ? (
-            <div className="flex items-center gap-3 py-3">
-              <div className="flex gap-1.5">
-                {[0, 1, 2].map((i) => (
-                  <span
-                    key={i}
-                    className="w-2 h-2 rounded-full bg-[var(--gen)] opacity-60"
-                    style={{
-                      animation: "pulse 1.4s ease-in-out infinite",
-                      animationDelay: `${i * 0.2}s`,
-                    }}
-                  />
-                ))}
-              </div>
-              <span className="text-[13px] text-[var(--text-3)]">Searching your library…</span>
-            </div>
-          ) : exchange.answerError ? (
-            <div className="text-[13px] text-[var(--contra)] py-2">{exchange.answerError}</div>
-          ) : (
-            <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-2xl rounded-tl-sm p-4 shadow-sm">
-              <div className="text-[14px] text-[var(--text-1)] leading-[1.8] whitespace-pre-wrap">
-                {exchange.answer}
-              </div>
-              <SourcePassages sources={exchange.sources} />
-            </div>
-          )}
+      ) : exchange.answerError ? (
+        <div className="text-[13px] text-[var(--contra)] py-2">{exchange.answerError}</div>
+      ) : paperGroups.length === 0 ? (
+        <div className="text-[13.5px] text-[var(--text-3)] py-2 pl-1">
+          No relevant passages found. Try different keywords or a broader question.
         </div>
-      </div>
+      ) : (
+        <div>
+          {/* Result summary */}
+          <div className="flex items-center gap-2 mb-3 pl-1">
+            <span className="text-[12px] text-[var(--text-3)]">
+              <span className="font-medium text-[var(--text-1)]">{exchange.sources.length}</span> passage{exchange.sources.length !== 1 ? "s" : ""} across{" "}
+              <span className="font-medium text-[var(--text-1)]">{paperGroups.length}</span> paper{paperGroups.length !== 1 ? "s" : ""}
+            </span>
+            <span className="text-[10px] text-[var(--text-4)] px-2 py-0.5 rounded-full bg-[var(--surface-2)] border border-[var(--line)]">
+              ranked by relevance
+            </span>
+          </div>
+          {/* Paper cards */}
+          <div className="space-y-3">
+            {paperGroups.map((group) => (
+              <PaperResult
+                key={group[0].paper_id}
+                title={group[0].paper_title}
+                passages={group}
+              />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -291,8 +331,8 @@ export default function SearchPage() {
               Search your library
             </h1>
             <p className="text-[14px] text-[var(--text-3)] max-w-[360px] leading-relaxed">
-              Get synthesized answers from your research papers.
-              Every response cites its sources.
+              Find relevant passages across all your papers.
+              Results ranked by semantic similarity and grouped by paper.
             </p>
           </div>
         </div>
@@ -330,7 +370,7 @@ export default function SearchPage() {
         </div>
 
         <p className="mt-5 text-[11.5px] text-[var(--text-4)] text-center">
-          Follow-up questions work · answers stay in sync with your library
+          Semantic search · finds passages by meaning, not just keywords
         </p>
       </div>
     );
