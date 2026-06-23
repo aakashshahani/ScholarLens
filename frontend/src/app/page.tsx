@@ -30,9 +30,16 @@ import {
 interface RelCounts { contradiction: number; support: number; nuance: number; unrelated: number; }
 interface TopContra { explanation: string; paper_a: string; paper_b: string; }
 
-// Strip leading markdown heading chars from insight headlines
+// Strip leading markdown heading chars + fix common Windows-1252 mojibake
 function cleanHeadline(s: string): string {
-  return s.replace(/^#+\s*/, "").trim();
+  return s
+    .replace(/^#+\s*/, "")
+    .replace(/â€¦/g, "…")
+    .replace(/â€™/g, "’")
+    .replace(/â€œ/g, "“")
+    .replace(/Ã©/g, "é")
+    .replace(/Ã /g, "à")
+    .trim();
 }
 
 // Animated count-up hook
@@ -69,67 +76,50 @@ export default function Dashboard() {
   useEffect(() => {
     setMounted(true);
 
-    // ── Cache-first helpers ───────────────────────────────────────────
-    // Show cached data instantly, then refresh in the background.
-    // This makes tab revisits feel instant even with Supabase latency.
-
-    // Health
-    const cachedHealth = cache.read<HealthStatus>("health");
-    if (cachedHealth) setHealth(cachedHealth);
-    api.health()
-      .then((h) => { setHealth(h); cache.write("health", h); })
-      .catch((e) => setError(e.message));
-
-    // Papers
-    const cachedPapers = cache.read<Paper[]>("papers");
-    if (cachedPapers?.length) setPapers(cachedPapers);
-    api.listPapers(50)
-      .then((p) => { setPapers(p); cache.write("papers", p); })
-      .catch(() => {});
-
-    // Insights (short)
-    const cachedInsights = cache.read<Insight[]>("insights_short");
-    if (cachedInsights?.length) setInsights(cachedInsights);
-    api.insights({ limit: 8 })
-      .then((i) => { setInsights(i); cache.write("insights_short", i); })
-      .catch(() => {});
-
-    // Contradiction count
-    const cachedRelCounts = cache.read<RelCounts>("rel_counts");
-    if (cachedRelCounts) setRelCounts(cachedRelCounts);
-    api.contradictionCount()
-      .then((d) => { const c = d.counts || null; setRelCounts(c); if (c) cache.write("rel_counts", c); })
-      .catch(() => {});
-
-    // Top contradiction (insights long)
+    // ── Cache-first: show stale data immediately, refresh in parallel ─────
+    const cachedHealth       = cache.read<HealthStatus>("health");
+    const cachedPapers       = cache.read<Paper[]>("papers");
+    const cachedInsights     = cache.read<Insight[]>("insights_short");
+    const cachedRelCounts    = cache.read<RelCounts>("rel_counts");
     const cachedInsightsLong = cache.read<Insight[]>("insights_long");
+    const cachedHypos        = cache.read<Hypothesis[]>("hypotheses");
+
+    if (cachedHealth)          setHealth(cachedHealth);
+    if (cachedPapers?.length)  setPapers(cachedPapers);
+    if (cachedInsights?.length) setInsights(cachedInsights);
+    if (cachedRelCounts)       setRelCounts(cachedRelCounts);
+    if (cachedHypos?.length)   setTopHypo(cachedHypos[0]);
+
     const applyInsightsLong = (rows: Insight[]) => {
       const contra = rows.find((i) => i.type === "contradiction");
       if (contra) setTopContra({
-        explanation: cleanHeadline(contra.detail || contra.headline),
+        // headline is already stripped of the paper-title prefix by the backend;
+        // only fall back to detail if headline is missing
+        explanation: cleanHeadline(contra.headline || contra.detail),
         paper_a: contra.papers?.[0] || "",
         paper_b: contra.papers?.[1] || "",
       });
     };
     if (cachedInsightsLong?.length) applyInsightsLong(cachedInsightsLong);
-    api.insights({ limit: 30 })
-      .then((rows) => { cache.write("insights_long", rows); applyInsightsLong(rows); })
-      .catch(() => {});
 
-    // Hypotheses — localStorage first, then API fallback.
-    // The dashboard uses a flat "hypotheses" key but the hypotheses page
-    // writes under "hypotheses:all" or "hypotheses:<ids>" — so localStorage
-    // may miss it. Always fetch from the API to get the real cached value.
-    const cachedHypos = cache.read<Hypothesis[]>("hypotheses");
-    if (cachedHypos?.length) setTopHypo(cachedHypos[0]);
-    api.getCachedHypotheses()
-      .then((hyps) => {
-        if (hyps && hyps.length > 0) {
-          setTopHypo(hyps[0]);
-          cache.write("hypotheses", hyps);
-        }
-      })
-      .catch(() => {});
+    // ── Fire all API calls in parallel ────────────────────────────────────
+    Promise.allSettled([
+      api.health()
+        .then((h) => { setHealth(h); cache.write("health", h); })
+        .catch((e) => setError(e.message)),
+      api.listPapers(50)
+        .then((p) => { setPapers(p); cache.write("papers", p); }),
+      api.insights({ limit: 8 })
+        .then((i) => { setInsights(i); cache.write("insights_short", i); }),
+      api.contradictionCount()
+        .then((d) => { const c = d.counts || null; setRelCounts(c); if (c) cache.write("rel_counts", c); }),
+      api.insights({ limit: 30 })
+        .then((rows) => { cache.write("insights_long", rows); applyInsightsLong(rows); }),
+      api.getCachedHypotheses()
+        .then((hyps) => {
+          if (hyps && hyps.length > 0) { setTopHypo(hyps[0]); cache.write("hypotheses", hyps); }
+        }),
+    ]);
 
     // Graph topics (already cache-first)
     const cachedGraph = cache.read<GraphPayload>("graph");
@@ -277,7 +267,7 @@ export default function Dashboard() {
           <SpotlightCard title="Suggested hypothesis" accent="var(--gen)" glow="rgba(124,111,255,0.15)">
             {topHypo ? (
               <>
-                <p className="text-[12.5px] text-[var(--text-2)] leading-snug clamp-4">
+                <p className="text-[12.5px] text-[var(--text-2)] leading-snug clamp-5">
                   {topHypo.statement}
                 </p>
                 <Link href="/hypotheses" className="cardlink">
