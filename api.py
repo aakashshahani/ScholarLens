@@ -1950,8 +1950,14 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
     # Gap insights from research_gaps analyses â€” but ONLY for papers that aren't
     # already represented by a relationship insight above. This is the dedup
     # that stops one paper from headlining multiple cells on the dashboard.
-    for p in papers[:8]:
-        analyses = db.get_analyses_for_paper(p.id)
+    # Gap insights — batch fetch all analyses in one DB call
+    gap_paper_ids = [p.id for p in papers[:8]]
+    gap_analyses_map = db.get_analyses_for_papers(gap_paper_ids)
+    gap_paper_map = {p.id: p for p in papers[:8]}
+    for pid, analyses in gap_analyses_map.items():
+        p = gap_paper_map.get(pid)
+        if not p:
+            continue
         for a in analyses:
             if a.analysis_type == "research_gaps" and a.content:
                 lines = [l.strip() for l in a.content.strip().split("\n") if l.strip()]
@@ -1977,9 +1983,9 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
     # priority group.
     _TYPE_PRIORITY = {
         "contradiction": 0,
-        "consensus": 1,
-        "hypothesis": 2,
-        "gap": 3,
+        "gap": 1,
+        "consensus": 2,
+        "hypothesis": 3,
         "new_paper": 4,
     }
     insights.sort(key=lambda x: x.get("created_at", ""), reverse=True)
