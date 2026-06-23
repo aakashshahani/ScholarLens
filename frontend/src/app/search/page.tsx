@@ -164,7 +164,7 @@ function InputBar({
         autoFocus={autoFocus}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && onSubmit()}
-        placeholder={isHero ? "Ask anything about your research…" : "Ask a follow-up…"}
+        placeholder={isHero ? "Search your research library…" : "Search again…"}
         className={`flex-1 bg-transparent text-[var(--text-1)] placeholder:text-[var(--text-4)] outline-none ${
           isHero ? "text-[15px] px-1 py-0.5" : "text-[13.5px] px-1"
         }`}
@@ -242,54 +242,26 @@ export default function SearchPage() {
     setInput("");
     setSubmitting(true);
 
-    const sourcesPromise = api.search(q, 6).catch(() => [] as SearchResult[]);
-
+    // Ask (LLM synthesis) is disabled on free tier due to memory constraints.
+    // Semantic search still works — returns relevant passages instantly.
     try {
-      const history = buildHistory();
-      const { job_id } = await api.ask(q, undefined, history);
-
-      stopPolling();
-      pollRef.current = setInterval(async () => {
-        try {
-          const job = await api.getJob<{ answer: string }>(job_id);
-          if (job.status === "done" && job.result) {
-            stopPolling();
-            const sources = await sourcesPromise;
-            setExchanges((prev) => prev.map((e) =>
-              e.id === exchangeId
-                ? { ...e, answer: job.result!.answer, sources, answerLoading: false }
-                : e
-            ));
-            setSubmitting(false);
-          } else if (job.status === "error") {
-            stopPolling();
-            const sources = await sourcesPromise;
-            setExchanges((prev) => prev.map((e) =>
-              e.id === exchangeId
-                ? { ...e, sources, answerLoading: false, answerError: job.error || "Something went wrong." }
-                : e
-            ));
-            setSubmitting(false);
-          }
-        } catch (e: any) {
-          stopPolling();
-          setExchanges((prev) => prev.map((ex) =>
-            ex.id === exchangeId
-              ? { ...ex, answerLoading: false, answerError: e.message }
-              : ex
-          ));
-          setSubmitting(false);
-        }
-      }, POLL_INTERVAL);
+      const sources = await api.search(q, 8).catch(() => [] as SearchResult[]);
+      const answer = sources.length > 0
+        ? `Found ${sources.length} relevant passage${sources.length !== 1 ? "s" : ""} across ${new Set(sources.map(s => s.paper_id)).size} paper${new Set(sources.map(s => s.paper_id)).size !== 1 ? "s" : ""}. See sources below.`
+        : "No relevant passages found in your library for this query.";
+      setExchanges((prev) => prev.map((e) =>
+        e.id === exchangeId
+          ? { ...e, answer, sources, answerLoading: false }
+          : e
+      ));
     } catch (e: any) {
-      const sources = await sourcesPromise;
       setExchanges((prev) => prev.map((ex) =>
         ex.id === exchangeId
-          ? { ...ex, sources, answerLoading: false, answerError: e.message }
+          ? { ...ex, answerLoading: false, answerError: e.message }
           : ex
       ));
-      setSubmitting(false);
     }
+    setSubmitting(false);
   }
 
   function clear() {
@@ -316,7 +288,7 @@ export default function SearchPage() {
           </div>
           <div className="text-center">
             <h1 className="font-display text-[28px] text-[var(--text-1)] tracking-tight leading-tight mb-2">
-              Ask your library
+              Search your library
             </h1>
             <p className="text-[14px] text-[var(--text-3)] max-w-[360px] leading-relaxed">
               Get synthesized answers from your research papers.
@@ -403,7 +375,7 @@ export default function SearchPage() {
           size="default"
         />
         <p className="text-[11px] text-[var(--text-4)] mt-2 px-1">
-          Follow-up questions work — the model remembers this conversation
+          Semantic search · results ranked by meaning, not just keywords
         </p>
       </div>
     </div>

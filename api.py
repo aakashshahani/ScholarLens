@@ -933,12 +933,7 @@ def search_papers(request: Request, req: SearchRequest,
     return response
 
 
-# Simple in-memory Ask cache — keyed by (user_id, question, paper_id).
-# TTL: 1 hour. Prevents re-running the full agentic loop for identical
-# questions. Cache is per-process and resets on Render restart.
 import hashlib as _hashlib
-_ask_cache: dict[str, dict] = {}
-_ASK_CACHE_TTL = 3600  # 1 hour
 
 # ── Background job store ──────────────────────────────────────────────────
 # In-memory only — resets on Render restart. Acceptable for the free tier
@@ -998,54 +993,16 @@ def _get_or_reuse_job(user_id: str, endpoint: str) -> str | None:
     return None
 
 
-def _ask_bg(job_id: str, question: str, paper_id: str | None,
-             paper_ids: list[str], api_key: str | None, model: str,
-             cache_key: str, history: list[dict] | None = None):
-    """Background task for Ask — runs the agentic RAG loop off the main thread."""
-    try:
-        answer = agent.ask(
-            question,
-            paper_id=paper_id,
-            paper_ids=paper_ids,
-            api_key=api_key,
-            model=model,
-            history=history,
-        )
-        _ask_cache[cache_key] = {"answer": answer, "ts": _time.time()}
-        _finish_job(job_id, {"answer": answer, "cached": False})
-    except Exception as e:
-        _fail_job(job_id, str(e))
-
-
 @app.post("/api/ask")
 @limiter.limit(settings.rl_ask)
 def ask_question(request: Request, req: AskRequest,
-                 background_tasks: BackgroundTasks,
                  user: User = Depends(authlib.get_current_user)):
-    # Check cache first — no job needed if we have a fresh answer
-    _cache_raw = f"{user.id}:{req.question}:{req.paper_id}"
-    _cache_key = _hashlib.sha256(_cache_raw.encode()).hexdigest()[:16]
-    _now = _time.time()
-    if _cache_key in _ask_cache:
-        entry = _ask_cache[_cache_key]
-        if _now - entry["ts"] < _ASK_CACHE_TTL:
-            job_id = _new_job(user.id, "ask")
-            _finish_job(job_id, {"answer": entry["answer"], "cached": True})
-            return {"job_id": job_id, "status": "done", "cached": True}
-
-    # Reuse existing running job for same question
-    existing = _get_or_reuse_job(user.id, "ask")
-    if existing:
-        return {"job_id": existing, "status": "running"}
-
-    job_id = _new_job(user.id, "ask")
-    history = getattr(req, "history", None)
-    background_tasks.add_task(
-        _ask_bg, job_id, req.question, req.paper_id,
-        _owned_ids(user), authlib.resolve_user_api_key(user),
-        _resolve_model_and_meter(user), _cache_key, history,
+    # Ask disabled on free tier — the agentic RAG loop causes OOM on 512MB.
+    # Semantic search (/api/search) still works and returns relevant passages.
+    raise HTTPException(
+        status_code=503,
+        detail="Ask is temporarily unavailable. Use Search to find relevant passages.",
     )
-    return {"job_id": job_id, "status": "running"}
 
 
 # â”€â”€ Contradictions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
