@@ -21,8 +21,8 @@ from config import settings
 
 # ── Shared connection pool ────────────────────────────────────────────────────
 # ThreadedConnectionPool is safe for concurrent use across FastAPI's threadpool.
-# minconn=1: keep one connection alive to avoid cold-connect latency.
-# maxconn=5: cap at 5 simultaneous connections — Supabase free tier allows 60
+# minconn=2: keep two connections alive to avoid cold-connect latency.
+# maxconn=10: cap at 10 simultaneous connections — Supabase free tier allows 60
 # through the session pooler, but we only need a small slice. Keeps TCP buffer
 # overhead low on Render's 512MB free tier.
 # Initialised lazily on first use so import doesn't fail if DATABASE_URL is unset.
@@ -298,12 +298,28 @@ class Database:
                 created_at      TEXT NOT NULL
             )
         """)
+        # Migration: add user_id column if upgrading from older schema
+        cur.execute(
+            "ALTER TABLE hypothesis_cache ADD COLUMN IF NOT EXISTS user_id TEXT"
+        )
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 token       TEXT PRIMARY KEY,
                 user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at  TEXT NOT NULL,
                 expires_at  TEXT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS monitor_topics (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name            TEXT NOT NULL,
+                keywords        JSONB NOT NULL DEFAULT '[]',
+                sources         JSONB NOT NULL DEFAULT '["arxiv","semantic_scholar"]',
+                is_active       BOOLEAN NOT NULL DEFAULT true,
+                created_at      TEXT NOT NULL,
+                last_scanned_at TEXT
             )
         """)
         # Indexes
@@ -314,8 +330,13 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_claims_paper ON claims(paper_id)",
             "CREATE INDEX IF NOT EXISTS idx_rel_lo ON relationships(claim_lo)",
             "CREATE INDEX IF NOT EXISTS idx_rel_hi ON relationships(claim_hi)",
+            "CREATE INDEX IF NOT EXISTS idx_rel_paper_a ON relationships(paper_a)",
+            "CREATE INDEX IF NOT EXISTS idx_rel_paper_b ON relationships(paper_b)",
+            "CREATE INDEX IF NOT EXISTS idx_rel_created ON relationships(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_papers_user ON papers(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_monitor_topics_user ON monitor_topics(user_id)",
         ]:
             cur.execute(idx_sql)
         conn.commit()
@@ -370,6 +391,40 @@ class Database:
         cur.close()
         self._put_conn(conn)
         return [self._row_to_paper(r) for r in rows]
+
+    def paper_title_map(self, user_id: str | None = None) -> dict[str, str]:
+        """Return {paper_id: title} for papers owned by user_id (or all papers if None).
+        Cheaper than list_papers() — fetches only id and title columns."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        if user_id is not None:
+            cur.execute(
+                "SELECT id, title FROM papers WHERE user_id = %s",
+                (user_id,),
+            )
+        else:
+            cur.execute("SELECT id, title FROM papers")
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        return {r["id"]: r["title"] for r in rows}
+
+    def paper_stats(self, user_id: str | None = None) -> tuple[int, str]:
+        """Return (count, latest_created_at) without loading paper content.
+        Used by the health endpoint to avoid fetching full_text for 1000 rows."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        if user_id is not None:
+            cur.execute(
+                "SELECT COUNT(*) AS cnt, MAX(created_at) AS latest FROM papers WHERE user_id = %s",
+                (user_id,),
+            )
+        else:
+            cur.execute("SELECT COUNT(*) AS cnt, MAX(created_at) AS latest FROM papers")
+        row = cur.fetchone()
+        cur.close()
+        self._put_conn(conn)
+        return (int(row["cnt"]), row["latest"] or "")
 
     def delete_paper(self, paper_id: str) -> bool:
         conn = self._get_conn()
@@ -530,6 +585,7 @@ class Database:
         return result
 
 
+    @staticmethod
     def _title_key(title: str) -> str:
         return re.sub(r"[^a-z0-9]", "", (title or "").lower())[:80]
 
@@ -550,10 +606,14 @@ class Database:
                     return self._row_to_paper(row)
             key = self._title_key(title)
             if key:
-                cur.execute("SELECT * FROM papers")
+                cur.execute("SELECT id, title FROM papers")
                 for row in cur.fetchall():
                     if self._title_key(row["title"]) == key:
-                        return self._row_to_paper(row)
+                        cur2 = conn.cursor()
+                        cur2.execute("SELECT * FROM papers WHERE id = %s", (row["id"],))
+                        full = cur2.fetchone()
+                        cur2.close()
+                        return self._row_to_paper(full) if full else None
             return None
         finally:
             cur.close()
@@ -604,6 +664,51 @@ class Database:
                         source_quote=r["source_quote"], created_at=r["created_at"])
             for r in rows
         ]
+
+    def get_claims_for_papers(self, paper_ids: list[str]) -> dict[str, list]:
+        """Batch fetch: returns {paper_id: [StoredClaim, ...]} in one query."""
+        if not paper_ids:
+            return {}
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM claims WHERE paper_id = ANY(%s)", (list(paper_ids),))
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        result: dict[str, list] = {}
+        for r in rows:
+            c = StoredClaim(id=r["id"], paper_id=r["paper_id"], text=r["text"],
+                            section=r["section"], confidence=r["confidence"],
+                            evidence=r["evidence"], conditions=r["conditions"],
+                            source_quote=r["source_quote"], created_at=r["created_at"])
+            result.setdefault(r["paper_id"], []).append(c)
+        return result
+
+    def get_paper_titles(self, paper_ids: list[str]) -> dict[str, str]:
+        """Return {paper_id: title} for the given IDs in one query."""
+        if not paper_ids:
+            return {}
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id, title FROM papers WHERE id = ANY(%s)", (list(paper_ids),))
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        return {r["id"]: r["title"] for r in rows}
+
+    def delete_relationships_for_claims(self, claim_ids: list[str]):
+        """Remove all relationships that reference any of the given claim IDs."""
+        if not claim_ids:
+            return
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM relationships WHERE claim_lo = ANY(%s) OR claim_hi = ANY(%s)",
+            (list(claim_ids), list(claim_ids)),
+        )
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
 
     def delete_claims_for_paper(self, paper_id: str):
         conn = self._get_conn()
@@ -669,33 +774,53 @@ class Database:
         """
         conn = self._get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM relationships ORDER BY created_at DESC")
+        conditions: list[str] = []
+        params: list = []
+        if paper_ids:
+            pid_arr = list(paper_ids)
+            if strict:
+                conditions.append("(paper_a = ANY(%s) AND paper_b = ANY(%s))")
+                params.extend([pid_arr, pid_arr])
+            else:
+                conditions.append("(paper_a = ANY(%s) OR paper_b = ANY(%s))")
+                params.extend([pid_arr, pid_arr])
+        if relationships:
+            conditions.append("relationship = ANY(%s)")
+            params.append(list(relationships))
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cur.execute(
+            f"SELECT * FROM relationships {where} ORDER BY created_at DESC",
+            params or None,
+        )
         rows = cur.fetchall()
         cur.close()
         self._put_conn(conn)
-        rels = [self._row_to_rel(r) for r in rows]
-        if paper_ids:
-            pid_set = set(paper_ids)
-            if strict:
-                rels = [r for r in rels if r.paper_a in pid_set and r.paper_b in pid_set]
-            else:
-                rels = [r for r in rels if r.paper_a in pid_set or r.paper_b in pid_set]
-        if relationships:
-            rel_set = set(relationships)
-            rels = [r for r in rels if r.relationship in rel_set]
-        return rels
+        return [self._row_to_rel(r) for r in rows]
 
     def relationships_watermark(self, paper_ids: list[str] | None = None, strict: bool = False) -> str:
         """
         Returns the max created_at timestamp over the scoped relationships.
         Used as a cache-bust key for hypothesis generation.
-        strict should match whatever list_relationships call the caller uses —
-        pass strict=True when computing a cache key for conflict-grounded hypotheses.
+        strict should match whatever list_relationships call the caller uses.
         """
-        rels = self.list_relationships(paper_ids=paper_ids, strict=strict)
-        if not rels:
-            return ""
-        return max(r.created_at for r in rels)
+        conn = self._get_conn()
+        cur = conn.cursor()
+        if paper_ids:
+            pid_arr = list(paper_ids)
+            if strict:
+                cond = "WHERE paper_a = ANY(%s) AND paper_b = ANY(%s)"
+            else:
+                cond = "WHERE paper_a = ANY(%s) OR paper_b = ANY(%s)"
+            cur.execute(
+                f"SELECT COALESCE(MAX(created_at), '') FROM relationships {cond}",
+                [pid_arr, pid_arr],
+            )
+        else:
+            cur.execute("SELECT COALESCE(MAX(created_at), '') FROM relationships")
+        row = cur.fetchone()
+        cur.close()
+        self._put_conn(conn)
+        return row[0] if row else ""
 
     @staticmethod
     def _row_to_rel(r) -> "StoredRelationship":
@@ -723,42 +848,71 @@ class Database:
             return None
         return {"hypotheses": json.loads(row["payload"]), "grounding": row["grounding"]}
 
-    def set_hypothesis_cache(self, cache_key: str, hypotheses: list, grounding: str):
+    def set_hypothesis_cache(self, cache_key: str, hypotheses: list, grounding: str,
+                             user_id: str | None = None):
         conn = self._get_conn()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO hypothesis_cache (cache_key, payload, grounding, created_at)
-               VALUES (%s, %s, %s, %s)
+            """INSERT INTO hypothesis_cache (cache_key, payload, grounding, created_at, user_id)
+               VALUES (%s, %s, %s, %s, %s)
                ON CONFLICT(cache_key) DO UPDATE SET
                  payload=EXCLUDED.payload, grounding=EXCLUDED.grounding,
-                 created_at=EXCLUDED.created_at""",
+                 created_at=EXCLUDED.created_at, user_id=EXCLUDED.user_id""",
             (cache_key, json.dumps(hypotheses), grounding,
-             datetime.now(timezone.utc).isoformat()),
+             datetime.now(timezone.utc).isoformat(), user_id),
         )
         conn.commit()
         cur.close()
         self._put_conn(conn)
 
-    def list_hypothesis_cache(self, user_paper_ids: list[str]) -> list[dict]:
-        """Return all hypothesis cache entries that reference any of the user's papers."""
+    def list_hypothesis_cache(self, user_paper_ids: list[str],
+                              user_id: str | None = None) -> list[dict]:
+        """Return hypothesis cache entries for this user, most recent first."""
         conn = self._get_conn()
         cur = conn.cursor()
+        import json as _json
+
+        if user_id:
+            # Fast path: filter by user_id stored at write time
+            cur.execute(
+                "SELECT cache_key, payload, grounding, created_at FROM hypothesis_cache "
+                "WHERE user_id = %s ORDER BY created_at DESC",
+                (user_id,),
+            )
+            rows = cur.fetchall()
+            cur.close()
+            self._put_conn(conn)
+            results = []
+            for r in rows:
+                try:
+                    results.append({
+                        "cache_key": r["cache_key"],
+                        "hypotheses": _json.loads(r["payload"]),
+                        "grounding": r["grounding"],
+                        "created_at": r["created_at"],
+                    })
+                except Exception:
+                    continue
+            return results
+
+        # Legacy path: full-table scan + paper_id filter (entries saved before user_id was added)
         cur.execute(
-            "SELECT cache_key, payload, grounding, created_at FROM hypothesis_cache ORDER BY created_at DESC"
+            "SELECT cache_key, payload, grounding, created_at FROM hypothesis_cache "
+            "WHERE user_id IS NULL ORDER BY created_at DESC"
         )
         rows = cur.fetchall()
         cur.close()
         self._put_conn(conn)
         results = []
         pid_set = set(user_paper_ids)
-        import json as _json
         for r in rows:
             try:
                 hyps = _json.loads(r["payload"])
-                # Check if any hypothesis references user's papers
                 for h in hyps:
                     papers = [sp.get("paper_id", "") for sp in h.get("supporting_papers", [])]
-                    if any(p in pid_set for p in papers) or not pid_set:
+                    non_empty = [p for p in papers if p]
+                    # Include if: any paper_id matches, OR title matching failed (all empty)
+                    if not pid_set or not non_empty or any(p in pid_set for p in non_empty):
                         results.append({
                             "cache_key": r["cache_key"],
                             "hypotheses": hyps,
