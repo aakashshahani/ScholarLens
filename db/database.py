@@ -487,7 +487,6 @@ class Database:
 
     # â”€â”€ Dedup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    @staticmethod
     def get_analyses_for_papers(self, paper_ids: list[str]) -> dict[str, list]:
         """Batch fetch analyses for multiple papers — one DB call instead of N.
         Returns dict: paper_id → list of AnalysisResult."""
