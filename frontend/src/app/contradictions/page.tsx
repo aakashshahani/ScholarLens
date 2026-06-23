@@ -168,7 +168,7 @@ export default function ContradictionsPage() {
             }).catch(() => {});
             setShowConfig(false);
             const firstReal = full.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
-            if (firstReal) setSelected(firstReal.id);
+            if (firstReal) setSelected(firstReal);
             setLoading(false); setStage("");
           } else if (job.status === "error") {
             stopPolling();
