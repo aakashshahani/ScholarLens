@@ -187,6 +187,59 @@ class VectorStore:
 
         return results
 
+    def search_by_embedding(
+        self,
+        embedding: list[float],
+        n_results: int = 3,
+        paper_ids: list[str] | None = None,
+    ) -> list[SearchResult]:
+        """Search using a pre-computed embedding vector.
+        Used by the monitoring agent to avoid re-embedding abstracts
+        that were already embedded in a batch call."""
+        if paper_ids is not None and len(paper_ids) == 0:
+            return []
+
+        query_vec_str = str(embedding)
+        conditions = ["1=1"]
+        params: list = []
+
+        if paper_ids:
+            conditions.append("paper_id = ANY(%s)")
+            params.append(paper_ids)
+
+        where = " AND ".join(conditions)
+        fetch_n = n_results * 3
+
+        sql = f"""
+            SELECT chunk_id, paper_id, text, section,
+                   (embedding <=> %s::vector) AS score
+            FROM embeddings
+            WHERE {where}
+            ORDER BY score
+            LIMIT %s
+        """
+        params_full = params + [query_vec_str, fetch_n]
+
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(sql, params_full)
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+
+        results = []
+        for r in rows:
+            if len(results) >= n_results:
+                break
+            results.append(SearchResult(
+                chunk_id=r["chunk_id"],
+                paper_id=r["paper_id"],
+                text=r["text"],
+                section=r["section"],
+                score=float(r["score"]),
+            ))
+        return results
+
     def delete_paper_chunks(self, paper_id: str):
         conn = self._get_conn()
         cur = conn.cursor()

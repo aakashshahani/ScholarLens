@@ -164,50 +164,55 @@ class MonitoringAgent:
                 for p in papers
             ]
 
-        # Cap at 8 papers to score — each scoring call embeds an abstract
-        # via Voyage API and runs a pgvector search over the full embeddings
-        # table. With 1204 chunks at 1024 dims, each search loads ~10MB of
-        # vectors into memory. Scoring 8 papers peak ≈ 80MB — safe on Render's
-        # 512MB free tier. Papers beyond 8 are already filtered by relevance
-        # threshold so they're unlikely to be high-signal anyway.
-        papers = papers[:8]
+        # Cap at 5 papers — reduced from 8 to further lower peak memory.
+        # Batch embed all abstracts in one Voyage API call instead of one
+        # call per paper — eliminates N sequential HTTP round trips and
+        # reduces memory by releasing all embedding arrays together after
+        # the batch rather than holding each in memory during a loop.
+        papers = [p for p in papers[:5] if p.abstract]
+        if not papers:
+            return []
 
         scored = []
-        for paper in papers:
-            if not paper.abstract:
-                continue
+        try:
+            # One Voyage call for all abstracts — batch is more memory-efficient
+            # than N sequential calls because the HTTP response is parsed once
+            # and the embedding list is released as a unit after use.
+            abstracts = [p.abstract[:400] for p in papers]
+            embeddings = self.vector_store.embed_texts(abstracts)
 
-            try:
-                # Search library for similar content.
-                # Passing lib_ids scopes the pgvector scan to the user's papers
-                # only, which keeps the result set small and the query fast.
-                results = self.vector_store.search(
-                    query=paper.abstract[:400],
-                    n_results=3,
-                    paper_ids=lib_ids,
-                )
-            except Exception as e:
-                print(f"[monitor] relevance search failed for '{paper.title[:40]}': {e}")
-                continue
-
-            if results:
-                # Average similarity of top 3 matches (convert distance to similarity)
-                avg_sim = 1 - (sum(r.score for r in results) / len(results))
-                avg_sim = max(0, min(1, avg_sim))
-
-                if avg_sim >= threshold:
-                    # Get the most similar paper's title for context
-                    try:
-                        top_match = self.db.get_paper(results[0].paper_id)
-                        match_title = top_match.title if top_match else "unknown"
-                    except Exception:
-                        match_title = "unknown"
-
-                    scored.append(ScoredPaper(
-                        paper=paper,
-                        relevance_score=round(avg_sim, 3),
-                        relevance_reason=f"Related to: {match_title}",
-                    ))
+            for paper, embedding in zip(papers, embeddings):
+                try:
+                    # Use the pre-computed embedding directly for pgvector search
+                    # instead of re-embedding inside vector_store.search()
+                    results = self.vector_store.search_by_embedding(
+                        embedding=embedding,
+                        n_results=3,
+                        paper_ids=lib_ids,
+                    )
+                    if results:
+                        avg_sim = 1 - (sum(r.score for r in results) / len(results))
+                        avg_sim = max(0, min(1, avg_sim))
+                        if avg_sim >= threshold:
+                            try:
+                                top_match = self.db.get_paper(results[0].paper_id)
+                                match_title = top_match.title if top_match else "unknown"
+                            except Exception:
+                                match_title = "unknown"
+                            scored.append(ScoredPaper(
+                                paper=paper,
+                                relevance_score=round(avg_sim, 3),
+                                relevance_reason=f"Related to: {match_title}",
+                            ))
+                except Exception as e:
+                    print(f"[monitor] scoring failed for '{paper.title[:40]}': {e}")
+                    continue
+        except Exception as e:
+            print(f"[monitor] batch embed failed: {e}")
+            # Fallback: skip scoring, return all papers as mildly relevant
+            return [ScoredPaper(paper=p, relevance_score=0.4,
+                               relevance_reason="Relevance scoring unavailable")
+                    for p in papers]
 
         # Sort by relevance (highest first)
         scored.sort(key=lambda s: s.relevance_score, reverse=True)

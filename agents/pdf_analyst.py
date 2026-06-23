@@ -433,6 +433,7 @@ CONVERSATION RULES:
   explicitly asks to revisit them.
 
 ANSWER STYLE:
+- Be concise. 2-4 paragraphs maximum. The user can ask follow-ups.
 - Do NOT end with follow-up questions — the user will ask if they want more.
 - If the evidence is insufficient, say so plainly and stop.
 - Keep formatting light: short paragraphs, and bullets only when genuinely listing items."""
@@ -448,12 +449,15 @@ ANSWER STYLE:
                     messages.append({"role": h["role"], "content": h["content"]})
         messages.append({"role": "user", "content": question})
 
-        max_turns = 5
+        # Reduced from 5 to 2 turns — model finds the answer in 1-2 searches
+        # on narrow-domain academic text. 5 turns held 5x response objects in
+        # memory simultaneously, causing OOM on Render's 512MB free tier.
+        max_turns = 2
 
         for turn in range(max_turns):
             response = self._anthropic(api_key).messages.create(
                 model=(model or settings.anthropic_model),
-                max_tokens=2048,
+                max_tokens=1024,
                 system=system_prompt,
                 tools=TOOLS,
                 messages=messages,
@@ -498,7 +502,7 @@ ANSWER STYLE:
         try:
             results = self.vector_store.search(
                 query=tool_input["query"],
-                n_results=tool_input.get("n_results", 5),
+                n_results=tool_input.get("n_results", 3),
                 paper_id=tool_input.get("paper_id"),
                 paper_ids=paper_ids,
             )
