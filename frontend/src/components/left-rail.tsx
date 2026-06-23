@@ -7,8 +7,6 @@ import {
   LayoutDashboard, Library, Zap, FlaskConical, Radar, Plus, LogOut, Settings as SettingsIcon, Search,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { useEffect } from "react";
-import { api, type UserSettings } from "@/lib/api";
 
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -22,12 +20,8 @@ const NAV = [
 export function LeftRail() {
   const pathname = usePathname();
   const [expanded, setExpanded] = useState(false);
-  const [libraryName, setLibraryName] = useState<string | null>(null);
   const { user, logout } = useAuth();
-
-  useEffect(() => {
-    api.getSettings().then((s: UserSettings) => setLibraryName(s.library_name)).catch(() => {});
-  }, []);
+  const libraryName = user?.library_name ?? null;
 
   return (
     <aside

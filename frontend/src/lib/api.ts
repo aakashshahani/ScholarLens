@@ -142,7 +142,9 @@ export interface MonitorScanResponse {
 
 export interface HealthStatus {
   status: "ok" | "degraded";
+  errors: string[];
   papers: number;
+  embeddings: number;
   library_fingerprint: string;
 }
 
@@ -470,6 +472,7 @@ export const api = {
 
   testDigest: () =>
     apiFetch<{
+      status: string;
       email_sent: boolean;
       email_error: string | null;
       papers_relevant: number;

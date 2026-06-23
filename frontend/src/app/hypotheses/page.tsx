@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, Paper, Hypothesis } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, Slider, SelectChip, PrimaryButton, SectionLabel, Claim } from "@/components/ui";
 import { FlaskConical, TriangleAlert, GitBranch, AlertCircle, CheckCircle2, Zap, RefreshCw } from "lucide-react";
@@ -74,11 +74,16 @@ export default function HypothesesPage() {
 
     // Fingerprint check — warn if library changed since last generation
     api.health().then((h) => {
-      const fingerprint = (h as any).library_fingerprint || "default";
-      const cachedFp = localStorage.getItem("sl_hypotheses_fp");
+      const fingerprint = h.library_fingerprint || "default";
+      const cachedFp = cache.read<string>("hypotheses_fp");
       if (cachedFp && cachedFp !== fingerprint) setLibraryChanged(true);
     }).catch(() => {});
   }, []);
+
+  const maxNoveltyScore = useMemo(
+    () => Math.max(...hypotheses.map((x) => x.novelty_score || 0), 0.0001),
+    [hypotheses]
+  );
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stopPolling = () => {
@@ -112,26 +117,26 @@ export default function HypothesesPage() {
         refresh: true,
       });
 
-      localStorage.setItem("sl_hypotheses_job", job_id);
+      cache.write("hypotheses_job", job_id);
       stopPolling();
       pollRef.current = setInterval(async () => {
         try {
           const job = await api.getJob<Hypothesis[]>(job_id);
           if (job.status === "done" && job.result) {
             stopPolling();
-            localStorage.removeItem("sl_hypotheses_job");
+            cache.clear("hypotheses_job");
             setHypotheses(job.result);
             cache.write(cacheKey, job.result);
             setShowConfig(false);
             setLibraryChanged(false);
             api.health().then((h) => {
-              const fp = (h as any).library_fingerprint || "default";
-              localStorage.setItem("sl_hypotheses_fp", fp);
+              const fp = h.library_fingerprint || "default";
+              cache.write("hypotheses_fp", fp);
             }).catch(() => {});
             setLoading(false);
           } else if (job.status === "error") {
             stopPolling();
-            localStorage.removeItem("sl_hypotheses_job");
+            cache.clear("hypotheses_job");
             setError(job.error || "Generation failed.");
             setLoading(false);
           }
@@ -327,8 +332,7 @@ export default function HypothesesPage() {
                         const color = score > 0.30 ? "var(--support)" : score > 0.12 ? "var(--nuance)" : "var(--text-3)";
                         // Width is relative to the top-ranked bar so differences
                         // are visible even when absolute scores cluster tightly.
-                        const maxScore = Math.max(...hypotheses.map((x) => x.novelty_score || 0), 0.0001);
-                        const width = 30 + (score / maxScore) * 70; // floor 30% so smallest bar still reads
+                        const width = 30 + (score / maxNoveltyScore) * 70; // floor 30% so smallest bar still reads
                         return (
                           <div key={h.id} className="flex items-center gap-2.5">
                             <span className="mono text-[11px] text-[var(--text-3)] w-5 shrink-0">H{cardNum}</span>

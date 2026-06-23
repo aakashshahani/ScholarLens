@@ -27,6 +27,7 @@ export default function PaperDetailPage() {
   const [reanalyzeError, setReanalyzeError] = useState("");
   const [reanalyzeStage, setReanalyzeStage] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const askPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     // Cache-first: show cached paper instantly, refresh in background
@@ -35,7 +36,10 @@ export default function PaperDetailPage() {
     api.getPaper(paperId)
       .then((p) => { setPaper(p); setLoading(false); cache.write(`paper_${paperId}`, p); })
       .catch(() => setLoading(false));
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (askPollRef.current) clearInterval(askPollRef.current);
+    };
   }, [paperId]);
 
   const handleReanalyze = async () => {
@@ -105,20 +109,20 @@ export default function PaperDetailPage() {
       const { job_id } = await api.ask(
         `Regarding "${paper?.title}": ${question}`, paperId
       );
-      const interval = setInterval(async () => {
+      askPollRef.current = setInterval(async () => {
         try {
           const job = await api.getJob<{ answer: string }>(job_id);
           if (job.status === "done" && job.result) {
-            clearInterval(interval);
+            clearInterval(askPollRef.current!);
             setAnswer(job.result.answer);
             setAsking(false);
           } else if (job.status === "error") {
-            clearInterval(interval);
+            clearInterval(askPollRef.current!);
             setAnswer("Could not answer — try rephrasing.");
             setAsking(false);
           }
         } catch {
-          clearInterval(interval);
+          clearInterval(askPollRef.current!);
           setAnswer("Connection error — try again.");
           setAsking(false);
         }

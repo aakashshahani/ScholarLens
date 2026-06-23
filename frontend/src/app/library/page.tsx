@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, Paper } from "@/lib/api";
@@ -60,7 +60,7 @@ export default function LibraryPage() {
   const totalAnalyses = papers.reduce((n, p) => n + (p.analysis_types?.length || 0), 0);
   const totalClaims   = papers.reduce((n, p) => n + (p.chunk_count || 0), 0);
 
-  const filtered = papers
+  const filtered = useMemo(() => papers
     .filter((p) =>
       filter === "all"
         || (filter === "analyzed" && (p.analysis_types?.length || 0) >= 6)
@@ -70,7 +70,7 @@ export default function LibraryPage() {
       sortBy === "coverage"
         ? (b.analysis_types?.length || 0) - (a.analysis_types?.length || 0)
         : new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    );
+    ), [papers, filter, sortBy]);
 
   const abstract = selected?.abstract || "";
   const ABSTRACT_TRUNCATE = 600;

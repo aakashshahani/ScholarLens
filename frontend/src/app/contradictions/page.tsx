@@ -111,8 +111,8 @@ export default function ContradictionsPage() {
         }
         // Keep the library-changed fingerprint check for the warning banner.
         api.health().then((h) => {
-          const fingerprint = (h as any).library_fingerprint || "default";
-          const cachedFingerprint = localStorage.getItem("sl_contradictions_fp");
+          const fingerprint = h.library_fingerprint || "default";
+          const cachedFingerprint = cache.read<string>("contradictions_fp");
           if (cachedFingerprint && cachedFingerprint !== fingerprint) setLibraryChanged(true);
         }).catch(() => {});
       })
@@ -147,8 +147,7 @@ export default function ContradictionsPage() {
         maxPairs: p.maxPairs,
       });
 
-      // Store job_id so we can resume polling if user navigates away and back
-      localStorage.setItem("sl_contradictions_job", job_id);
+      cache.write("contradictions_job", job_id);
 
       stopPolling();
       pollRef.current = setInterval(async () => {
@@ -157,15 +156,16 @@ export default function ContradictionsPage() {
           if (job.status === "done") {
             stopPolling();
             clearInterval(ticker);
-            localStorage.removeItem("sl_contradictions_job");
-            // Reload the full persisted set so the view shows everything accumulated
-            const full = await api.listContradictions();
+            cache.clear("contradictions_job");
+            // Reload the full persisted set + refresh fingerprint in parallel
+            const [full] = await Promise.all([
+              api.listContradictions(),
+              api.health().then((h) => {
+                cache.write("contradictions_fp", h.library_fingerprint || "default");
+              }).catch(() => {}),
+            ]);
             setResults(full);
             cache.write("contradictions", full);
-            api.health().then((h) => {
-              const fp = (h as any).library_fingerprint || "default";
-              localStorage.setItem("sl_contradictions_fp", fp);
-            }).catch(() => {});
             setShowConfig(false);
             const firstReal = full.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
             if (firstReal) setSelected(firstReal);
@@ -173,7 +173,7 @@ export default function ContradictionsPage() {
           } else if (job.status === "error") {
             stopPolling();
             clearInterval(ticker);
-            localStorage.removeItem("sl_contradictions_job");
+            cache.clear("contradictions_job");
             setError(job.error || "Scan failed.");
             setLoading(false); setStage("");
           }

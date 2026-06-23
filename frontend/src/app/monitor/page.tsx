@@ -106,14 +106,14 @@ export default function MonitorPage() {
         maxPerSource: 5,
       });
 
-      localStorage.setItem("sl_monitor_job", job_id);
+      cache.write("monitor_job", job_id);
       stopPolling();
       pollRef.current = setInterval(async () => {
         try {
           const job = await api.getJob<{ digests: MonitorDigest[]; sources_failed: string[] }>(job_id);
           if (job.status === "done" && job.result) {
             stopPolling();
-            localStorage.removeItem("sl_monitor_job");
+            cache.clear("monitor_job");
             setResults(job.result.digests);
             setSourcesFailed(job.result.sources_failed || []);
             cache.write("monitor_results", job.result.digests);
@@ -121,7 +121,7 @@ export default function MonitorPage() {
             setLoading(false);
           } else if (job.status === "error") {
             stopPolling();
-            localStorage.removeItem("sl_monitor_job");
+            cache.clear("monitor_job");
             setError(job.error || "Scan failed.");
             setLoading(false);
           }

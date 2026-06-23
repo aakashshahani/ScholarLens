@@ -235,7 +235,6 @@ export default function SearchPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const heroInputRef = useRef<HTMLInputElement>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     const saved = cache.read<Exchange[]>(CACHE_KEY);
@@ -251,20 +250,6 @@ export default function SearchPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [exchanges]);
-
-  function stopPolling() {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-  }
-
-  function buildHistory() {
-    return exchanges
-      .filter((e) => e.answer && !e.answerError)
-      .slice(-10)
-      .flatMap((e) => [
-        { role: "user", content: e.question },
-        { role: "assistant", content: e.answer! },
-      ]);
-  }
 
   async function submit() {
     const q = input.trim();
@@ -305,14 +290,11 @@ export default function SearchPage() {
   }
 
   function clear() {
-    stopPolling();
     setExchanges([]);
     cache.clear(CACHE_KEY);
     setSubmitting(false);
     setTimeout(() => heroInputRef.current?.focus(), 50);
   }
-
-  useEffect(() => () => stopPolling(), []);
 
   const isEmpty = exchanges.length === 0;
 
