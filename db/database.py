@@ -336,6 +336,15 @@ class Database:
         cur.execute(
             "ALTER TABLE relationships ADD COLUMN IF NOT EXISTS user_feedback TEXT"
         )
+        # Enable RLS on all tables so PostgREST has no public access.
+        # The app connects as the postgres superuser via psycopg2, which bypasses
+        # RLS entirely, so these statements have no effect on app behaviour.
+        for tbl in [
+            "users", "papers", "chunks", "analysis_results", "claims",
+            "relationships", "hypothesis_cache", "sessions",
+            "monitor_topics", "paper_tags",
+        ]:
+            cur.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
         # Indexes
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS idx_chunks_paper ON chunks(paper_id)",
