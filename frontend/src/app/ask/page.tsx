@@ -40,10 +40,17 @@ function SourceCard({ s }: { s: NonNullable<Message["sources"]>[number] }) {
   );
 }
 
+const escHtml = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
 function InlineMd({ text }: { text: string }) {
-  const html = text
-    .replace(/\*\*(.+?)\*\*/g, '<strong class="text-[var(--text-1)] font-semibold">$1</strong>')
-    .replace(/`(.+?)`/g, '<code class="mono text-[11px] bg-[var(--surface-3)] px-1 py-0.5 rounded text-[var(--gen)]">$1</code>');
+  const mdLine = (raw: string) => {
+    const e = escHtml(raw);
+    return e
+      .replace(/\*\*(.+?)\*\*/g, '<strong class="text-[var(--text-1)] font-semibold">$1</strong>')
+      .replace(/`(.+?)`/g, '<code class="mono text-[11px] bg-[var(--surface-3)] px-1 py-0.5 rounded text-[var(--gen)]">$1</code>');
+  };
   return (
     <div className="text-[13px] text-[var(--text-1)] leading-[1.7] space-y-1.5">
       {text.split("\n").map((line, i) => {
@@ -52,11 +59,11 @@ function InlineMd({ text }: { text: string }) {
           return (
             <div key={i} className="flex items-start gap-2">
               <span className="mt-[8px] w-[3px] h-[3px] rounded-full bg-[var(--gen)] shrink-0" />
-              <span dangerouslySetInnerHTML={{ __html: line.slice(2).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>') }} />
+              <span dangerouslySetInnerHTML={{ __html: mdLine(line.slice(2)) }} />
             </div>
           );
         }
-        return <p key={i} dangerouslySetInnerHTML={{ __html: line.replace(/\*\*(.+?)\*\*/g, '<strong class="font-semibold">$1</strong>') }} />;
+        return <p key={i} dangerouslySetInnerHTML={{ __html: mdLine(line) }} />;
       })}
     </div>
   );

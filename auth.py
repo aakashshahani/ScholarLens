@@ -30,6 +30,11 @@ _db = Database()
 
 _BCRYPT_MAX_BYTES = 72
 
+# Pre-computed dummy hash used in constant-time login checks.
+# When the email doesn't exist we still run bcrypt so the timing is
+# indistinguishable from a wrong-password attempt on a real account.
+_DUMMY_HASH = bcrypt.hashpw(b"dummy", bcrypt.gensalt()).decode("utf-8")
+
 
 # ── Passwords ────────────────────────────────────────────────
 
@@ -44,6 +49,14 @@ def verify_password(password: str, password_hash: str) -> bool:
         return bcrypt.checkpw(pw, password_hash.encode("utf-8"))
     except (ValueError, TypeError):
         return False
+
+
+def verify_password_constant_time(password: str, user_hash: str | None) -> bool:
+    """Always runs bcrypt regardless of whether a user was found, so unknown
+    emails take the same wall-clock time as wrong passwords on real accounts."""
+    hash_to_check = user_hash if user_hash is not None else _DUMMY_HASH
+    result = verify_password(password, hash_to_check)
+    return result and user_hash is not None
 
 
 # ── BYOK key encryption (Fernet) ─────────────────────────────

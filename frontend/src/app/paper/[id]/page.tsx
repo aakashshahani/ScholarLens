@@ -14,10 +14,17 @@ function MarkdownContent({ text }: { text: string }) {
   let listType: "ul" | "ol" = "ul";
   let olIndex = 0;
 
-  const inline = (s: string) =>
-    s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-     .replace(/\*(.+?)\*/g, '<em>$1</em>')
-     .replace(/`(.+?)`/g, '<code class="mono text-[11.5px] bg-[var(--surface-3)] px-1 py-0.5 rounded text-[var(--gen)]">$1</code>');
+  const escHtml = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+  const inline = (s: string) => {
+    const e = escHtml(s);
+    return e
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*(.+?)\*/g, "<em>$1</em>")
+      .replace(/`(.+?)`/g, '<code class="mono text-[11.5px] bg-[var(--surface-3)] px-1 py-0.5 rounded text-[var(--gen)]">$1</code>');
+  };
 
   const flushList = (key: string) => {
     if (!listBuffer.length) return;

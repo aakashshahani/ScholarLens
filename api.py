@@ -512,7 +512,7 @@ def _scope_ids(user: User, requested: list[str] | None) -> list[str]:
 def register(request: Request, response: Response, req: RegisterRequest):
     email = req.email.lower().strip()
     if db.get_user_by_email(email):
-        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+        raise HTTPException(status_code=409, detail="Unable to register with this email.")
     user = db.create_user(email, authlib.hash_password(req.password))
     # The very first account adopts any pre-auth (unowned) papers, so existing
     # test data isn't stranded once scoping turns on. Fires exactly once.
@@ -529,9 +529,9 @@ def register(request: Request, response: Response, req: RegisterRequest):
 def login(request: Request, response: Response, req: LoginRequest):
     email = req.email.lower().strip()
     user = db.get_user_by_email(email)
-    # Same error whether the email is unknown or the password is wrong â€" don't
-    # leak which emails have accounts.
-    if not user or not authlib.verify_password(req.password, user.password_hash):
+    # Always run bcrypt even when the email is unknown — same wall-clock time
+    # as a wrong-password attempt, so timing can't distinguish the two cases.
+    if not authlib.verify_password_constant_time(req.password, user.password_hash if user else None):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     token = authlib.new_session_token()  # fresh token on every login (rotation)
     db.create_session(user.id, token, authlib.session_expiry_iso())
