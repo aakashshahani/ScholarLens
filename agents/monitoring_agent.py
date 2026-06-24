@@ -6,7 +6,7 @@ Runs on demand or on a schedule. For each configured research topic:
 2. Filters out papers already in the library
 3. Scores relevance against the user's existing library using embeddings
 4. Summarizes the most relevant new papers
-5. Sends an email digest via Resend
+5. Sends an email digest via Gmail SMTP
 
 This is the feature that turns ScholarLens from a tool into infrastructure.
 A researcher configures their topics once, and ScholarLens watches the field for them.

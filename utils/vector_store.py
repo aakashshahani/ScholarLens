@@ -4,7 +4,7 @@ pgvector-backed vector store for ScholarLens using Voyage AI embeddings.
 Replaces local sentence-transformers (MiniLM) with Voyage AI API calls,
 eliminating the ~400MB torch RAM overhead on Render free tier.
 
-Model: voyage-3.5-lite — 512 dims, improved retrieval quality over voyage-3-lite
+Model: voyage-3.5-lite — 1024 dims, improved retrieval quality over voyage-3-lite
 at the same price ($0.02/M tokens). Requires: VOYAGE_API_KEY in environment.
 """
 

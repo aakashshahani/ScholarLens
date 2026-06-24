@@ -1,6 +1,6 @@
 # ScholarLens
 
-![Python](https://img.shields.io/badge/Python-3.12-blue) ![Next.js](https://img.shields.io/badge/Next.js-16-black) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688) ![License](https://img.shields.io/badge/License-MIT-green) [![Live Demo](https://img.shields.io/badge/Live%20Demo-scholarlens--research.vercel.app-6366f1)](https://scholarlens-research.vercel.app)
+![Python](https://img.shields.io/badge/Python-3.12-blue) ![Next.js](https://img.shields.io/badge/Next.js-16-black) ![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688) ![License](https://img.shields.io/badge/License-MIT-green) [![Live Demo](https://img.shields.io/badge/Live%20Demo-scholarlens--research.vercel.app-6366f1)](https://scholarlens-research.vercel.app)
 
 > **[Live demo →](https://scholarlens-research.vercel.app)**
 
@@ -400,10 +400,9 @@ Security and multi-user: email + password auth (bcrypt, httpOnly session cookies
 
 Frontend: dashboard with parallel API loading, login/register gate, settings panel (BYOK key management, model picker), per-user localStorage cache namespacing, stale-while-revalidate across all tabs.
 
-Infrastructure: migrated from SQLite + ChromaDB to Supabase Postgres + pgvector. Deployed on Render (backend) + Vercel (frontend).
+Infrastructure: migrated from SQLite + ChromaDB to Supabase Postgres + pgvector. Deployed on Render (backend) + Vercel (frontend). Daily monitor scheduling via APScheduler BackgroundScheduler (9am UTC, per-user topics, Gmail digest).
 
 **Later**
-- Daily monitor scheduling (APScheduler, per-user topics + digest email from DB)
 - Cross-encoder reranking on the Stage-1 retrieval pass
 - Demo video
 
