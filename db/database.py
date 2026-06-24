@@ -905,18 +905,17 @@ class Database:
         cur = conn.cursor()
         import json as _json
 
+        results = []
+        pid_set = set(user_paper_ids)
+
         if user_id:
-            # Fast path: filter by user_id stored at write time
+            # Primary path: entries saved after user_id column was added
             cur.execute(
                 "SELECT cache_key, payload, grounding, created_at FROM hypothesis_cache "
                 "WHERE user_id = %s ORDER BY created_at DESC",
                 (user_id,),
             )
-            rows = cur.fetchall()
-            cur.close()
-            self._put_conn(conn)
-            results = []
-            for r in rows:
+            for r in cur.fetchall():
                 try:
                     results.append({
                         "cache_key": r["cache_key"],
@@ -926,25 +925,18 @@ class Database:
                     })
                 except Exception:
                     continue
-            return results
 
-        # Legacy path: full-table scan + paper_id filter (entries saved before user_id was added)
+        # Legacy path: entries saved before user_id column was added — match by paper_id
         cur.execute(
             "SELECT cache_key, payload, grounding, created_at FROM hypothesis_cache "
             "WHERE user_id IS NULL ORDER BY created_at DESC"
         )
-        rows = cur.fetchall()
-        cur.close()
-        self._put_conn(conn)
-        results = []
-        pid_set = set(user_paper_ids)
-        for r in rows:
+        for r in cur.fetchall():
             try:
                 hyps = _json.loads(r["payload"])
                 for h in hyps:
                     papers = [sp.get("paper_id", "") for sp in h.get("supporting_papers", [])]
                     non_empty = [p for p in papers if p]
-                    # Include if: any paper_id matches, OR title matching failed (all empty)
                     if not pid_set or not non_empty or any(p in pid_set for p in non_empty):
                         results.append({
                             "cache_key": r["cache_key"],
@@ -955,6 +947,11 @@ class Database:
                         break
             except Exception:
                 continue
+
+        cur.close()
+        self._put_conn(conn)
+        # Sort combined results newest-first
+        results.sort(key=lambda x: x.get("created_at") or "", reverse=True)
         return results
 
     def invalidate_hypothesis_cache(self, cache_key: str):

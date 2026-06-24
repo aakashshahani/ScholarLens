@@ -164,7 +164,7 @@ class VectorStore:
             ORDER BY score
             LIMIT %s
         """
-        params_full = params + [query_vec_str, fetch_n]
+        params_full = [query_vec_str] + params + [fetch_n]
 
         conn = self._get_conn()
         cur = conn.cursor()
@@ -218,7 +218,7 @@ class VectorStore:
             ORDER BY score
             LIMIT %s
         """
-        params_full = params + [query_vec_str, fetch_n]
+        params_full = [query_vec_str] + params + [fetch_n]
 
         conn = self._get_conn()
         cur = conn.cursor()

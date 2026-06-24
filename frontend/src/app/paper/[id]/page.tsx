@@ -101,23 +101,19 @@ function parseClaimsFromContent(content: string): string[] {
 
 function KeyClaimsView({ content, paperId }: { content: string; paperId: string }) {
   const claims = parseClaimsFromContent(content);
-  if (!claims.length) {
-    return <div className="text-[14px] text-[var(--text-1)] leading-[1.8] whitespace-pre-wrap">{content}</div>;
-  }
+  if (!claims.length) return <MarkdownContent text={content} />;
   return (
-    <div className="space-y-3">
+    <div className="space-y-2.5">
       {claims.map((claim, i) => (
-        <div key={i} className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4 group">
-          <div className="flex items-start gap-3">
-            <span className="shrink-0 w-5 h-5 rounded-full bg-[var(--gen-dim)] text-[var(--gen)] text-[10px] font-medium flex items-center justify-center mt-0.5">
-              {i + 1}
-            </span>
-            <p className="flex-1 text-[13.5px] text-[var(--text-1)] leading-[1.7]">{claim}</p>
-          </div>
-          <div className="mt-2.5 pl-8 flex items-center gap-3">
+        <div key={i} className="flex items-start gap-3 group py-2 border-b border-[var(--line)] last:border-0">
+          <span className="shrink-0 w-[18px] text-[11px] font-semibold text-[var(--gen)] pt-[3px]">
+            {i + 1}.
+          </span>
+          <div className="flex-1 min-w-0">
+            <p className="text-[13.5px] text-[var(--text-1)] leading-[1.75]">{claim}</p>
             <a href={`/search?q=${encodeURIComponent(claim.slice(0, 120))}`}
-              className="flex items-center gap-1 text-[11px] text-[var(--gen)] opacity-0 group-hover:opacity-100 t-all hover:underline">
-              <ExternalLink size={10} /> Find source in library
+              className="inline-flex items-center gap-1 text-[11px] text-[var(--gen)] opacity-0 group-hover:opacity-100 t-all hover:underline mt-1">
+              <ExternalLink size={10} /> Find in library
             </a>
           </div>
         </div>
@@ -327,12 +323,17 @@ export default function PaperDetailPage() {
             {(["bibtex", "ris", "apa", "chicago", "mla"] as const).map((fmt) => {
               const ext: Record<string, string> = { bibtex: "bib", ris: "ris", apa: "txt", chicago: "txt", mla: "txt" };
               return (
-                <a key={fmt}
-                  href={api.exportCitation(paperId, fmt)}
-                  download={`citation_${fmt}.${ext[fmt]}`}
+                <button key={fmt}
+                  onClick={async () => {
+                    const blob = await api.exportCitation(paperId, fmt);
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url; a.download = `citation_${fmt}.${ext[fmt]}`; a.click();
+                    URL.revokeObjectURL(url);
+                  }}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12.5px] text-[var(--text-2)] border border-[var(--line)] bg-[var(--surface-2)] t-all hover:border-[var(--gen-line)] hover:text-[var(--gen)]">
                   <Download size={13} /> {fmt.toUpperCase()}
-                </a>
+                </button>
               );
             })}
             <button
@@ -404,9 +405,7 @@ export default function PaperDetailPage() {
             </div>
             {answer && (
               <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4">
-                <div className="text-[13.5px] text-[var(--text-1)] leading-[1.7] whitespace-pre-wrap">
-                  {answer}
-                </div>
+                <MarkdownContent text={answer} />
               </div>
             )}
           </div>

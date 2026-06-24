@@ -143,9 +143,13 @@ export default function LibraryPage() {
     } catch {}
   };
 
-  const exportCitation = (paperId: string, fmt: "bibtex" | "ris" | "apa" | "chicago" | "mla") => {
-    const url = api.exportCitation(paperId, fmt);
-    const a = document.createElement("a"); a.href = url; a.download = ""; a.click();
+  const exportCitation = async (paperId: string, fmt: "bibtex" | "ris" | "apa" | "chicago" | "mla") => {
+    const ext: Record<string, string> = { bibtex: "bib", ris: "ris", apa: "txt", chicago: "txt", mla: "txt" };
+    const blob = await api.exportCitation(paperId, fmt);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `citation_${fmt}.${ext[fmt]}`; a.click();
+    URL.revokeObjectURL(url);
   };
 
   const SORT_LABELS: Record<SortKey, string> = {

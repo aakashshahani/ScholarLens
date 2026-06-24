@@ -163,10 +163,12 @@ export default function HypothesesPage() {
     try { localStorage.setItem("hyp_feedback", JSON.stringify(next)); } catch { /* ignore */ }
   };
 
-  const handleExport = () => {
-    const url = api.exportHypotheses("markdown");
+  const handleExport = async () => {
+    const blob = await api.exportHypotheses("markdown");
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = "hypotheses.md"; a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (

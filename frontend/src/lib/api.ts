@@ -522,8 +522,15 @@ export const api = {
     ),
 
   // ── Citation export ───────────────────────────────────────
-  exportCitation: (paperId: string, format: "bibtex" | "ris" | "apa" | "chicago" | "mla") =>
-    `${API_BASE}/api/papers/${paperId}/export?format=${format}`,
+  exportCitation: async (paperId: string, format: "bibtex" | "ris" | "apa" | "chicago" | "mla") => {
+    const token = getToken();
+    const res = await fetch(`${API_BASE}/api/papers/${paperId}/export?format=${format}`, {
+      credentials: "include",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new ApiError(res.status, "Export failed");
+    return res.blob();
+  },
 
   // ── Contradiction feedback ────────────────────────────────
   contradictionFeedback: (relId: string, verdict: "agree" | "disagree" | "flag") =>
@@ -533,11 +540,25 @@ export const api = {
     }),
 
   // ── Export reports ────────────────────────────────────────
-  exportContradictions: (format: "markdown" | "json" = "markdown") =>
-    `${API_BASE}/api/contradictions/export?format=${format}`,
+  exportContradictions: async (format: "markdown" | "json" = "markdown") => {
+    const token = getToken();
+    const res = await fetch(`${API_BASE}/api/contradictions/export?format=${format}`, {
+      credentials: "include",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new ApiError(res.status, "Export failed");
+    return res.blob();
+  },
 
-  exportHypotheses: (format: "markdown" | "json" = "markdown") =>
-    `${API_BASE}/api/hypotheses/export?format=${format}`,
+  exportHypotheses: async (format: "markdown" | "json" = "markdown") => {
+    const token = getToken();
+    const res = await fetch(`${API_BASE}/api/hypotheses/export?format=${format}`, {
+      credentials: "include",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new ApiError(res.status, "Export failed");
+    return res.blob();
+  },
 
   // ── Graph / Insights ──────────────────────────────────────
   graph: (opts?: { paperIds?: string[]; similarityThreshold?: number; maxPairs?: number; compute?: boolean }) =>

@@ -141,10 +141,12 @@ export default function ContradictionsPage() {
   // Cleanup on unmount
   useEffect(() => () => stopPolling(), []);
 
-  const handleExport = (fmt: "markdown" | "json") => {
-    const url = api.exportContradictions(fmt);
+  const handleExport = async (fmt: "markdown" | "json") => {
+    const blob = await api.exportContradictions(fmt);
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = `contradictions.${fmt === "markdown" ? "md" : "json"}`; a.click();
+    URL.revokeObjectURL(url);
   };
 
   const handleFeedback = async (relId: string, verdict: "agree" | "disagree" | "flag") => {
