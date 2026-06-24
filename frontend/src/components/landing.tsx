@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import Image from "next/image";
+import { LogoBadge } from "@/components/logo";
 import {
   ArrowRight,
   Zap,
@@ -611,9 +612,7 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
       {/* nav */}
       <nav className="fixed top-0 left-0 right-0 z-30 h-[60px] flex items-center justify-between px-7 backdrop-blur-[10px] bg-gradient-to-b from-[rgba(11,13,18,0.85)] to-transparent">
         <div className="flex items-center gap-3">
-          <span className="relative flex items-center justify-center w-7 h-7 rounded-[8px] bg-[var(--gen)] glow-gen">
-            <span className="w-[11px] h-[11px] rounded-full border-[1.6px] border-white" />
-          </span>
+          <LogoBadge size={28} />
           <span className="font-display text-[17px]">ScholarLens</span>
         </div>
         <div className="flex items-center gap-2">

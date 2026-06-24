@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
+import { LogoBadge } from "@/components/logo";
 import {
   LayoutDashboard, Library, Zap, FlaskConical, Radar, Plus, LogOut, Settings as SettingsIcon, Search,
 } from "lucide-react";
@@ -32,9 +33,7 @@ export function LeftRail() {
     >
       {/* Logomark */}
       <Link href="/" className="flex items-center h-14 px-[18px] shrink-0 overflow-hidden">
-        <span className="relative flex items-center justify-center w-6 h-6 rounded-[7px] bg-[var(--gen)] shrink-0 glow-gen">
-          <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-white" />
-        </span>
+        <LogoBadge size={24} />
         <div className="ml-3 flex flex-col overflow-hidden t-all" style={{ opacity: expanded ? 1 : 0 }}>
           <span className="font-display text-[15px] text-[var(--text-1)] whitespace-nowrap leading-tight">
             ScholarLens

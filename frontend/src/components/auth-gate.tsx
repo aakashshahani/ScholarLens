@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/lib/auth";
 import { ApiError } from "@/lib/api";
 import { ArrowRight, ArrowLeft } from "lucide-react";
+import { LogoBadge } from "@/components/logo";
 
 /* Faint, slow claim-field behind the card — a quiet echo of the landing hero
    so the gate feels like the same product, not a bare login screen. Heavily
@@ -136,9 +137,7 @@ export function AuthGate({ onBack }: { onBack?: () => void }) {
 
       {/* logomark + wordmark */}
       <div className="relative z-10 flex items-center gap-3 mb-8 fade-up">
-        <span className="relative flex items-center justify-center w-8 h-8 rounded-[8px] bg-[var(--gen)] glow-gen">
-          <span className="w-3 h-3 rounded-full border-[1.5px] border-white" />
-        </span>
+        <LogoBadge size={32} />
         <span className="font-display text-[20px] text-[var(--text-1)]">ScholarLens</span>
       </div>
 
