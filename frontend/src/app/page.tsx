@@ -24,7 +24,7 @@ import { api, HealthStatus, Paper, Insight, Hypothesis, GraphPayload } from "@/l
 import { cache } from "@/lib/cache";
 import {
   FileStack, CheckCircle2, Link2, TrendingUp, ArrowRight, ArrowUpRight,
-  Sparkles, FlaskConical, Upload, AlertTriangle, Network,
+  Sparkles, FlaskConical, Upload, AlertTriangle, Network, Loader2,
 } from "lucide-react";
 
 interface RelCounts { contradiction: number; support: number; nuance: number; unrelated: number; }
@@ -137,14 +137,14 @@ export default function Dashboard() {
     }
   }, []);
 
-  // A paper is "fully analyzed" only when all six analysis types are present —
-  // counting length >= 6 would wrongly pass a paper with a duplicate type and a
-  // missing one. This matches the backend /status definition.
   const REQUIRED = ["summary", "methods", "findings", "limitations", "key_claims", "research_gaps"];
   const analyzed = papers.filter((p) => {
     const types = new Set(p.analysis_types || []);
     return REQUIRED.every((t) => types.has(t));
   }).length;
+  // Only flag papers with zero analyses — those are freshly uploaded and queued.
+  // Papers with partial analyses are old/failed runs, not actively processing.
+  const analyzingPapers = papers.filter((p) => (p.analysis_types?.length ?? 0) === 0);
   const paperCount         = papers.length || (cache.read<Paper[]>("papers")?.length ?? 0);
   const coverage           = paperCount > 0 ? Math.round((analyzed / paperCount) * 100) : 0;
   const contradictionCount = relCounts?.contradiction ?? 0;
@@ -231,6 +231,24 @@ export default function Dashboard() {
             delay={240}
           />
         </div>
+
+        {/* ── Analyzing-in-progress banner ─────────────── */}
+        {analyzingPapers.length > 0 && papers.length > 0 && (
+          <div className="flex items-center gap-3 bg-[var(--gen-dim)] border border-[var(--gen-line)] rounded-[var(--r-lg)] px-4 py-3 mb-5">
+            <Loader2 size={14} className="text-[var(--gen)] animate-spin shrink-0" />
+            <div className="flex-1 text-[13px] text-[var(--text-2)]">
+              <span className="font-medium text-[var(--text-1)]">
+                {analyzingPapers.length} paper{analyzingPapers.length !== 1 ? "s" : ""}
+              </span>{" "}
+              {analyzingPapers.length === 1 ? "is" : "are"} queued for analysis.
+              {" "}Head to the library to trigger analysis or check progress.
+            </div>
+            <Link href="/library"
+              className="shrink-0 text-[12px] text-[var(--gen)] font-medium hover:underline flex items-center gap-1 t-all">
+              View in library <ArrowRight size={11} />
+            </Link>
+          </div>
+        )}
 
         {/* ── Spotlight row ──────────────────────────────── */}
         <div className="grid grid-cols-4 gap-3 mb-5">
