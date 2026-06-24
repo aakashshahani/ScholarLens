@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, MonitorDigest, MonitorTopic } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, SectionLabel } from "@/components/ui";
-import { Radar, Plus, X, ExternalLink, AlertCircle, CheckCircle2, Clock } from "lucide-react";
+import { Radar, Plus, X, ExternalLink, AlertCircle, CheckCircle2, Clock, BookPlus, Loader2 } from "lucide-react";
 import { cache } from "@/lib/cache";
 
 // Local draft type — what the user is building before saving
@@ -144,16 +144,61 @@ export default function MonitorPage() {
     0
   );
 
+  const [addingIds, setAddingIds] = useState<Record<string, "loading" | "done" | "error" | "dup">>({});
+
+  const addToLibrary = async (p: MonitorDigest["papers"][0]) => {
+    const key = p.title;
+    setAddingIds((s) => ({ ...s, [key]: "loading" }));
+    try {
+      const res = await api.importAdd({
+        title: p.title,
+        authors: p.authors || [],
+        abstract: p.abstract || "",
+        year: p.year,
+        source: p.source || "semantic_scholar",
+        source_id: p.url || p.title,
+        doi: null,
+        pdf_url: p.pdf_url || null,
+        url: p.url || "",
+        citation_count: null,
+      } as any);
+      setAddingIds((s) => ({ ...s, [key]: res.status === "duplicate" ? "dup" : "done" }));
+    } catch {
+      setAddingIds((s) => ({ ...s, [key]: "error" }));
+    }
+  };
+
   const renderPaper = (p: MonitorDigest["papers"][0], idx: number) => {
     const tier = TIER_META[p.relevance_tier || "tangential"] || TIER_META.tangential;
+    const addStatus = addingIds[p.title];
     return (
       <Card key={idx} className="!p-4">
         <div className="flex items-start justify-between gap-3 mb-2">
           <div className="text-[13.5px] font-medium text-[var(--text-1)] leading-snug flex-1">{p.title}</div>
-          <a href={p.url} target="_blank" rel="noopener noreferrer"
-            className="shrink-0 p-1.5 text-[var(--text-3)] hover:text-[var(--gen)] t-all">
-            <ExternalLink size={14} />
-          </a>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* Add to library */}
+            {addStatus === "done" ? (
+              <span className="text-[11px] text-[var(--support)] flex items-center gap-1">
+                <CheckCircle2 size={12} /> Added
+              </span>
+            ) : addStatus === "dup" ? (
+              <span className="text-[11px] text-[var(--text-3)]">Already in library</span>
+            ) : addStatus === "error" ? (
+              <span className="text-[11px] text-[var(--contra)]">Failed</span>
+            ) : (
+              <button onClick={() => addToLibrary(p)} disabled={addStatus === "loading"}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-[var(--r-sm)] border border-[var(--line)] text-[11.5px] text-[var(--text-2)] t-all hover:border-[var(--gen-line)] hover:text-[var(--gen)] disabled:opacity-40">
+                {addStatus === "loading"
+                  ? <Loader2 size={12} className="animate-spin" />
+                  : <BookPlus size={12} />}
+                Add
+              </button>
+            )}
+            <a href={p.url} target="_blank" rel="noopener noreferrer"
+              className="p-1.5 text-[var(--text-3)] hover:text-[var(--gen)] t-all">
+              <ExternalLink size={14} />
+            </a>
+          </div>
         </div>
         <div className="text-[11.5px] text-[var(--text-3)] mb-2.5">
           {p.authors?.slice(0, 3).join(", ") || "Unknown authors"}
