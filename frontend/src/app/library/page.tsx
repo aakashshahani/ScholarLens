@@ -143,7 +143,7 @@ export default function LibraryPage() {
     } catch {}
   };
 
-  const exportCitation = (paperId: string, fmt: "bibtex" | "ris") => {
+  const exportCitation = (paperId: string, fmt: "bibtex" | "ris" | "apa" | "chicago" | "mla") => {
     const url = api.exportCitation(paperId, fmt);
     const a = document.createElement("a"); a.href = url; a.download = ""; a.click();
   };
@@ -390,8 +390,8 @@ export default function LibraryPage() {
                   </div>
 
                   {/* Citation export */}
-                  <div className="flex gap-2 mb-3">
-                    {(["bibtex", "ris"] as const).map((fmt) => (
+                  <div className="flex flex-wrap gap-2 mb-3">
+                    {(["bibtex", "ris", "apa", "chicago", "mla"] as const).map((fmt) => (
                       <button key={fmt} onClick={() => exportCitation(selected.id, fmt)}
                         className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-[var(--r-sm)] border border-[var(--line)] text-[11.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)]">
                         <Download size={11} /> {fmt.toUpperCase()}

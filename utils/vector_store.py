@@ -256,3 +256,14 @@ class VectorStore:
         cur.close()
         self._put_conn(conn)
         return int(n)
+
+    def count_for_papers(self, paper_ids: list[str]) -> int:
+        if not paper_ids:
+            return 0
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) as count FROM embeddings WHERE paper_id = ANY(%s)", (paper_ids,))
+        n = cur.fetchone()["count"]
+        cur.close()
+        self._put_conn(conn)
+        return int(n)

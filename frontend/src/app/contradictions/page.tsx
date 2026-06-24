@@ -439,29 +439,31 @@ function Adjudication({ r, feedback, onFeedback }: {
         <span className="text-[12px] font-medium uppercase tracking-wider" style={{ color: s.c }}>{r.relationship}</span>
         <span className="ml-auto text-[10px] text-[var(--text-4)] uppercase tracking-wider">{r.category}</span>
       </div>
-      <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2">Adjudication</div>
-      <MarkdownAnswer text={r.explanation || ""} />
+
+      {/* Resolution first — the actionable output the researcher needs */}
+      {r.resolution && (
+        <div className="mb-4 p-3 rounded-[var(--r-md)] bg-[var(--gen-dim)] border border-[var(--gen-line)]">
+          <div className="text-[10px] font-semibold text-[var(--gen)] uppercase tracking-wider mb-1.5">Path to resolution</div>
+          <div className="text-[12.5px] text-[var(--text-1)] leading-[1.65]">{r.resolution}</div>
+        </div>
+      )}
       {stronger && (
-        <div className="mt-4 pt-4 border-t border-[var(--line)]">
+        <div className="mb-4 pb-4 border-b border-[var(--line)]">
           <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-1.5">Stronger evidence</div>
           <div className="text-[12.5px] text-[var(--support)] font-medium">{stronger}</div>
         </div>
       )}
-      {r.resolution && (
-        <div className="mt-4 pt-4 border-t border-[var(--line)]">
-          <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-1.5">Path to resolution</div>
-          <div className="text-[12.5px] text-[var(--text-2)] leading-[1.6]">{r.resolution}</div>
-        </div>
-      )}
+      <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2">Why this conflict exists</div>
+      <MarkdownAnswer text={r.explanation || ""} />
 
       {/* Feedback row */}
       <div className="mt-4 pt-4 border-t border-[var(--line)]">
-        <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2">Your verdict</div>
-        <div className="flex items-center gap-2">
+        <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-1.5">Is this conflict real?</div>
+        <div className="flex items-center gap-2 mb-2">
           {([
-            { v: "agree"    as const, icon: <ThumbsUp size={12} />,   label: "Agree",    active: "bg-[var(--support-dim)] text-[var(--support)] border-[var(--support-line)]" },
-            { v: "disagree" as const, icon: <ThumbsDown size={12} />, label: "Disagree", active: "bg-[var(--contra-dim)] text-[var(--contra)] border-[var(--contra-line)]" },
-            { v: "flag"     as const, icon: <Flag size={12} />,       label: "Flag",     active: "bg-[var(--nuance-dim)] text-[var(--nuance)] border-[var(--nuance-line)]" },
+            { v: "agree"    as const, icon: <ThumbsUp size={12} />,   label: "Yes, real",  active: "bg-[var(--support-dim)] text-[var(--support)] border-[var(--support-line)]" },
+            { v: "disagree" as const, icon: <ThumbsDown size={12} />, label: "Mislabeled", active: "bg-[var(--contra-dim)] text-[var(--contra)] border-[var(--contra-line)]" },
+            { v: "flag"     as const, icon: <Flag size={12} />,       label: "Needs review", active: "bg-[var(--nuance-dim)] text-[var(--nuance)] border-[var(--nuance-line)]" },
           ]).map(({ v, icon, label, active }) => (
             <button key={v} onClick={() => onFeedback(v)}
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--r-md)] text-[11.5px] border t-all ${
@@ -470,9 +472,13 @@ function Adjudication({ r, feedback, onFeedback }: {
               {icon} {label}
             </button>
           ))}
-          {feedback && (
-            <span className="ml-auto text-[10.5px] text-[var(--text-4)]">Saved</span>
-          )}
+        </div>
+        <div className="text-[10.5px] text-[var(--text-4)]">
+          {feedback === "disagree"
+            ? "Marked mislabeled — excluded from hypothesis generation."
+            : feedback
+            ? "Verdict recorded — informs future hypothesis generation."
+            : "Marking as mislabeled removes it from hypothesis generation."}
         </div>
       </div>
     </Card>

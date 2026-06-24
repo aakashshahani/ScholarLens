@@ -96,7 +96,7 @@ export default function HypothesesPage() {
   useEffect(() => () => stopPolling(), []);
 
   const generate = async () => {
-    setLoading(true); setHypotheses([]); setError("");
+    setLoading(true); setError("");
     const cacheKey = selectionCacheKey(selectedIds, papers);
 
     // Serve from localStorage cache if library hasn't changed
@@ -118,7 +118,7 @@ export default function HypothesesPage() {
           ? undefined
           : selectedIds,
         numHypotheses: count,
-        refresh: true,
+        refresh: false,
       });
 
       cache.write("hypotheses_job", job_id);

@@ -7,6 +7,72 @@ import { cache } from "@/lib/cache";
 import { Card, Spinner, EmptyState, AnalysisTag, SectionLabel } from "@/components/ui";
 import { ArrowLeft, RefreshCw, Trash2, FileText, CheckCircle2, SendHorizontal, Download, ExternalLink } from "lucide-react";
 
+function MarkdownContent({ text }: { text: string }) {
+  const lines = text.split("\n");
+  const elements: React.ReactNode[] = [];
+  let listBuffer: string[] = [];
+  let listType: "ul" | "ol" = "ul";
+  let olIndex = 0;
+
+  const inline = (s: string) =>
+    s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+     .replace(/\*(.+?)\*/g, '<em>$1</em>')
+     .replace(/`(.+?)`/g, '<code class="mono text-[11.5px] bg-[var(--surface-3)] px-1 py-0.5 rounded text-[var(--gen)]">$1</code>');
+
+  const flushList = (key: string) => {
+    if (!listBuffer.length) return;
+    elements.push(
+      <ul key={key} className="space-y-1.5 mb-3 pl-0 list-none">
+        {listBuffer.map((item, i) => (
+          <li key={i} className="flex items-start gap-2.5 text-[14px] text-[var(--text-1)] leading-[1.75]">
+            <span className="mt-[10px] w-[4px] h-[4px] rounded-full bg-[var(--gen)] shrink-0" />
+            <span dangerouslySetInnerHTML={{ __html: inline(item) }} />
+          </li>
+        ))}
+      </ul>
+    );
+    listBuffer = [];
+  };
+
+  lines.forEach((raw, idx) => {
+    const line = raw.trim();
+    if (!line) { flushList(`l${idx}`); return; }
+    if (line.startsWith("### ")) {
+      flushList(`l${idx}`);
+      elements.push(<h3 key={idx} className="text-[12px] font-semibold text-[var(--text-3)] uppercase tracking-[0.08em] mt-5 mb-1.5">{line.slice(4)}</h3>);
+      return;
+    }
+    if (line.startsWith("## ")) {
+      flushList(`l${idx}`);
+      elements.push(<h2 key={idx} className="text-[15px] font-semibold text-[var(--text-1)] mt-6 mb-2 pb-1.5 border-b border-[var(--line)]">{line.slice(3)}</h2>);
+      return;
+    }
+    if (line.startsWith("# ")) {
+      flushList(`l${idx}`);
+      elements.push(<h2 key={idx} className="text-[15px] font-semibold text-[var(--text-1)] mt-6 mb-2 pb-1.5 border-b border-[var(--line)]">{line.slice(2)}</h2>);
+      return;
+    }
+    if (line.startsWith("- ") || line.startsWith("* ")) { listBuffer.push(line.slice(2)); return; }
+    const numbered = line.match(/^\d+[.)]\s+(.+)/);
+    if (numbered) { listBuffer.push(numbered[1]); return; }
+    // Plain heading-style lines (no markdown, but title-cased short lines)
+    const isHeading = line.length < 60 && !line.includes(".") && line === line.trimEnd()
+      && /^[A-Z]/.test(line) && !line.endsWith(",");
+    if (isHeading && lines[idx + 1]?.trim() === "") {
+      flushList(`l${idx}`);
+      elements.push(<h3 key={idx} className="text-[13px] font-semibold text-[var(--text-2)] mt-5 mb-1.5">{line}</h3>);
+      return;
+    }
+    flushList(`l${idx}`);
+    elements.push(
+      <p key={idx} className="text-[14px] text-[var(--text-1)] leading-[1.8] mb-2"
+        dangerouslySetInnerHTML={{ __html: inline(line) }} />
+    );
+  });
+  flushList("end");
+  return <div className="space-y-0">{elements}</div>;
+}
+
 function parseClaimsFromContent(content: string): string[] {
   const claims: string[] = [];
   let current = "";
@@ -251,14 +317,17 @@ export default function PaperDetailPage() {
               <span className="text-[11px] text-[var(--contra)]">{reanalyzeError}</span>
             )}
             {/* Citation export */}
-            {(["bibtex", "ris"] as const).map((fmt) => (
-              <a key={fmt}
-                href={api.exportCitation(paperId, fmt)}
-                download={`citation.${fmt === "bibtex" ? "bib" : "ris"}`}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12.5px] text-[var(--text-2)] border border-[var(--line)] bg-[var(--surface-2)] t-all hover:border-[var(--gen-line)] hover:text-[var(--gen)]">
-                <Download size={13} /> {fmt.toUpperCase()}
-              </a>
-            ))}
+            {(["bibtex", "ris", "apa", "chicago", "mla"] as const).map((fmt) => {
+              const ext: Record<string, string> = { bibtex: "bib", ris: "ris", apa: "txt", chicago: "txt", mla: "txt" };
+              return (
+                <a key={fmt}
+                  href={api.exportCitation(paperId, fmt)}
+                  download={`citation_${fmt}.${ext[fmt]}`}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12.5px] text-[var(--text-2)] border border-[var(--line)] bg-[var(--surface-2)] t-all hover:border-[var(--gen-line)] hover:text-[var(--gen)]">
+                  <Download size={13} /> {fmt.toUpperCase()}
+                </a>
+              );
+            })}
             <button
               onClick={handleDelete}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12.5px] text-[var(--text-2)] border border-[var(--line)] bg-[var(--surface-2)] t-all hover:border-[var(--contra-line)] hover:text-[var(--contra)]"
@@ -292,9 +361,7 @@ export default function PaperDetailPage() {
                 {active?.type === "key_claims" ? (
                   <KeyClaimsView content={active.content} paperId={paperId} />
                 ) : (
-                  <div className="text-[14px] text-[var(--text-1)] leading-[1.8] whitespace-pre-wrap">
-                    {active?.content}
-                  </div>
+                  <MarkdownContent text={active?.content || ""} />
                 )}
               </div>
             </>

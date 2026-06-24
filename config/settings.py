@@ -127,6 +127,7 @@ class Settings:
     rl_search: str = field(default_factory=lambda: os.getenv("RL_SEARCH", "120/hour"))
     rl_monitor: str = field(default_factory=lambda: os.getenv("RL_MONITOR", "10/hour"))
     rl_import_search: str = field(default_factory=lambda: os.getenv("RL_IMPORT_SEARCH", "30/hour"))
+    rl_import_lookup: str = field(default_factory=lambda: os.getenv("RL_IMPORT_LOOKUP", "20/hour"))
     rl_import_add: str = field(default_factory=lambda: os.getenv("RL_IMPORT_ADD", "20/hour"))
 
     # ── Auth / sessions / BYOK ───────────────────────────────

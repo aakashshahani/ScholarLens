@@ -16,6 +16,7 @@ Uses the requests library with built-in retry and backoff.
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,18 +53,27 @@ def _make_session() -> requests.Session:
 
 _session = _make_session()
 
-# Per-source rate limiters
+# Per-source rate limiters — lock serializes concurrent callers so the
+# check-and-sleep is atomic (prevents the TOCTOU race where two threads
+# both pass the elapsed check and fire simultaneously).
 _last_request: dict[str, float] = {"arxiv": 0.0, "s2": 0.0, "openalex": 0.0}
+_source_locks: dict[str, threading.Lock] = {
+    "arxiv": threading.Lock(),
+    "s2": threading.Lock(),
+    "openalex": threading.Lock(),
+}
 
-# In-memory search cache — keyed by (query, sources, max_per_source)
+# In-memory search cache
 _cache: dict[str, list] = {}
+_cache_lock = threading.Lock()
 
 
 def _wait(source: str, seconds: float = 3.0):
-    elapsed = time.time() - _last_request.get(source, 0.0)
-    if elapsed < seconds:
-        time.sleep(seconds - elapsed)
-    _last_request[source] = time.time()
+    with _source_locks[source]:
+        elapsed = time.time() - _last_request.get(source, 0.0)
+        if elapsed < seconds:
+            time.sleep(seconds - elapsed)
+        _last_request[source] = time.time()
 
 
 # ── Data Model ───────────────────────────────────────────────
@@ -446,8 +456,9 @@ class PaperImporter:
             sources = ["semantic_scholar", "openalex", "arxiv"]
 
         cache_key = f"{query}|{'_'.join(sorted(sources))}|{max_per_source}"
-        if cache_key in _cache:
-            return _cache[cache_key], []
+        with _cache_lock:
+            if cache_key in _cache:
+                return _cache[cache_key], []
 
         all_results: list[ImportResult] = []
         failed: list[str] = []
@@ -475,26 +486,95 @@ class PaperImporter:
                 seen.add(key)
                 deduped.append(r)
 
-        # Only cache fully-successful scans
         if not failed:
-            _cache[cache_key] = deduped
+            with _cache_lock:
+                _cache[cache_key] = deduped
         return deduped, failed
+
+    def _fetch_by_doi(self, doi: str) -> ImportResult | None:
+        """Try S2 first, then OpenAlex as fallback for DOI lookup."""
+        result = self.s2.fetch_by_doi(doi)
+        if result:
+            return result
+        # OpenAlex DOI lookup
+        _wait("openalex", 1.0)
+        try:
+            resp = _session.get(
+                "https://api.openalex.org/works",
+                params=self.openalex._params({"filter": f"doi:{doi}", "select":
+                    "id,title,authorships,abstract_inverted_index,"
+                    "publication_year,ids,open_access,cited_by_count,doi"}),
+                timeout=(8, 20),
+            )
+            resp.raise_for_status()
+            works = resp.json().get("results", [])
+            if works:
+                return self.openalex._to_result(works[0])
+        except Exception:
+            pass
+        return None
 
     def lookup(self, identifier: str) -> ImportResult | None:
         identifier = identifier.strip()
 
-        if "arxiv" in identifier.lower() or re.match(r"^\d{4}\.\d{4,5}", identifier):
+        # arXiv: URL, "arXiv:" prefix, or bare NNNN.NNNNN id
+        if re.search(r"arxiv\.org", identifier, re.IGNORECASE) or \
+           re.match(r"^arxiv:", identifier, re.IGNORECASE) or \
+           re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", identifier):
             return self.arxiv.fetch_by_id(identifier)
 
-        if identifier.startswith("10.") or "doi.org" in identifier:
-            doi = re.sub(r"^https?://doi\.org/", "", identifier)
-            return self.s2.fetch_by_doi(doi)
+        # DOI: starts with "10." or contains doi.org
+        if re.match(r"^10\.\d{4,}/", identifier) or "doi.org" in identifier:
+            doi = re.sub(r"^https?://(dx\.)?doi\.org/", "", identifier).strip()
+            return self._fetch_by_doi(doi)
+
+        # Semantic Scholar paper ID (40-char hex or CorpusId:NNN)
+        if re.match(r"^[0-9a-f]{40}$", identifier) or \
+           re.match(r"^CorpusId:\d+$", identifier, re.IGNORECASE):
+            _wait("s2", 1.5)
+            try:
+                resp = _session.get(
+                    f"{self.s2.BASE}/paper/{identifier}",
+                    params={"fields": self.s2.FIELDS},
+                    headers=self.s2._headers(),
+                    timeout=15,
+                )
+                if resp.ok:
+                    paper = resp.json()
+                    if paper.get("title"):
+                        return self.s2._to_result(paper)
+            except Exception:
+                pass
+            return None
+
+        # Title / keyword fallback: try S2 + OpenAlex, validate top result
+        # by requiring the returned title to share at least one significant
+        # word with the query (guards against completely off-topic results).
+        query_words = {w.lower() for w in re.findall(r"\w{4,}", identifier)}
+
+        def _title_matches(title: str) -> bool:
+            if not query_words:
+                return True
+            result_words = {w.lower() for w in re.findall(r"\w{4,}", title)}
+            return bool(query_words & result_words)
 
         try:
-            results = self.s2.search(identifier, max_results=1)
+            results = self.s2.search(identifier, max_results=3)
+            for r in results:
+                if _title_matches(r.title):
+                    return r
         except SourceUnavailable:
-            return None
-        return results[0] if results else None
+            pass
+
+        try:
+            results = self.openalex.search(identifier, max_results=3)
+            for r in results:
+                if _title_matches(r.title):
+                    return r
+        except SourceUnavailable:
+            pass
+
+        return None
 
     def download_pdf(self, result: ImportResult) -> Path | None:
         if result.source == "arxiv":

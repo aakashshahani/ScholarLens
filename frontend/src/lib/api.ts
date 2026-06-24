@@ -522,7 +522,7 @@ export const api = {
     ),
 
   // ── Citation export ───────────────────────────────────────
-  exportCitation: (paperId: string, format: "bibtex" | "ris") =>
+  exportCitation: (paperId: string, format: "bibtex" | "ris" | "apa" | "chicago" | "mla") =>
     `${API_BASE}/api/papers/${paperId}/export?format=${format}`,
 
   // ── Contradiction feedback ────────────────────────────────

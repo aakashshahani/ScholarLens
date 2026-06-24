@@ -146,6 +146,7 @@ class HypothesisAgent:
         conflicts = self.db.list_relationships(
             paper_ids=paper_ids,
             relationships=["contradiction", "nuance"],
+            exclude_feedback=["disagree"],  # user marked these as mislabeled
         )
 
         if conflicts:

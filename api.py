@@ -879,17 +879,30 @@ def search_papers(request: Request, req: SearchRequest,
       < 0.40  â†’ related
       >= 0.40 â†’ tangential
     """
-    # Scope to the user's own papers. A passed paper_id is $and'd with this set,
-    # so requesting another user's paper id simply returns nothing.
     owned_ids = db.list_paper_ids_for_user(user.id)
-    results = agent.vector_store.search(
-        query=req.query,
-        n_results=req.n_results,
-        paper_id=req.paper_id,
-        paper_ids=owned_ids,
-    )
+    if not owned_ids:
+        return []
 
-    # Batch paper title lookup — one query instead of one DB call per result
+    if not settings.voyage_api_key:
+        raise HTTPException(status_code=503, detail="Search is not configured on this server (missing VOYAGE_API_KEY).")
+
+    indexed = agent.vector_store.count_for_papers(owned_ids)
+    if indexed == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="None of your papers have been indexed for search yet. Open each paper and click 'Re-analyze' to enable search.",
+        )
+
+    try:
+        results = agent.vector_store.search(
+            query=req.query,
+            n_results=req.n_results,
+            paper_id=req.paper_id,
+            paper_ids=owned_ids,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Search unavailable: {exc}") from exc
+
     paper_title_map = db.get_paper_titles(list({r.paper_id for r in results}))
 
     response = []
@@ -1277,7 +1290,8 @@ def import_search(request: Request, req: ImportSearchRequest,
 
 
 @app.post("/api/import/lookup")
-def import_lookup(req: ImportLookupRequest, user: User = Depends(authlib.get_current_user)):
+@limiter.limit(settings.rl_import_lookup)
+def import_lookup(request: Request, req: ImportLookupRequest, user: User = Depends(authlib.get_current_user)):
     """Look up a paper by arXiv ID, DOI, or URL."""
     result = importer.lookup(req.identifier)
     if not result:
@@ -2128,21 +2142,102 @@ def _format_ris(paper) -> str:
     return "\n".join(lines)
 
 
+def _author_last_first(name: str) -> str:
+    parts = name.strip().split()
+    if len(parts) <= 1:
+        return name
+    return f"{parts[-1]}, {' '.join(parts[:-1])}"
+
+
+def _format_apa(paper) -> str:
+    authors = paper.authors or []
+    if not authors:
+        author_str = "Unknown Author"
+    elif len(authors) == 1:
+        author_str = _author_last_first(authors[0])
+    elif len(authors) <= 6:
+        parts = [_author_last_first(a) for a in authors]
+        author_str = ", ".join(parts[:-1]) + ", & " + parts[-1]
+    else:
+        parts = [_author_last_first(a) for a in authors[:6]]
+        author_str = ", ".join(parts) + ", ... " + _author_last_first(authors[-1])
+
+    year = f"({paper.year})" if paper.year else "(n.d.)"
+    title = paper.title or "Untitled"
+    doi_part = f" https://doi.org/{paper.doi}" if paper.doi else (
+        f" https://arxiv.org/abs/{paper.arxiv_id}" if paper.arxiv_id else ""
+    )
+    return f"{author_str}. {year}. {title}.{doi_part}"
+
+
+def _format_chicago(paper) -> str:
+    authors = paper.authors or []
+    if not authors:
+        author_str = "Unknown Author"
+    elif len(authors) == 1:
+        author_str = _author_last_first(authors[0])
+    elif len(authors) <= 3:
+        first = _author_last_first(authors[0])
+        rest = ", ".join(authors[1:])
+        author_str = f"{first}, {rest}"
+    else:
+        author_str = _author_last_first(authors[0]) + " et al."
+
+    year = paper.year or "n.d."
+    title = paper.title or "Untitled"
+    doi_part = f" https://doi.org/{paper.doi}." if paper.doi else (
+        f" https://arxiv.org/abs/{paper.arxiv_id}." if paper.arxiv_id else "."
+    )
+    return f'{author_str}. "{title}." {year}.{doi_part}'
+
+
+def _format_mla(paper) -> str:
+    authors = paper.authors or []
+    if not authors:
+        author_str = "Unknown Author"
+    elif len(authors) == 1:
+        author_str = _author_last_first(authors[0])
+    elif len(authors) == 2:
+        author_str = f"{_author_last_first(authors[0])}, and {authors[1]}"
+    else:
+        author_str = _author_last_first(authors[0]) + ", et al."
+
+    title = paper.title or "Untitled"
+    year = paper.year or "n.d."
+    doi_part = f" {paper.doi}." if paper.doi else (
+        f" arxiv.org/abs/{paper.arxiv_id}." if paper.arxiv_id else "."
+    )
+    return f'{author_str}. "{title}." {year}.{doi_part}'
+
+
 @app.get("/api/papers/{paper_id}/export")
 def export_paper_citation(
     paper_id: str,
-    fmt: str = Query("bibtex", alias="format", pattern="^(bibtex|ris)$"),
+    fmt: str = Query("bibtex", alias="format", pattern="^(bibtex|ris|apa|chicago|mla)$"),
     user: User = Depends(authlib.get_current_user),
 ):
     paper = _require_owned_paper(paper_id, user)
+    safe_title = re.sub(r"[^a-zA-Z0-9_-]", "_", paper.title[:40])
     if fmt == "ris":
         content = _format_ris(paper)
         media_type = "application/x-research-info-systems"
-        filename = f"{re.sub(r'[^a-zA-Z0-9_-]', '_', paper.title[:40])}.ris"
+        filename = f"{safe_title}.ris"
+    elif fmt == "apa":
+        content = _format_apa(paper)
+        media_type = "text/plain; charset=utf-8"
+        filename = f"{safe_title}_apa.txt"
+    elif fmt == "chicago":
+        content = _format_chicago(paper)
+        media_type = "text/plain; charset=utf-8"
+        filename = f"{safe_title}_chicago.txt"
+    elif fmt == "mla":
+        content = _format_mla(paper)
+        media_type = "text/plain; charset=utf-8"
+        filename = f"{safe_title}_mla.txt"
     else:
         content = _format_bibtex(paper)
         media_type = "application/x-bibtex"
-        filename = f"{re.sub(r'[^a-zA-Z0-9_-]', '_', paper.title[:40])}.bib"
+        filename = f"{safe_title}.bib"
     return PlainTextResponse(
         content=content,
         media_type=media_type,

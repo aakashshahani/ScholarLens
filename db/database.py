@@ -785,6 +785,7 @@ class Database:
         paper_ids: list[str] | None = None,
         relationships: list[str] | None = None,
         strict: bool = False,
+        exclude_feedback: list[str] | None = None,
     ) -> list["StoredRelationship"]:
         """
         Fetch stored relationships, optionally scoped to a set of papers.
@@ -796,6 +797,10 @@ class Database:
             paper_ids. Used by hypothesis generation and contradiction scan
             result fetching, where pulling in out-of-scope papers causes
             hypotheses to reference papers the user never selected.
+
+        exclude_feedback: skip rows whose user_feedback is in this list.
+            Pass ["disagree"] when building hypothesis context to exclude
+            contradictions the user marked as mislabeled.
         """
         conn = self._get_conn()
         cur = conn.cursor()
@@ -812,6 +817,9 @@ class Database:
         if relationships:
             conditions.append("relationship = ANY(%s)")
             params.append(list(relationships))
+        if exclude_feedback:
+            conditions.append("(user_feedback IS NULL OR user_feedback != ALL(%s))")
+            params.append(list(exclude_feedback))
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         cur.execute(
             f"SELECT * FROM relationships {where} ORDER BY created_at DESC",

@@ -121,11 +121,11 @@ export default function Dashboard() {
         }),
     ]);
 
-    // Graph topics (already cache-first)
-    const cachedGraph = cache.read<GraphPayload>("graph");
-    if (cachedGraph?.nodes?.length) {
+    // Graph topics — cache-first, then live fetch (no compute, reads from existing relationships)
+    const buildTopics = (g: GraphPayload) => {
+      if (!g?.nodes?.length) return;
       const byPaper: Record<string, number> = {};
-      cachedGraph.nodes.forEach((n) => {
+      g.nodes.forEach((n) => {
         byPaper[n.paper_title] = (byPaper[n.paper_title] || 0) + (n.degree || 0);
       });
       setTopics(
@@ -134,7 +134,12 @@ export default function Dashboard() {
           .sort((a, b) => b.links - a.links)
           .slice(0, 5)
       );
-    }
+    };
+    const cachedGraph = cache.read<GraphPayload>("graph");
+    if (cachedGraph?.nodes?.length) buildTopics(cachedGraph);
+    api.graph({ compute: false })
+      .then((g) => { cache.write("graph", g); buildTopics(g); })
+      .catch(() => {});
   }, []);
 
   const REQUIRED = ["summary", "methods", "findings", "limitations", "key_claims", "research_gaps"];

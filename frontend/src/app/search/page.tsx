@@ -313,22 +313,18 @@ export default function SearchPage() {
     setInput("");
     setSubmitting(true);
 
-    // Ask (LLM synthesis) is disabled on free tier due to memory constraints.
-    // Semantic search still works — returns relevant passages instantly.
     try {
-      const sources = await api.search(q, 8).catch(() => [] as SearchResult[]);
-      const answer = sources.length > 0
-        ? `Found ${sources.length} relevant passage${sources.length !== 1 ? "s" : ""} across ${new Set(sources.map(s => s.paper_id)).size} paper${new Set(sources.map(s => s.paper_id)).size !== 1 ? "s" : ""}. See sources below.`
-        : "No relevant passages found in your library for this query.";
+      const sources = await api.search(q, 8);
       setExchanges((prev) => prev.map((e) =>
         e.id === exchangeId
-          ? { ...e, answer, sources, answerLoading: false }
+          ? { ...e, sources, answerLoading: false, answer: "" }
           : e
       ));
     } catch (e: any) {
+      const msg: string = e?.message || "Search failed";
       setExchanges((prev) => prev.map((ex) =>
         ex.id === exchangeId
-          ? { ...ex, answerLoading: false, answerError: e.message }
+          ? { ...ex, answerLoading: false, answerError: msg }
           : ex
       ));
     }
