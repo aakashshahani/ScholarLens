@@ -926,27 +926,30 @@ class Database:
                 except Exception:
                     continue
 
-        # Legacy path: entries saved before user_id column was added — match by paper_id
-        cur.execute(
-            "SELECT cache_key, payload, grounding, created_at FROM hypothesis_cache "
-            "WHERE user_id IS NULL ORDER BY created_at DESC"
-        )
-        for r in cur.fetchall():
-            try:
-                hyps = _json.loads(r["payload"])
-                for h in hyps:
-                    papers = [sp.get("paper_id", "") for sp in h.get("supporting_papers", [])]
-                    non_empty = [p for p in papers if p]
-                    if not pid_set or not non_empty or any(p in pid_set for p in non_empty):
-                        results.append({
-                            "cache_key": r["cache_key"],
-                            "hypotheses": hyps,
-                            "grounding": r["grounding"],
-                            "created_at": r["created_at"],
-                        })
-                        break
-            except Exception:
-                continue
+        # Legacy path: entries saved before user_id column was added — match by paper_id.
+        # Only include if at least one source paper is positively in this user's library.
+        # Entries with 0 source papers are excluded — we cannot verify ownership.
+        if pid_set:
+            cur.execute(
+                "SELECT cache_key, payload, grounding, created_at FROM hypothesis_cache "
+                "WHERE user_id IS NULL ORDER BY created_at DESC"
+            )
+            for r in cur.fetchall():
+                try:
+                    hyps = _json.loads(r["payload"])
+                    for h in hyps:
+                        papers = [sp.get("paper_id", "") for sp in h.get("supporting_papers", [])]
+                        non_empty = [p for p in papers if p]
+                        if non_empty and any(p in pid_set for p in non_empty):
+                            results.append({
+                                "cache_key": r["cache_key"],
+                                "hypotheses": hyps,
+                                "grounding": r["grounding"],
+                                "created_at": r["created_at"],
+                            })
+                            break
+                except Exception:
+                    continue
 
         cur.close()
         self._put_conn(conn)

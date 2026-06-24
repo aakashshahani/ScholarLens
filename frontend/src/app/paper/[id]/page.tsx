@@ -5,80 +5,99 @@ import { useParams, useRouter } from "next/navigation";
 import { api, Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { Card, Spinner, EmptyState, AnalysisTag, SectionLabel } from "@/components/ui";
-import { ArrowLeft, RefreshCw, Trash2, FileText, CheckCircle2, SendHorizontal, Download, ExternalLink } from "lucide-react";
+import { ArrowLeft, RefreshCw, Trash2, FileText, CheckCircle2, SendHorizontal, Download, ExternalLink, Copy, Check } from "lucide-react";
 
-function MarkdownContent({ text }: { text: string }) {
+const escHtml = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+const inlineMd = (s: string) => {
+  const e = escHtml(s);
+  return e
+    .replace(/\*\*(.+?)\*\*/g, '<strong class="font-semibold text-[var(--text-1)]">$1</strong>')
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/`(.+?)`/g, '<code class="font-mono text-[11.5px] bg-[var(--surface-3)] px-1.5 py-0.5 rounded text-[var(--gen)]">$1</code>');
+};
+
+function AnalysisContent({ text }: { text: string }) {
   const lines = text.split("\n");
   const elements: React.ReactNode[] = [];
-  let listBuffer: string[] = [];
-  let listType: "ul" | "ol" = "ul";
-  let olIndex = 0;
-
-  const escHtml = (s: string) =>
-    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-
-  const inline = (s: string) => {
-    const e = escHtml(s);
-    return e
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*(.+?)\*/g, "<em>$1</em>")
-      .replace(/`(.+?)`/g, '<code class="mono text-[11.5px] bg-[var(--surface-3)] px-1 py-0.5 rounded text-[var(--gen)]">$1</code>');
-  };
+  let listItems: string[] = [];
 
   const flushList = (key: string) => {
-    if (!listBuffer.length) return;
+    if (!listItems.length) return;
     elements.push(
-      <ul key={key} className="space-y-1.5 mb-3 pl-0 list-none">
-        {listBuffer.map((item, i) => (
-          <li key={i} className="flex items-start gap-2.5 text-[14px] text-[var(--text-1)] leading-[1.75]">
-            <span className="mt-[10px] w-[4px] h-[4px] rounded-full bg-[var(--gen)] shrink-0" />
-            <span dangerouslySetInnerHTML={{ __html: inline(item) }} />
+      <ul key={key} className="mb-5 pl-0 list-none space-y-2.5">
+        {listItems.map((item, i) => (
+          <li key={i} className="flex items-start gap-3">
+            <span className="mt-[8px] w-[6px] h-[6px] rounded-full bg-[var(--gen)] opacity-60 shrink-0" />
+            <span className="flex-1 text-[14px] text-[var(--text-1)] leading-[1.85]"
+              dangerouslySetInnerHTML={{ __html: inlineMd(item) }} />
           </li>
         ))}
       </ul>
     );
-    listBuffer = [];
+    listItems = [];
   };
 
   lines.forEach((raw, idx) => {
     const line = raw.trim();
     if (!line) { flushList(`l${idx}`); return; }
+
+    if (line.startsWith("## ") || line.startsWith("# ")) {
+      flushList(`l${idx}`);
+      const title = line.replace(/^#{1,2} /, "");
+      elements.push(
+        <div key={idx} className="flex items-center gap-3 mt-7 mb-3">
+          <div className="w-[3px] h-5 rounded-full bg-[var(--gen)] shrink-0" />
+          <h2 className="text-[15px] font-semibold text-[var(--text-1)] tracking-[-0.01em]">{title}</h2>
+        </div>
+      );
+      return;
+    }
+
     if (line.startsWith("### ")) {
       flushList(`l${idx}`);
-      elements.push(<h3 key={idx} className="text-[12px] font-semibold text-[var(--text-3)] uppercase tracking-[0.08em] mt-5 mb-1.5">{line.slice(4)}</h3>);
+      elements.push(
+        <div key={idx} className="flex items-center gap-2 mt-5 mb-2">
+          <span className="text-[10.5px] font-semibold uppercase tracking-[0.1em] text-[var(--gen)]">{line.slice(4)}</span>
+          <div className="flex-1 h-px bg-[var(--line)]" />
+        </div>
+      );
       return;
     }
-    if (line.startsWith("## ")) {
-      flushList(`l${idx}`);
-      elements.push(<h2 key={idx} className="text-[15px] font-semibold text-[var(--text-1)] mt-6 mb-2 pb-1.5 border-b border-[var(--line)]">{line.slice(3)}</h2>);
+
+    if (line.startsWith("- ") || line.startsWith("* ") || line.startsWith("• ")) {
+      listItems.push(line.slice(2));
       return;
     }
-    if (line.startsWith("# ")) {
-      flushList(`l${idx}`);
-      elements.push(<h2 key={idx} className="text-[15px] font-semibold text-[var(--text-1)] mt-6 mb-2 pb-1.5 border-b border-[var(--line)]">{line.slice(2)}</h2>);
-      return;
-    }
-    if (line.startsWith("- ") || line.startsWith("* ")) { listBuffer.push(line.slice(2)); return; }
+
     const numbered = line.match(/^\d+[.)]\s+(.+)/);
-    if (numbered) { listBuffer.push(numbered[1]); return; }
-    // Plain heading-style lines (no markdown, but title-cased short lines)
-    const isHeading = line.length < 60 && !line.includes(".") && line === line.trimEnd()
-      && /^[A-Z]/.test(line) && !line.endsWith(",");
-    if (isHeading && lines[idx + 1]?.trim() === "") {
+    if (numbered) { listItems.push(numbered[1]); return; }
+
+    // Bold-only short lines act as sub-headings
+    if (/^\*\*.+\*\*$/.test(line) && line.length < 80) {
       flushList(`l${idx}`);
-      elements.push(<h3 key={idx} className="text-[13px] font-semibold text-[var(--text-2)] mt-5 mb-1.5">{line}</h3>);
+      elements.push(
+        <p key={idx} className="text-[13px] font-semibold text-[var(--text-2)] mt-4 mb-1.5"
+          dangerouslySetInnerHTML={{ __html: inlineMd(line) }} />
+      );
       return;
     }
+
     flushList(`l${idx}`);
     elements.push(
-      <p key={idx} className="text-[14px] text-[var(--text-1)] leading-[1.8] mb-2"
-        dangerouslySetInnerHTML={{ __html: inline(line) }} />
+      <p key={idx} className="text-[14px] text-[var(--text-1)] leading-[1.9] mb-3"
+        dangerouslySetInnerHTML={{ __html: inlineMd(line) }} />
     );
   });
+
   flushList("end");
-  return <div className="space-y-0">{elements}</div>;
+  return <div>{elements}</div>;
 }
+
+// Keep MarkdownContent alias for the Q&A answer (same component, different name for clarity)
+const MarkdownContent = AnalysisContent;
 
 function parseClaimsFromContent(content: string): string[] {
   const claims: string[] = [];
@@ -129,7 +148,7 @@ export default function PaperDetailPage() {
   const [paper, setPaper] = useState<Paper | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState(0);
-
+  const [copiedFmt, setCopiedFmt] = useState<string | null>(null);
 
   // Ask state
   const [question, setQuestion] = useState("");
@@ -319,20 +338,38 @@ export default function PaperDetailPage() {
             {reanalyzeError && (
               <span className="text-[11px] text-[var(--contra)]">{reanalyzeError}</span>
             )}
-            {/* Citation export */}
-            {(["bibtex", "ris", "apa", "chicago", "mla"] as const).map((fmt) => {
-              const ext: Record<string, string> = { bibtex: "bib", ris: "ris", apa: "txt", chicago: "txt", mla: "txt" };
+            {/* Citation export — BibTeX/RIS download; APA/Chicago/MLA copy */}
+            {(["bibtex", "ris"] as const).map((fmt) => {
+              const ext: Record<string, string> = { bibtex: "bib", ris: "ris" };
               return (
                 <button key={fmt}
                   onClick={async () => {
                     const blob = await api.exportCitation(paperId, fmt);
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement("a");
-                    a.href = url; a.download = `citation_${fmt}.${ext[fmt]}`; a.click();
+                    a.href = url; a.download = `citation.${ext[fmt]}`; a.click();
                     URL.revokeObjectURL(url);
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12.5px] text-[var(--text-2)] border border-[var(--line)] bg-[var(--surface-2)] t-all hover:border-[var(--gen-line)] hover:text-[var(--gen)]">
                   <Download size={13} /> {fmt.toUpperCase()}
+                </button>
+              );
+            })}
+            {(["apa", "chicago", "mla"] as const).map((fmt) => {
+              const copied = copiedFmt === fmt;
+              return (
+                <button key={fmt}
+                  onClick={async () => {
+                    const blob = await api.exportCitation(paperId, fmt);
+                    const text = await blob.text();
+                    await navigator.clipboard.writeText(text);
+                    setCopiedFmt(fmt);
+                    setTimeout(() => setCopiedFmt(null), 2000);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12.5px] border border-[var(--line)] bg-[var(--surface-2)] t-all hover:border-[var(--gen-line)] hover:text-[var(--gen)]"
+                  style={{ color: copied ? "var(--support)" : "var(--text-2)" }}>
+                  {copied ? <Check size={13} /> : <Copy size={13} />}
+                  {fmt.toUpperCase()}
                 </button>
               );
             })}
