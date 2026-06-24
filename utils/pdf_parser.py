@@ -175,12 +175,58 @@ def extract_pdf(file_path: str | Path) -> ExtractedPaper:
     doc.close()
 
     full_text = "\n\n".join(p.text for p in pages if p.text)
+
+    # OCR fallback: if the PDF produced near-empty text (scanned/image-based),
+    # try pytesseract. This requires pdf2image and pytesseract to be installed
+    # (pip install pdf2image pytesseract). Silently skips if unavailable.
+    meaningful_chars = sum(len(p.text) for p in pages if p.text)
+    total_pages = len(pages)
+    if total_pages > 0 and meaningful_chars < total_pages * 80:
+        pages = _ocr_fallback(file_path, pages, metadata)
+        full_text = "\n\n".join(p.text for p in pages if p.text)
+
     return ExtractedPaper(
         pages=pages,
         full_text=full_text,
         page_count=len(pages),
         metadata=metadata,
     )
+
+
+def _ocr_fallback(
+    file_path: Path,
+    original_pages: list[ExtractedPage],
+    metadata: dict,
+) -> list[ExtractedPage]:
+    """Run OCR on pages that produced little or no text via PyMuPDF.
+    Returns a new pages list with OCR text substituted where applicable."""
+    try:
+        from pdf2image import convert_from_path
+        import pytesseract
+    except ImportError:
+        return original_pages  # OCR deps not installed — return as-is
+
+    try:
+        images = convert_from_path(str(file_path), dpi=200)
+    except Exception as e:
+        print(f"[ocr] pdf2image failed: {e}")
+        return original_pages
+
+    new_pages = list(original_pages)
+    for i, img in enumerate(images):
+        orig = original_pages[i] if i < len(original_pages) else None
+        # Only OCR pages with sparse text
+        if orig and len(orig.text) >= 80:
+            continue
+        try:
+            ocr_text = pytesseract.image_to_string(img, lang="eng")
+            cleaned = _clean(ocr_text)
+            page_num = orig.page_number if orig else i + 1
+            new_pages[i] = ExtractedPage(page_number=page_num, text=cleaned)
+        except Exception as e:
+            print(f"[ocr] page {i+1} failed: {e}")
+
+    return new_pages
 
 
 # ── Chunking ─────────────────────────────────────────────────

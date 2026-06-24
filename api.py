@@ -626,14 +626,22 @@ def fix_abstracts():
 
 @app.get("/api/papers")
 def list_papers(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+                tag: Optional[str] = Query(None),
                 user: User = Depends(authlib.get_current_user)):
     papers = db.list_papers(limit=limit, offset=offset, user_id=user.id)
     if not papers:
         return []
+    # Tag filter: narrow to papers that carry the requested tag
+    if tag:
+        tagged_ids = set(db.list_paper_ids_by_tag(user.id, tag))
+        papers = [p for p in papers if p.id in tagged_ids]
+    if not papers:
+        return []
     paper_ids = [p.id for p in papers]
-    # Batch fetch — 2 DB calls instead of 2N (N+1 fix)
+    # Batch fetch — 3 DB calls instead of 3N (N+1 fix)
     analyses_map = db.get_analyses_for_papers(paper_ids)
     claim_counts = db.get_claim_counts_for_papers(paper_ids)
+    tags_map = db.get_tags_for_papers(paper_ids)
     return [
         {
             "id": p.id,
@@ -646,6 +654,7 @@ def list_papers(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=
             "created_at": p.created_at,
             "analysis_types": [a.analysis_type for a in analyses_map.get(p.id, [])],
             "chunk_count": claim_counts.get(p.id, 0),
+            "tags": tags_map.get(p.id, []),
         }
         for p in papers
     ]
@@ -678,6 +687,7 @@ def get_paper(paper_id: str, user: User = Depends(authlib.get_current_user)):
     paper = _require_owned_paper(paper_id, user)
     analyses = db.get_analyses_for_paper(paper_id)
     chunks = db.get_chunks_for_paper(paper_id)
+    paper_tags = db.get_tags_for_paper(paper_id)
     return {
         "id": paper.id,
         "title": paper.title,
@@ -685,9 +695,12 @@ def get_paper(paper_id: str, user: User = Depends(authlib.get_current_user)):
         "abstract": paper.abstract,
         "year": paper.year,
         "source": paper.source,
+        "doi": paper.doi,
+        "arxiv_id": paper.arxiv_id,
         "page_count": paper.page_count,
         "created_at": paper.created_at,
         "chunk_count": len(chunks),
+        "tags": paper_tags,
         "analyses": [
             {
                 "id": a.id,
@@ -1957,7 +1970,321 @@ def insight_feed(req: InsightRequest, user: User = Depends(authlib.get_current_u
     insights.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     insights.sort(key=lambda x: _TYPE_PRIORITY.get(x.get("type", ""), 9))
 
-    # â”€â”€ Cache write â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    _insight_cache[user.id] = {"payload": insights, "ts": _time.time()}
+    # ── Cache write ──────────────────────────────────────────────────────────
+    _insight_cache[user.id] = {“payload”: insights, “ts”: _time.time()}
 
     return insights[: req.limit]
+
+
+# ── Batch upload ──────────────────────────────────────────────────────────────
+
+@app.post(“/api/papers/upload-batch”)
+@limiter.limit(settings.rl_upload)
+async def upload_papers_batch(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    user: User = Depends(authlib.get_current_user),
+):
+    “””Upload multiple PDFs in one request. Each file is ingested and queued
+    for analysis. Returns a per-file result list with status and paper id.”””
+    if not files:
+        raise HTTPException(status_code=400, detail=”No files provided.”)
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail=”Maximum 20 files per batch.”)
+
+    max_bytes = settings.max_upload_bytes
+    results = []
+    user_key = authlib.resolve_user_api_key(user)
+
+    for file in files:
+        if not file.filename or not file.filename.lower().endswith(“.pdf”):
+            results.append({“filename”: file.filename or “unknown”, “status”: “error”,
+                            “message”: “Not a PDF file.”})
+            continue
+        try:
+            buf = bytearray()
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    results.append({“filename”: file.filename, “status”: “error”,
+                                    “message”: f”Exceeds {max_bytes // (1024*1024)} MB limit.”})
+                    buf = None
+                    break
+            if buf is None:
+                continue
+            content = bytes(buf)
+            if b”%PDF-” not in content[:1024]:
+                results.append({“filename”: file.filename, “status”: “error”,
+                                “message”: “Not a valid PDF.”})
+                continue
+            display_name = _safe_display_name(file.filename)
+            save_path = UPLOAD_DIR / f”{uuid.uuid4().hex}.pdf”
+            if UPLOAD_DIR.resolve() not in save_path.resolve().parents:
+                results.append({“filename”: file.filename, “status”: “error”,
+                                “message”: “Invalid path.”})
+                continue
+            save_path.write_bytes(content)
+            model = _resolve_model_and_meter(user)
+            paper = agent.ingest_pdf(save_path, filename=display_name, api_key=user_key, model=model)
+            existing = db.find_duplicate(paper.title, doi=paper.doi, arxiv_id=paper.arxiv_id)
+            if existing and existing.id != paper.id and existing.user_id == user.id:
+                agent.vector_store.delete_paper_chunks(paper.id)
+                db.delete_paper(paper.id)
+                try:
+                    save_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                results.append({“filename”: file.filename, “status”: “duplicate”,
+                                “id”: existing.id, “title”: existing.title,
+                                “message”: f”Already in library: \”{existing.title}\””})
+                continue
+            db.set_paper_owner(paper.id, user.id)
+            background_tasks.add_task(_analyze_paper_bg, paper.id, user_key, model)
+            results.append({“filename”: file.filename, “status”: “analyzing”,
+                            “id”: paper.id, “title”: paper.title})
+        except Exception as e:
+            results.append({“filename”: getattr(file, “filename”, “unknown”),
+                            “status”: “error”, “message”: str(e)})
+
+    _invalidate_insight_cache()
+    return {“results”: results, “total”: len(results),
+            “queued”: sum(1 for r in results if r[“status”] == “analyzing”)}
+
+
+# ── Tags ──────────────────────────────────────────────────────────────────────
+
+class TagRequest(BaseModel):
+    tag: str = Field(..., min_length=1, max_length=50)
+
+
+@app.get(“/api/tags”)
+def list_tags(user: User = Depends(authlib.get_current_user)):
+    “””Return all distinct tags used by this user.”””
+    return {“tags”: db.get_all_user_tags(user.id)}
+
+
+@app.post(“/api/papers/{paper_id}/tags”)
+def add_tag(paper_id: str, req: TagRequest,
+            user: User = Depends(authlib.get_current_user)):
+    _require_owned_paper(paper_id, user)
+    created = db.add_paper_tag(paper_id, user.id, req.tag)
+    return {“tag”: req.tag.strip().lower(), “created”: created}
+
+
+@app.delete(“/api/papers/{paper_id}/tags/{tag}”)
+def remove_tag(paper_id: str, tag: str,
+               user: User = Depends(authlib.get_current_user)):
+    _require_owned_paper(paper_id, user)
+    deleted = db.remove_paper_tag(paper_id, user.id, tag)
+    return {“tag”: tag, “deleted”: deleted}
+
+
+# ── Citation export ───────────────────────────────────────────────────────────
+
+from fastapi.responses import PlainTextResponse
+
+
+def _format_bibtex(paper) -> str:
+    key = re.sub(r”[^a-zA-Z0-9]”, “”, (paper.authors[0].split()[-1] if paper.authors else “Unknown”))
+    key += str(paper.year or “”)
+    key += re.sub(r”[^a-zA-Z0-9]”, “”, paper.title.split()[0]) if paper.title else “”
+    authors_str = “ and “.join(paper.authors) if paper.authors else “Unknown”
+    lines = [
+        f”@article{{{key},”,
+        f'  title = {{{paper.title or “”}}},' ,
+        f'  author = {{{authors_str}}},',
+    ]
+    if paper.year:
+        lines.append(f'  year = {{{paper.year}}},')
+    if paper.doi:
+        lines.append(f'  doi = {{{paper.doi}}},')
+    if paper.arxiv_id:
+        lines.append(f'  eprint = {{{paper.arxiv_id}}},')
+        lines.append('  archivePrefix = {arXiv},')
+    if paper.abstract:
+        lines.append(f'  abstract = {{{paper.abstract[:400]}}},')
+    lines.append(“}”)
+    return “\n”.join(lines)
+
+
+def _format_ris(paper) -> str:
+    lines = [“TY  - JOUR”]
+    lines.append(f”TI  - {paper.title or ''}”)
+    for a in (paper.authors or []):
+        lines.append(f”AU  - {a}”)
+    if paper.year:
+        lines.append(f”PY  - {paper.year}”)
+    if paper.doi:
+        lines.append(f”DO  - {paper.doi}”)
+    if paper.arxiv_id:
+        lines.append(f”AN  - {paper.arxiv_id}”)
+    if paper.abstract:
+        lines.append(f”AB  - {paper.abstract[:400]}”)
+    lines.append(“ER  - “)
+    return “\n”.join(lines)
+
+
+@app.get(“/api/papers/{paper_id}/export”)
+def export_paper_citation(
+    paper_id: str,
+    fmt: str = Query(“bibtex”, alias=”format”, regex=”^(bibtex|ris)$”),
+    user: User = Depends(authlib.get_current_user),
+):
+    paper = _require_owned_paper(paper_id, user)
+    if fmt == “ris”:
+        content = _format_ris(paper)
+        media_type = “application/x-research-info-systems”
+        filename = f”{re.sub(r'[^a-zA-Z0-9_-]', '_', paper.title[:40])}.ris”
+    else:
+        content = _format_bibtex(paper)
+        media_type = “application/x-bibtex”
+        filename = f”{re.sub(r'[^a-zA-Z0-9_-]', '_', paper.title[:40])}.bib”
+    return PlainTextResponse(
+        content=content,
+        media_type=media_type,
+        headers={“Content-Disposition”: f'attachment; filename=”{filename}”'},
+    )
+
+
+# ── Contradiction feedback ────────────────────────────────────────────────────
+
+class FeedbackRequest(BaseModel):
+    verdict: str = Field(..., regex=”^(agree|disagree|flag)$”)
+
+
+@app.post(“/api/contradictions/{rel_id}/feedback”)
+def contradiction_feedback(
+    rel_id: str, req: FeedbackRequest,
+    user: User = Depends(authlib.get_current_user),
+):
+    updated = db.set_relationship_feedback(rel_id, user.id, req.verdict)
+    if not updated:
+        raise HTTPException(status_code=404, detail=”Relationship not found.”)
+    return {“id”: rel_id, “verdict”: req.verdict}
+
+
+# ── Export reports ────────────────────────────────────────────────────────────
+
+@app.get(“/api/contradictions/export”)
+def export_contradictions(
+    fmt: str = Query(“markdown”, alias=”format”, regex=”^(markdown|json)$”),
+    user: User = Depends(authlib.get_current_user),
+):
+    “””Export the full contradiction report as Markdown or JSON.”””
+    owned = _owned_ids(user)
+    if not owned:
+        raise HTTPException(status_code=404, detail=”No papers in library.”)
+    rels = db.list_relationships(paper_ids=owned, strict=True)
+    title_map = db.paper_title_map(user.id)
+    claims_by_paper = db.get_claims_for_papers(list(title_map.keys()))
+    claim_by_id = {}
+    claim_paper_title = {}
+    for pid, ptitle in title_map.items():
+        for c in claims_by_paper.get(pid, []):
+            claim_by_id[c.id] = c
+            claim_paper_title[c.id] = ptitle
+
+    entries = []
+    for r in rels:
+        if r.relationship in (“error”, “unrelated”):
+            continue
+        a = claim_by_id.get(r.claim_lo)
+        b = claim_by_id.get(r.claim_hi)
+        if not a or not b:
+            continue
+        entries.append({
+            “id”: r.id, “relationship”: r.relationship, “category”: r.category,
+            “explanation”: r.explanation, “resolution”: r.resolution,
+            “stronger_evidence”: r.stronger_evidence,
+            “paper_a”: claim_paper_title.get(a.id, “”), “claim_a”: a.text,
+            “paper_b”: claim_paper_title.get(b.id, “”), “claim_b”: b.text,
+            “created_at”: r.created_at,
+        })
+
+    if fmt == “json”:
+        return JSONResponse(content=entries)
+
+    # Markdown
+    lines = [“# ScholarLens — Contradiction Report”, “”]
+    rel_order = {“contradiction”: “Contradictions”, “nuance”: “Nuances”, “support”: “Supporting Pairs”}
+    for rel_type, heading in rel_order.items():
+        group = [e for e in entries if e[“relationship”] == rel_type]
+        if not group:
+            continue
+        lines += [f”## {heading}”, “”]
+        for i, e in enumerate(group, 1):
+            lines += [
+                f”### {i}. {e['paper_a']} ↔ {e['paper_b']}”,
+                f”**Category:** {e['category'] or 'N/A'}”,
+                “”,
+                f”**Claim A ({e['paper_a']}):** {e['claim_a']}”,
+                “”,
+                f”**Claim B ({e['paper_b']}):** {e['claim_b']}”,
+                “”,
+                f”**Analysis:** {e['explanation']}”,
+                “”,
+                f”**Resolution:** {e['resolution'] or 'N/A'}”,
+                “”,
+                f”**Stronger evidence:** {e['stronger_evidence'] or 'N/A'}”,
+                “”,
+                “---”,
+                “”,
+            ]
+    md = “\n”.join(lines)
+    return PlainTextResponse(
+        content=md, media_type=”text/markdown”,
+        headers={“Content-Disposition”: 'attachment; filename=”contradictions.md”'},
+    )
+
+
+@app.get(“/api/hypotheses/export”)
+def export_hypotheses(
+    fmt: str = Query(“markdown”, alias=”format”, regex=”^(markdown|json)$”),
+    user: User = Depends(authlib.get_current_user),
+):
+    “””Export the hypothesis report as Markdown or JSON.”””
+    owned = _owned_ids(user)
+    cached_entries = db.list_hypothesis_cache(owned, user_id=user.id)
+    if not cached_entries:
+        raise HTTPException(status_code=404, detail=”No hypotheses generated yet.”)
+    hypotheses = cached_entries[0][“hypotheses”]
+
+    if fmt == “json”:
+        return JSONResponse(content=hypotheses)
+
+    lines = [“# ScholarLens — Hypothesis Report”, “”]
+    for i, h in enumerate(hypotheses, 1):
+        lines += [
+            f”## Hypothesis {i}”,
+            “”,
+            f”**Statement:** {h.get('statement', '')}”,
+            “”,
+            f”**Rationale:** {h.get('rationale', '')}”,
+            “”,
+            f”**Novelty:** {h.get('novelty_tier', 'unknown')} (score: {round(h.get('novelty_score', 0), 3)})”,
+            “”,
+            f”**Methodology:** {h.get('methodology', '')}”,
+            “”,
+        ]
+        challenges = h.get(“challenges”, [])
+        if challenges:
+            lines.append(“**Challenges:**”)
+            for c in challenges:
+                lines.append(f”- {c}”)
+            lines.append(“”)
+        papers = h.get(“supporting_papers”, [])
+        if papers:
+            lines.append(“**Supporting papers:**”)
+            for p in papers:
+                lines.append(f”- {p.get('title', '')} — {p.get('relevant_finding', '')}”)
+            lines.append(“”)
+        lines += [“---”, “”]
+    md = “\n”.join(lines)
+    return PlainTextResponse(
+        content=md, media_type=”text/markdown”,
+        headers={“Content-Disposition”: 'attachment; filename=”hypotheses.md”'},
+    )

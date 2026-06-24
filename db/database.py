@@ -322,6 +322,20 @@ class Database:
                 last_scanned_at TEXT
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS paper_tags (
+                id          TEXT PRIMARY KEY,
+                paper_id    TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+                user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                tag         TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                UNIQUE(paper_id, tag)
+            )
+        """)
+        # Migrations: add columns to existing tables
+        cur.execute(
+            "ALTER TABLE relationships ADD COLUMN IF NOT EXISTS user_feedback TEXT"
+        )
         # Indexes
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS idx_chunks_paper ON chunks(paper_id)",
@@ -337,6 +351,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_papers_user ON papers(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_monitor_topics_user ON monitor_topics(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_paper_tags_paper ON paper_tags(paper_id)",
+            "CREATE INDEX IF NOT EXISTS idx_paper_tags_user ON paper_tags(user_id)",
         ]:
             cur.execute(idx_sql)
         conn.commit()
@@ -1159,4 +1175,118 @@ class Database:
         cur.close()
         self._put_conn(conn)
         return [self._row_to_user(r) for r in rows]
+
+    # ── Paper tags ────────────────────────────────────────────────────────────
+
+    def add_paper_tag(self, paper_id: str, user_id: str, tag: str) -> bool:
+        """Add a tag to a paper. Returns True if new, False if already existed."""
+        tag = tag.strip().lower()[:50]
+        if not tag:
+            return False
+        conn = self._get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """INSERT INTO paper_tags (id, paper_id, user_id, tag, created_at)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT(paper_id, tag) DO NOTHING""",
+                (str(uuid.uuid4()), paper_id, user_id, tag,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            created = cur.rowcount > 0
+            conn.commit()
+            return created
+        finally:
+            cur.close()
+            self._put_conn(conn)
+
+    def remove_paper_tag(self, paper_id: str, user_id: str, tag: str) -> bool:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "DELETE FROM paper_tags WHERE paper_id = %s AND user_id = %s AND tag = %s",
+                (paper_id, user_id, tag.strip().lower()),
+            )
+            deleted = cur.rowcount > 0
+            conn.commit()
+            return deleted
+        finally:
+            cur.close()
+            self._put_conn(conn)
+
+    def get_tags_for_paper(self, paper_id: str) -> list[str]:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT tag FROM paper_tags WHERE paper_id = %s ORDER BY tag",
+            (paper_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        return [r["tag"] for r in rows]
+
+    def get_tags_for_papers(self, paper_ids: list[str]) -> dict[str, list[str]]:
+        """Batch fetch tags: returns {paper_id: [tag, ...]}."""
+        if not paper_ids:
+            return {}
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT paper_id, tag FROM paper_tags WHERE paper_id = ANY(%s) ORDER BY tag",
+            (list(paper_ids),),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        result: dict[str, list[str]] = {pid: [] for pid in paper_ids}
+        for r in rows:
+            result[r["paper_id"]].append(r["tag"])
+        return result
+
+    def get_all_user_tags(self, user_id: str) -> list[str]:
+        """Return all distinct tags used by a user, sorted alphabetically."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT tag FROM paper_tags WHERE user_id = %s ORDER BY tag",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        return [r["tag"] for r in rows]
+
+    def list_paper_ids_by_tag(self, user_id: str, tag: str) -> list[str]:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT paper_id FROM paper_tags WHERE user_id = %s AND tag = %s",
+            (user_id, tag.strip().lower()),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        return [r["paper_id"] for r in rows]
+
+    # ── Relationship feedback ─────────────────────────────────────────────────
+
+    def set_relationship_feedback(self, rel_id: str, user_id: str, verdict: str) -> bool:
+        """Store user feedback on a relationship (agree/disagree/flag).
+        Returns False if the relationship doesn't exist or isn't owned."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """UPDATE relationships SET user_feedback = %s
+               WHERE id = %s AND (paper_a = ANY(
+                   SELECT id FROM papers WHERE user_id = %s
+               ))""",
+            (verdict, rel_id, user_id),
+        )
+        updated = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+        return updated
 
