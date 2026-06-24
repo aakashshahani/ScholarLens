@@ -36,11 +36,22 @@ export interface Paper {
   abstract: string;
   year: number | null;
   source: string;
+  doi?: string | null;
+  arxiv_id?: string | null;
   page_count: number | null;
   created_at: string;
   analysis_types?: string[];
   chunk_count?: number;
   analyses?: Analysis[];
+  tags?: string[];
+}
+
+export interface BatchUploadResult {
+  filename: string;
+  status: "analyzing" | "duplicate" | "error";
+  id?: string;
+  title?: string;
+  message?: string;
 }
 
 export interface Analysis {
@@ -317,8 +328,8 @@ export const api = {
     }),
 
   // ── Papers ────────────────────────────────────────────────
-  listPapers: (limit = 50, offset = 0) =>
-    apiFetch<Paper[]>(`/api/papers?limit=${limit}&offset=${offset}`),
+  listPapers: (limit = 50, offset = 0, tag?: string) =>
+    apiFetch<Paper[]>(`/api/papers?limit=${limit}&offset=${offset}${tag ? `&tag=${encodeURIComponent(tag)}` : ""}`),
 
   getPaper: (id: string) => apiFetch<Paper>(`/api/papers/${id}`),
 
@@ -329,6 +340,21 @@ export const api = {
 
   reanalyze: (id: string) =>
     apiFetch<{ id: string; status: string }>(`/api/papers/${id}/reanalyze`, { method: "POST" }),
+
+  uploadPapersBatch: async (files: File[]) => {
+    const formData = new FormData();
+    for (const f of files) formData.append("files", f);
+    const uploadToken = getToken();
+    const headers: Record<string, string> = uploadToken ? { Authorization: `Bearer ${uploadToken}` } : {};
+    const res = await fetch(`${API_BASE}/api/papers/upload-batch`, {
+      method: "POST", body: formData, credentials: "include", headers,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new ApiError(res.status, body.detail || res.statusText);
+    }
+    return res.json() as Promise<{ results: BatchUploadResult[]; total: number; queued: number }>;
+  },
 
   uploadPaper: async (file: File) => {
     const formData = new FormData();
@@ -479,6 +505,39 @@ export const api = {
       topics_scanned: number;
       sources_failed: string[];
     }>("/api/monitor/test-digest", { method: "POST" }),
+
+  // ── Tags ──────────────────────────────────────────────────
+  listTags: () => apiFetch<{ tags: string[] }>("/api/tags"),
+
+  addTag: (paperId: string, tag: string) =>
+    apiFetch<{ tag: string; created: boolean }>(`/api/papers/${paperId}/tags`, {
+      method: "POST",
+      body: JSON.stringify({ tag }),
+    }),
+
+  removeTag: (paperId: string, tag: string) =>
+    apiFetch<{ tag: string; deleted: boolean }>(
+      `/api/papers/${paperId}/tags/${encodeURIComponent(tag)}`,
+      { method: "DELETE" },
+    ),
+
+  // ── Citation export ───────────────────────────────────────
+  exportCitation: (paperId: string, format: "bibtex" | "ris") =>
+    `${API_BASE}/api/papers/${paperId}/export?format=${format}`,
+
+  // ── Contradiction feedback ────────────────────────────────
+  contradictionFeedback: (relId: string, verdict: "agree" | "disagree" | "flag") =>
+    apiFetch<{ id: string; verdict: string }>(`/api/contradictions/${relId}/feedback`, {
+      method: "POST",
+      body: JSON.stringify({ verdict }),
+    }),
+
+  // ── Export reports ────────────────────────────────────────
+  exportContradictions: (format: "markdown" | "json" = "markdown") =>
+    `${API_BASE}/api/contradictions/export?format=${format}`,
+
+  exportHypotheses: (format: "markdown" | "json" = "markdown") =>
+    `${API_BASE}/api/hypotheses/export?format=${format}`,
 
   // ── Graph / Insights ──────────────────────────────────────
   graph: (opts?: { paperIds?: string[]; similarityThreshold?: number; maxPairs?: number; compute?: boolean }) =>
