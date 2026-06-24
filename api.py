@@ -2131,7 +2131,7 @@ def _format_ris(paper) -> str:
 @app.get("/api/papers/{paper_id}/export")
 def export_paper_citation(
     paper_id: str,
-    fmt: str = Query("bibtex", alias="format", regex="^(bibtex|ris)$"),
+    fmt: str = Query("bibtex", alias="format", pattern="^(bibtex|ris)$"),
     user: User = Depends(authlib.get_current_user),
 ):
     paper = _require_owned_paper(paper_id, user)
@@ -2153,7 +2153,7 @@ def export_paper_citation(
 # ── Contradiction feedback ────────────────────────────────────────────────────
 
 class FeedbackRequest(BaseModel):
-    verdict: str = Field(..., regex="^(agree|disagree|flag)$")
+    verdict: str = Field(..., pattern="^(agree|disagree|flag)$")
 
 
 @app.post("/api/contradictions/{rel_id}/feedback")
@@ -2171,7 +2171,7 @@ def contradiction_feedback(
 
 @app.get("/api/contradictions/export")
 def export_contradictions(
-    fmt: str = Query("markdown", alias="format", regex="^(markdown|json)$"),
+    fmt: str = Query("markdown", alias="format", pattern="^(markdown|json)$"),
     user: User = Depends(authlib.get_current_user),
 ):
     """Export the full contradiction report as Markdown or JSON."""
@@ -2243,7 +2243,7 @@ def export_contradictions(
 
 @app.get("/api/hypotheses/export")
 def export_hypotheses(
-    fmt: str = Query("markdown", alias="format", regex="^(markdown|json)$"),
+    fmt: str = Query("markdown", alias="format", pattern="^(markdown|json)$"),
     user: User = Depends(authlib.get_current_user),
 ):
     """Export the hypothesis report as Markdown or JSON."""

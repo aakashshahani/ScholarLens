@@ -15,6 +15,9 @@ import {
   BookOpen,
   Microscope,
   Library as LibraryIcon,
+  Upload,
+  ScanText,
+  Lightbulb,
 } from "lucide-react";
 
 /**
@@ -573,6 +576,62 @@ function ShowcaseRow({
   );
 }
 
+/* ─────────────────────────── How it works ─────────────────────────── */
+function HowItWorks() {
+  const steps = [
+    {
+      n: "01",
+      Icon: Upload,
+      title: "Upload your PDFs",
+      body: "Drag in any number of papers, any field. ScholarLens reads the full text, not just abstracts.",
+    },
+    {
+      n: "02",
+      Icon: ScanText,
+      title: "Every claim, extracted",
+      body: "Findings, results, and conclusions pulled from the exact sentence they appear in. You can see where every claim comes from.",
+    },
+    {
+      n: "03",
+      Icon: Lightbulb,
+      title: "What the field fights over, what it leaves open, and what to try next",
+      body: "See where papers disagree claim by claim, what none of them address, and a grounded hypothesis for what to investigate next.",
+    },
+  ];
+
+  return (
+    <section className="px-6 pb-[100px] max-w-[1080px] mx-auto">
+      <div className="reveal relative grid md:grid-cols-3 gap-6">
+        {/* connector line visible only on md+ */}
+        <div
+          className="hidden md:block absolute top-[38px] left-[calc(16.67%+20px)] right-[calc(16.67%+20px)] h-px"
+          style={{ background: "linear-gradient(90deg, var(--gen-line), var(--line-2), var(--gen-line))" }}
+        />
+        {steps.map(({ n: _n, Icon, title, body }, i) => (
+          <div key={i} className="relative bg-[var(--surface-1)] border border-[var(--line)] rounded-[var(--r-lg)] px-6 py-6 flex flex-col">
+            <div className="flex items-center gap-3 mb-5">
+              <span
+                className="inline-flex items-center justify-center w-[38px] h-[38px] rounded-full bg-[var(--gen-dim)] text-[var(--gen)] shrink-0 z-10"
+                style={{ border: "1px solid var(--gen-line)" }}
+              >
+                <Icon size={16} />
+              </span>
+              {i < 2 && (
+                <ArrowRight size={14} className="hidden md:block text-[var(--gen)] opacity-40 absolute right-[-19px] top-[12px] z-10" />
+              )}
+            </div>
+            <h3 className="font-display text-[16px] leading-[1.25] text-[var(--text-1)] mb-2">{title}</h3>
+            <p className="text-[13.5px] leading-[1.65] text-[var(--text-2)] flex-1">{body}</p>
+          </div>
+        ))}
+      </div>
+      <p className="reveal text-[12.5px] text-[var(--text-4)] text-center mt-5">
+        Free to start · no credit card needed
+      </p>
+    </section>
+  );
+}
+
 /* ─────────────────────────── Page ─────────────────────────── */
 export default function Landing({ onSignIn }: { onSignIn: () => void }) {
   const go = onSignIn;
@@ -599,12 +658,12 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
   }, []);
 
   const builtFor = [
-    { icon: GraduationCap, label: "PhD students mapping a literature" },
-    { icon: Flask2, label: "Labs keeping up with a fast-moving field" },
-    { icon: BookOpen, label: "Professors building a course reading list" },
-    { icon: Microscope, label: "Master's students finding a thesis gap" },
+    { icon: GraduationCap, label: "PhD students lost in a growing literature review" },
+    { icon: Flask2, label: "Labs that can't keep pace with their field" },
+    { icon: BookOpen, label: "Professors curating a focused course reading list" },
+    { icon: Microscope, label: "Master's students hunting for a thesis gap" },
     { icon: Users, label: "Independent researchers without a lab behind them" },
-    { icon: LibraryIcon, label: "Anyone reading across more than one sitting" },
+    { icon: LibraryIcon, label: "Anyone holding more papers than they can keep straight" },
   ];
 
   return (
@@ -644,24 +703,27 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
         <div className="relative z-[5] text-center px-6 max-w-[880px]">
           <div className="inline-flex items-center gap-2 text-[12px] text-[var(--text-2)] bg-[var(--surface-2)] border border-[var(--line-2)] pl-[11px] pr-[13px] py-1.5 rounded-full mb-[30px] fade-up">
             <span className="w-[6px] h-[6px] rounded-full bg-[var(--gen)]" style={{ boxShadow: "0 0 8px var(--gen-glow)" }} />
-            Research intelligence
+            Not a summarizer · not a citation graph
           </div>
           <h1 className="font-display text-[clamp(40px,6.4vw,76px)] leading-[1.02] tracking-[-0.02em] fade-up" style={{ animationDelay: ".1s" }}>
             Find where the literature
             <br />
             <span className="italic text-[var(--gen)]">contradicts itself.</span>
           </h1>
-          <p className="text-[clamp(15px,1.9vw,18.5px)] leading-[1.55] text-[var(--text-2)] max-w-[600px] mx-auto mt-6 fade-up" style={{ animationDelay: ".2s" }}>
-            Upload a corpus. ScholarLens finds where the papers disagree, what they leave open,
-            and what a careful reader might try next.
+          <p className="text-[clamp(15px,1.9vw,18.5px)] leading-[1.55] text-[var(--text-2)] max-w-[620px] mx-auto mt-6 fade-up" style={{ animationDelay: ".2s" }}>
+            Drop in your PDFs. ScholarLens reads every claim in every paper, maps where they
+            disagree, finds what none of them answer, and generates your next testable hypothesis.
           </p>
-          <div className="flex gap-3 justify-center items-center mt-9 flex-wrap fade-up" style={{ animationDelay: ".32s" }}>
-            <button onClick={go} className="inline-flex items-center gap-2 text-[14.5px] font-medium text-white bg-[var(--gen)] px-[22px] py-3 rounded-[var(--r-md)] t-all hover:opacity-90 hover:glow-gen hover:-translate-y-px">
-              Map your literature <ArrowRight size={15} />
-            </button>
-            <a href="#finds" className="inline-flex items-center gap-2 text-[14.5px] text-[var(--text-1)] border border-[var(--line-2)] px-5 py-3 rounded-[var(--r-md)] t-all hover:border-[var(--line-3)] hover:bg-[var(--surface-2)]">
-              See what it finds
-            </a>
+          <div className="flex flex-col items-center mt-9 fade-up" style={{ animationDelay: ".32s" }}>
+            <div className="flex gap-3 justify-center items-center flex-wrap">
+              <button onClick={go} className="inline-flex items-center gap-2 text-[14.5px] font-medium text-white bg-[var(--gen)] px-[22px] py-3 rounded-[var(--r-md)] t-all hover:opacity-90 hover:glow-gen hover:-translate-y-px">
+                Get started free <ArrowRight size={15} />
+              </button>
+              <a href="#finds" className="inline-flex items-center gap-2 text-[14.5px] text-[var(--text-1)] border border-[var(--line-3)] bg-[var(--surface-2)] px-5 py-3 rounded-[var(--r-md)] t-all hover:border-[rgba(255,255,255,0.22)] hover:bg-[var(--surface-3)]">
+                See what it finds
+              </a>
+            </div>
+            <p className="text-[12.5px] text-[var(--text-4)] mt-4">Free to start · no credit card needed</p>
           </div>
           <div className="flex gap-5 justify-center mt-12 flex-wrap fade-up" style={{ animationDelay: ".46s" }}>
             {(["contra", "support", "nuance"] as const).map((k) => (
@@ -673,6 +735,9 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
           </div>
         </div>
       </header>
+
+      {/* how it works */}
+      <HowItWorks />
 
       {/* what you walk away with */}
       <section id="finds" className="px-6 py-[110px] max-w-[1080px] mx-auto">
@@ -691,27 +756,29 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
         </div>
         <div className="reveal mt-9">
           <button onClick={go} className="inline-flex items-center gap-2 text-[14.5px] font-medium text-white bg-[var(--gen)] px-[22px] py-3 rounded-[var(--r-md)] t-all hover:opacity-90 hover:glow-gen hover:-translate-y-px">
-            Analyze a field <ArrowRight size={15} />
+            Get started free <ArrowRight size={15} />
           </button>
         </div>
       </section>
 
       {/* lens */}
-      <section className="px-6 pb-[110px] max-w-[1080px] mx-auto">
-        <div className="reveal text-[11px] uppercase tracking-[0.14em] text-[var(--gen)] font-medium mb-3.5">
-          How it reads your corpus
-        </div>
-        <h2 className="reveal font-display text-[clamp(28px,3.6vw,44px)] leading-[1.08] max-w-[640px]">
-          Every claim, traced back to the sentence it came from.
-        </h2>
-        <p className="reveal text-[16px] leading-[1.6] text-[var(--text-2)] max-w-[580px] mt-[18px]">
-          Hover over the corpus and the blur lifts. What you see are claims pulled directly from
-          results and methods sections — not paraphrased, not summarized, not telephone-gamed.
-        </p>
-        <div className="reveal">
-          <LensBand />
-        </div>
-      </section>
+      <div className="border-y border-[var(--line)]" style={{ background: "var(--surface-1)" }}>
+        <section className="px-6 py-[110px] max-w-[1080px] mx-auto">
+          <div className="reveal text-[11px] uppercase tracking-[0.14em] text-[var(--gen)] font-medium mb-3.5">
+            How it reads your corpus
+          </div>
+          <h2 className="reveal font-display text-[clamp(28px,3.6vw,44px)] leading-[1.08] max-w-[640px]">
+            Every claim, traced back to the sentence it came from.
+          </h2>
+          <p className="reveal text-[16px] leading-[1.6] text-[var(--text-2)] max-w-[580px] mt-[18px]">
+            Move your cursor over the panel to read what is underneath. Each line is a verbatim
+            claim traced back to the specific sentence it came from. Nothing paraphrased, nothing invented.
+          </p>
+          <div className="reveal">
+            <LensBand />
+          </div>
+        </section>
+      </div>
 
       {/* product showcase */}
       <section id="product" className="px-6 pb-[110px] max-w-[1080px] mx-auto">
@@ -736,7 +803,7 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
           <ShowcaseRow
             flip
             title="The knowledge graph"
-            copy="Every claim your library contains, laid out as a graph. Claims that support each other pull together; contradictions push apart. Node size tracks how central a claim is to the field. One view of a structure you used to hold in your head."
+            copy="Every claim in your library, laid out as a graph. Claims that agree cluster together; contradictions push apart. Node size reflects how often a claim appears across papers."
             outcome="The whole field in one view"
             src="/shots/knowledge-graph.png"
             alt="ScholarLens knowledge graph of claims connected by relationship type"
@@ -746,7 +813,7 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
         <div className="reveal">
           <ShowcaseRow
             title="The generative bench"
-            copy="ScholarLens reads the gaps and conflicts in your library and proposes hypotheses that follow from them. Each one traces back to the specific claims that motivated it, ranked by how far it sits from territory your library already covers."
+            copy="ScholarLens reads the gaps and conflicts in your library and proposes hypotheses that follow from them. Each one links to the specific claims that motivated it, with a novelty score based on how much of the direction your library already covers."
             outcome="Directions grounded in what the field actually says"
             src="/shots/hypotheses.png"
             alt="ScholarLens generative bench showing a ranked, grounded hypothesis"
@@ -756,36 +823,58 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
       </section>
 
       {/* built for */}
-      <section className="px-6 pb-[110px] max-w-[1080px] mx-auto">
-        <div className="reveal text-[11px] uppercase tracking-[0.14em] text-[var(--gen)] font-medium mb-3.5">
-          Built for
-        </div>
-        <h2 className="reveal font-display text-[clamp(28px,3.6vw,44px)] leading-[1.08] max-w-[640px]">
-          Anyone who has to hold a whole literature in their head.
-        </h2>
-        <div className="reveal grid sm:grid-cols-2 md:grid-cols-3 gap-3 mt-10">
-          {builtFor.map(({ icon: Icon, label }) => (
-            <div key={label} className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-md)] px-[18px] py-[18px] flex items-center gap-3.5">
-              <span className="inline-flex items-center justify-center w-[34px] h-[34px] rounded-[var(--r-sm)] bg-[var(--gen-dim)] text-[var(--gen)] shrink-0">
-                <Icon size={17} />
-              </span>
-              <span className="text-[14px] text-[var(--text-1)]">{label}</span>
-            </div>
-          ))}
-        </div>
-      </section>
+      <div className="border-y border-[var(--line)]" style={{ background: "var(--surface-1)" }}>
+        <section className="px-6 py-[110px] max-w-[1080px] mx-auto">
+          <div className="reveal text-[11px] uppercase tracking-[0.14em] text-[var(--gen)] font-medium mb-3.5">
+            Built for
+          </div>
+          <h2 className="reveal font-display text-[clamp(28px,3.6vw,44px)] leading-[1.08] max-w-[640px]">
+            Anyone who has to hold a whole literature in their head.
+          </h2>
+          <p className="reveal text-[16px] leading-[1.6] text-[var(--text-2)] max-w-[560px] mt-[18px]">
+            If you have spent time cross-referencing papers by hand to track who disagrees with whom,
+            ScholarLens does that automatically.
+          </p>
+          <div className="reveal grid sm:grid-cols-2 md:grid-cols-3 gap-3 mt-10">
+            {builtFor.map(({ icon: Icon, label }) => (
+              <div key={label} className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-md)] px-[18px] py-[18px] flex items-center gap-3.5">
+                <span className="inline-flex items-center justify-center w-[34px] h-[34px] rounded-[var(--r-sm)] bg-[var(--gen-dim)] text-[var(--gen)] shrink-0">
+                  <Icon size={17} />
+                </span>
+                <span className="text-[14px] text-[var(--text-1)]">{label}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
 
       {/* close */}
-      <section className="text-center px-6 pt-[130px] pb-[90px]">
-        <h2 className="font-display text-[clamp(30px,4.4vw,54px)] leading-[1.05] max-w-[700px] mx-auto">
-          Your library has an argument inside it.
-          <br />
-          ScholarLens finds <span className="italic text-[var(--gen)]">what it is</span>.
-        </h2>
-        <div className="mt-10">
-          <button onClick={go} className="inline-flex items-center gap-2 text-[14.5px] font-medium text-white bg-[var(--gen)] px-[22px] py-3 rounded-[var(--r-md)] t-all hover:opacity-90 hover:glow-gen hover:-translate-y-px">
-            Explore your corpus <ArrowRight size={15} />
-          </button>
+      <section className="relative text-center px-6 pt-[130px] pb-[100px] overflow-hidden">
+        {/* radial glow behind the CTA */}
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            background: "radial-gradient(ellipse 60% 50% at 50% 100%, rgba(124,111,255,0.12) 0%, transparent 70%)",
+          }}
+        />
+        <div
+          className="relative z-10 inline-block border border-[var(--line-2)] rounded-[var(--r-xl)] px-10 py-12 max-w-[600px]"
+          style={{ background: "var(--surface-1)", boxShadow: "0 0 80px -20px rgba(124,111,255,0.18)" }}
+        >
+          <h2 className="font-display text-[clamp(26px,3.8vw,48px)] leading-[1.05]">
+            Your library has an argument inside it.
+            <br />
+            ScholarLens finds <span className="italic text-[var(--gen)]">what it is</span>.
+          </h2>
+          <p className="text-[15.5px] text-[var(--text-2)] mt-4 leading-[1.6]">
+            Upload your first paper. See its claims extracted and compared in under 60 seconds.
+          </p>
+          <div className="mt-7 flex flex-col items-center gap-3">
+            <button onClick={go} className="inline-flex items-center gap-2 text-[14.5px] font-medium text-white bg-[var(--gen)] px-[22px] py-3 rounded-[var(--r-md)] t-all hover:opacity-90 hover:glow-gen hover:-translate-y-px">
+              Get started free <ArrowRight size={15} />
+            </button>
+            <span className="text-[12.5px] text-[var(--text-4)]">Free to start · no credit card needed</span>
+          </div>
         </div>
       </section>
 
