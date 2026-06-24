@@ -5,7 +5,53 @@ import { useParams, useRouter } from "next/navigation";
 import { api, Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { Card, Spinner, EmptyState, AnalysisTag, SectionLabel } from "@/components/ui";
-import { ArrowLeft, RefreshCw, Trash2, FileText, CheckCircle2, SendHorizontal } from "lucide-react";
+import { ArrowLeft, RefreshCw, Trash2, FileText, CheckCircle2, SendHorizontal, Download, ExternalLink } from "lucide-react";
+
+function parseClaimsFromContent(content: string): string[] {
+  const claims: string[] = [];
+  let current = "";
+  for (const raw of content.split("\n")) {
+    const line = raw.trim();
+    const numbered = line.match(/^\d+[.)]\s+(.+)/);
+    const bulleted = line.match(/^[-*•]\s+(.+)/);
+    const stripped = (s: string) => s.replace(/\*\*/g, "").replace(/\*/g, "");
+    if (numbered || bulleted) {
+      if (current.trim()) claims.push(current.trim());
+      current = stripped(numbered?.[1] ?? bulleted?.[1] ?? "");
+    } else if (line) {
+      current += (current ? " " : "") + stripped(line);
+    }
+  }
+  if (current.trim()) claims.push(current.trim());
+  return claims;
+}
+
+function KeyClaimsView({ content, paperId }: { content: string; paperId: string }) {
+  const claims = parseClaimsFromContent(content);
+  if (!claims.length) {
+    return <div className="text-[14px] text-[var(--text-1)] leading-[1.8] whitespace-pre-wrap">{content}</div>;
+  }
+  return (
+    <div className="space-y-3">
+      {claims.map((claim, i) => (
+        <div key={i} className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4 group">
+          <div className="flex items-start gap-3">
+            <span className="shrink-0 w-5 h-5 rounded-full bg-[var(--gen-dim)] text-[var(--gen)] text-[10px] font-medium flex items-center justify-center mt-0.5">
+              {i + 1}
+            </span>
+            <p className="flex-1 text-[13.5px] text-[var(--text-1)] leading-[1.7]">{claim}</p>
+          </div>
+          <div className="mt-2.5 pl-8 flex items-center gap-3">
+            <a href={`/search?q=${encodeURIComponent(claim.slice(0, 120))}`}
+              className="flex items-center gap-1 text-[11px] text-[var(--gen)] opacity-0 group-hover:opacity-100 t-all hover:underline">
+              <ExternalLink size={10} /> Find source in library
+            </a>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export default function PaperDetailPage() {
   const params = useParams();
@@ -204,6 +250,15 @@ export default function PaperDetailPage() {
             {reanalyzeError && (
               <span className="text-[11px] text-[var(--contra)]">{reanalyzeError}</span>
             )}
+            {/* Citation export */}
+            {(["bibtex", "ris"] as const).map((fmt) => (
+              <a key={fmt}
+                href={api.exportCitation(paperId, fmt)}
+                download={`citation.${fmt === "bibtex" ? "bib" : "ris"}`}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12.5px] text-[var(--text-2)] border border-[var(--line)] bg-[var(--surface-2)] t-all hover:border-[var(--gen-line)] hover:text-[var(--gen)]">
+                <Download size={13} /> {fmt.toUpperCase()}
+              </a>
+            ))}
             <button
               onClick={handleDelete}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12.5px] text-[var(--text-2)] border border-[var(--line)] bg-[var(--surface-2)] t-all hover:border-[var(--contra-line)] hover:text-[var(--contra)]"
@@ -233,8 +288,14 @@ export default function PaperDetailPage() {
                   </button>
                 ))}
               </div>
-              <div className="text-[14px] text-[var(--text-1)] leading-[1.8] whitespace-pre-wrap mb-7">
-                {active?.content}
+              <div className="mb-7">
+                {active?.type === "key_claims" ? (
+                  <KeyClaimsView content={active.content} paperId={paperId} />
+                ) : (
+                  <div className="text-[14px] text-[var(--text-1)] leading-[1.8] whitespace-pre-wrap">
+                    {active?.content}
+                  </div>
+                )}
               </div>
             </>
           ) : (
@@ -291,6 +352,24 @@ export default function PaperDetailPage() {
                 <span className="text-[var(--text-1)] font-medium capitalize">{v}</span>
               </div>
             ))}
+            {paper.doi && (
+              <div className="py-1.5 border-b border-[var(--line)] text-[12px]">
+                <span className="text-[var(--text-3)] block mb-0.5">DOI</span>
+                <a href={`https://doi.org/${paper.doi}`} target="_blank" rel="noreferrer"
+                  className="text-[var(--gen)] hover:underline break-all flex items-center gap-1">
+                  {paper.doi} <ExternalLink size={10} className="shrink-0" />
+                </a>
+              </div>
+            )}
+            {paper.arxiv_id && (
+              <div className="py-1.5 border-b border-[var(--line)] text-[12px]">
+                <span className="text-[var(--text-3)] block mb-0.5">arXiv</span>
+                <a href={`https://arxiv.org/abs/${paper.arxiv_id}`} target="_blank" rel="noreferrer"
+                  className="text-[var(--gen)] hover:underline break-all flex items-center gap-1">
+                  {paper.arxiv_id} <ExternalLink size={10} className="shrink-0" />
+                </a>
+              </div>
+            )}
             <div className="mt-4">
               <SectionLabel>Analyses</SectionLabel>
               <div className="flex flex-wrap gap-1">
