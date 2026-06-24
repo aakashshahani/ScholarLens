@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, Paper, Hypothesis } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, Slider, SelectChip, PrimaryButton, SectionLabel, Claim } from "@/components/ui";
-import { FlaskConical, TriangleAlert, GitBranch, AlertCircle, CheckCircle2, Zap, RefreshCw } from "lucide-react";
+import { FlaskConical, TriangleAlert, GitBranch, AlertCircle, CheckCircle2, Zap, RefreshCw, ThumbsUp, ThumbsDown, Download } from "lucide-react";
+import Link from "next/link";
 import { cache } from "@/lib/cache";
 
 // Novelty tier badge — shows only when the hypothesis is genuinely high
@@ -42,6 +43,9 @@ export default function HypothesesPage() {
   const [showLineage, setShowLineage] = useState<Record<string, boolean>>({});
   const [showConfig, setShowConfig] = useState(false);
   const [libraryChanged, setLibraryChanged] = useState(false);
+  const [feedbacks, setFeedbacks] = useState<Record<string, "up" | "down">>(() => {
+    try { return JSON.parse(localStorage.getItem("hyp_feedback") || "{}"); } catch { return {}; }
+  });
 
   // Build a cache key from sorted paper IDs so switching selections
   // never shows results from a different scope.
@@ -152,16 +156,37 @@ export default function HypothesesPage() {
     }
   };
 
+  const handleFeedback = (id: string, vote: "up" | "down") => {
+    const next = { ...feedbacks, [id]: feedbacks[id] === vote ? undefined as any : vote };
+    if (!next[id]) delete next[id];
+    setFeedbacks(next);
+    try { localStorage.setItem("hyp_feedback", JSON.stringify(next)); } catch { /* ignore */ }
+  };
+
+  const handleExport = () => {
+    const url = api.exportHypotheses("markdown");
+    const a = document.createElement("a");
+    a.href = url; a.download = "hypotheses.md"; a.click();
+  };
+
   return (
     <div>
       <PageHeader
         title="Generative bench"
         subtitle="Hypotheses synthesized from the gaps and conflicts between your papers."
         action={
-          <button onClick={() => setShowConfig((s) => !s)}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)]">
-            <RefreshCw size={14} /> {showConfig ? "Hide" : "New generation"}
-          </button>
+          <div className="flex items-center gap-2">
+            {hypotheses.length > 0 && (
+              <button onClick={handleExport}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)]">
+                <Download size={14} /> Export
+              </button>
+            )}
+            <button onClick={() => setShowConfig((s) => !s)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)]">
+              <RefreshCw size={14} /> {showConfig ? "Hide" : "New generation"}
+            </button>
+          </div>
         }
       />
 
@@ -298,12 +323,43 @@ export default function HypothesesPage() {
                       <div className="text-[13px] text-[var(--text-2)] leading-[1.65] mb-4">{h.methodology}</div>
 
                       <SectionLabel>Anticipated challenges</SectionLabel>
-                      <div className="flex flex-wrap gap-1.5">
+                      <div className="flex flex-wrap gap-1.5 mb-4">
                         {h.challenges.map((ch, j) => (
                           <span key={j} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium"
                             style={{ background: "var(--contra-dim)", color: "var(--contra)" }}>
                             <TriangleAlert size={11} />{ch}
                           </span>
+                        ))}
+                      </div>
+
+                      {/* Source conflicts */}
+                      {isGrounded && h.source_conflicts?.length > 0 && (
+                        <div className="mb-4">
+                          <SectionLabel>Grounded in contradictions</SectionLabel>
+                          <div className="flex flex-wrap gap-1.5">
+                            {h.source_conflicts.map((cid: string) => (
+                              <Link key={cid} href="/contradictions"
+                                className="inline-flex items-center px-2 py-0.5 rounded-[var(--r-md)] bg-[var(--contra-dim)] text-[var(--contra)] text-[10.5px] mono border border-[var(--contra-line)] hover:border-[var(--contra)] t-all">
+                                {cid.slice(0, 8)}…
+                              </Link>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Feedback */}
+                      <div className="flex items-center gap-2 pt-3 border-t border-[var(--line)]">
+                        <span className="text-[11px] text-[var(--text-4)]">Useful?</span>
+                        {([
+                          { v: "up"   as const, icon: <ThumbsUp size={12} />,   label: "Yes", activeClass: "bg-[var(--support-dim)] text-[var(--support)] border-[var(--support-line)]" },
+                          { v: "down" as const, icon: <ThumbsDown size={12} />, label: "No",  activeClass: "bg-[var(--contra-dim)] text-[var(--contra)] border-[var(--contra-line)]" },
+                        ]).map(({ v, icon, label, activeClass }) => (
+                          <button key={v} onClick={() => handleFeedback(h.id, v)}
+                            className={`flex items-center gap-1 px-2.5 py-1 rounded-[var(--r-md)] text-[11px] border t-all ${
+                              feedbacks[h.id] === v ? activeClass : "bg-[var(--surface-1)] text-[var(--text-3)] border-[var(--line)] hover:border-[var(--line-2)]"
+                            }`}>
+                            {icon} {label}
+                          </button>
                         ))}
                       </div>
                     </Card>
