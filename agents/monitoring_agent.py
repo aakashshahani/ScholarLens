@@ -288,7 +288,7 @@ class MonitoringAgent:
         """
         for result in results:
             if result.scored_papers:
-                html += f'<h3 style="color: #1e3a5f; margin-top: 24px; font-size: 15px;">{result.topic}</h3>'
+                html += f'<h3 style="color: #1e3a5f; margin-top: 24px; font-size: 15px;">{_html.escape(result.topic)}</h3>'
                 for sp in result.scored_papers[:5]:
                     pdf_badge = '📄' if sp.paper.pdf_url else ''
                     title_safe = _html.escape(sp.paper.title)
@@ -296,6 +296,9 @@ class MonitoringAgent:
                     abstract_safe = _html.escape(sp.paper.abstract[:200])
                     reason_safe = _html.escape(sp.relevance_reason)
                     ellipsis = '...' if len(sp.paper.abstract) > 200 else ''
+                    from urllib.parse import urlparse as _urlparse
+                    _pu = _urlparse(sp.paper.url or "")
+                    paper_url = _html.escape(sp.paper.url) if _pu.scheme in ("http", "https") else "#"
                     html += f"""
                     <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px; margin-bottom: 8px;">
                         <div style="font-weight: 600; font-size: 14px; color: #0f172a;">{pdf_badge} {title_safe}</div>
@@ -309,7 +312,7 @@ class MonitoringAgent:
                         <div style="font-size: 13px; color: #475569; margin-top: 8px; line-height: 1.5;">
                             {abstract_safe}{ellipsis}
                         </div>
-                        <a href="{sp.paper.url}" style="font-size: 12px; color: #3b82f6; text-decoration: none;">View paper →</a>
+                        <a href="{paper_url}" style="font-size: 12px; color: #3b82f6; text-decoration: none;">View paper →</a>
                     </div>
                     """
         html += """

@@ -129,6 +129,11 @@ class Settings:
     rl_import_search: str = field(default_factory=lambda: os.getenv("RL_IMPORT_SEARCH", "30/hour"))
     rl_import_lookup: str = field(default_factory=lambda: os.getenv("RL_IMPORT_LOOKUP", "20/hour"))
     rl_import_add: str = field(default_factory=lambda: os.getenv("RL_IMPORT_ADD", "20/hour"))
+    rl_test_key: str = field(default_factory=lambda: os.getenv("RL_TEST_KEY", "5/minute"))
+    rl_test_digest: str = field(default_factory=lambda: os.getenv("RL_TEST_DIGEST", "3/hour"))
+    rl_graph: str = field(default_factory=lambda: os.getenv("RL_GRAPH", "30/hour"))
+    rl_insights: str = field(default_factory=lambda: os.getenv("RL_INSIGHTS", "60/hour"))
+    rl_upload_batch: str = field(default_factory=lambda: os.getenv("RL_UPLOAD_BATCH", "3/hour"))
 
     # ── Auth / sessions / BYOK ───────────────────────────────
     # Fernet key for encrypting tenant Anthropic keys at rest. MUST be stable
@@ -141,7 +146,7 @@ class Settings:
     session_ttl_days: int = field(default_factory=lambda: _env_int("SESSION_TTL_DAYS", 7))
     # Secure flag MUST be False on localhost (http) or the browser drops the
     # cookie. Set COOKIE_SECURE=true in production (https).
-    cookie_secure: bool = field(default_factory=lambda: _env_bool("COOKIE_SECURE", False))
+    cookie_secure: bool = field(default_factory=lambda: _env_bool("COOKIE_SECURE", True))
     cookie_samesite: str = field(default_factory=lambda: os.getenv("COOKIE_SAMESITE", "lax"))
 
     rl_login: str = field(default_factory=lambda: os.getenv("RL_LOGIN", "10/minute"))
@@ -155,6 +160,8 @@ class Settings:
             errors.append("DATABASE_URL not set")
         if not self.voyage_api_key:
             errors.append("VOYAGE_API_KEY not set")
+        if not self.fernet_key:
+            errors.append("FERNET_KEY not set — BYOK key storage disabled")
         return errors
 
     def relevance_tier(self, cosine_distance: float) -> str:

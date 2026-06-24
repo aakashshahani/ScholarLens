@@ -13,13 +13,16 @@ unreliable; OpenAlex indexes most arXiv preprints anyway with better reliability
 Uses the requests library with built-in retry and backoff.
 """
 
+import ipaddress
 import json
 import os
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -66,6 +69,40 @@ _source_locks: dict[str, threading.Lock] = {
 # In-memory search cache
 _cache: dict[str, list] = {}
 _cache_lock = threading.Lock()
+
+
+def _validate_pdf_url(url: str | None) -> bool:
+    """Block SSRF: only allow http/https to public routable addresses."""
+    if not url:
+        return False
+    try:
+        p = urlparse(url)
+        if p.scheme not in ("http", "https"):
+            return False
+        hostname = p.hostname or ""
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if not addr.is_global or addr.is_loopback or addr.is_link_local or addr.is_private:
+                return False
+        except ValueError:
+            # It's a hostname — block obvious local names
+            if hostname in ("localhost",) or hostname.endswith(".local"):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _safe_download_path(title: str) -> Path:
+    """Return a collision-proof path inside UPLOAD_DIR using a UUID stem."""
+    stem = re.sub(r"[^\w\s-]", "", title.encode("ascii", "ignore").decode())[:50].strip()
+    if not stem:
+        stem = "paper"
+    filename = f"{stem}_{uuid.uuid4().hex[:8]}.pdf"
+    path = UPLOAD_DIR / filename
+    if UPLOAD_DIR.resolve() not in path.resolve().parents:
+        raise ValueError("Computed path escapes UPLOAD_DIR")
+    return path
 
 
 def _wait(source: str, seconds: float = 3.0):
@@ -177,12 +214,9 @@ class ArxivSource:
         return results
 
     def download_pdf(self, result: ImportResult) -> Path | None:
-        if not result.pdf_url:
+        if not _validate_pdf_url(result.pdf_url):
             return None
-        safe = re.sub(r"[^\w\s-]", "", result.title)[:80].strip()
-        path = UPLOAD_DIR / f"{safe}.pdf"
-        if path.exists():
-            return path
+        path = _safe_download_path(result.title)
         try:
             _wait("arxiv", 5.0)
             resp = _session.get(result.pdf_url, timeout=(10, 60))
@@ -312,12 +346,9 @@ class OpenAlexSource:
         return results
 
     def download_pdf(self, result: ImportResult) -> Path | None:
-        if not result.pdf_url:
+        if not _validate_pdf_url(result.pdf_url):
             return None
-        safe = re.sub(r"[^\w\s-]", "", result.title)[:80].strip()
-        path = UPLOAD_DIR / f"{safe}.pdf"
-        if path.exists():
-            return path
+        path = _safe_download_path(result.title)
         try:
             _wait("openalex", 1.0)
             resp = _session.get(result.pdf_url, timeout=(10, 60))
@@ -393,12 +424,9 @@ class SemanticScholarSource:
         )
 
     def download_pdf(self, result: ImportResult) -> Path | None:
-        if not result.pdf_url:
+        if not _validate_pdf_url(result.pdf_url):
             return None
-        safe = re.sub(r"[^\w\s-]", "", result.title)[:80].strip()
-        path = UPLOAD_DIR / f"{safe}.pdf"
-        if path.exists():
-            return path
+        path = _safe_download_path(result.title)
         try:
             _wait("s2", 1.5)
             resp = _session.get(result.pdf_url, timeout=(10, 60))
