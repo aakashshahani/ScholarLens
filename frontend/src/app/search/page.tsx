@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { api, type SearchResult } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { Card } from "@/components/ui";
-import { Sparkles, Trash2, ChevronDown, ChevronUp, ArrowUp } from "lucide-react";
+import { Trash2, ChevronDown, ChevronUp, ArrowUp } from "lucide-react";
+import { LogoMark } from "@/components/logo";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -45,11 +47,29 @@ function TierBadge({ tier }: { tier?: string }) {
   );
 }
 
+// ── Query-term highlight ──────────────────────────────────────────────────────
+
+function HighlightedText({ text, query }: { text: string; query: string }) {
+  const words = query.trim().split(/\s+/).filter((w) => w.length > 2);
+  if (!words.length) return <>{text}</>;
+  const escaped = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const parts = text.split(new RegExp(`(${escaped.join("|")})`, "gi"));
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? (
+          <mark key={i} className="bg-[var(--gen-dim)] text-[var(--gen)] rounded-[2px] px-0.5 not-italic font-medium">{part}</mark>
+        ) : part
+      )}
+    </>
+  );
+}
+
 // ── Paper result card ─────────────────────────────────────────────────────────
 
-function PaperResult({ title, passages }: { title: string; passages: SearchResult[] }) {
+function PaperResult({ title, passages, query }: { title: string; passages: SearchResult[]; query: string }) {
   const [expanded, setExpanded] = useState(false);
-  const shown = expanded ? passages : passages.slice(0, 1);
+  const shown = expanded ? passages : passages.slice(0, 2);
   const best = passages[0];
 
   return (
@@ -83,19 +103,19 @@ function PaperResult({ title, passages }: { title: string; passages: SearchResul
               </div>
             )}
             <p className="text-[13.5px] text-[var(--text-2)] leading-[1.7]">
-              {s.text}
+              <HighlightedText text={s.text} query={query} />
             </p>
           </div>
         ))}
       </div>
 
       {/* Expand / collapse */}
-      {passages.length > 1 && (
+      {passages.length > 2 && (
         <button
           onClick={() => setExpanded((e) => !e)}
           className="w-full flex items-center justify-center gap-1.5 py-2.5 border-t border-[var(--line)] text-[12px] text-[var(--gen)] font-medium t-all hover:bg-[var(--surface-2)]"
         >
-          {expanded ? <><ChevronUp size={13} /> Show less</> : <><ChevronDown size={13} /> Show {passages.length - 1} more passage{passages.length - 1 !== 1 ? "s" : ""}</>}
+          {expanded ? <><ChevronUp size={13} /> Show less</> : <><ChevronDown size={13} /> Show {passages.length - 2} more passage{passages.length - 2 !== 1 ? "s" : ""}</>}
         </button>
       )}
     </div>
@@ -105,6 +125,8 @@ function PaperResult({ title, passages }: { title: string; passages: SearchResul
 // ── Exchange ──────────────────────────────────────────────────────────────────
 
 function ExchangeCard({ exchange }: { exchange: Exchange }) {
+  const [paperFilter, setPaperFilter] = useState<string | null>(null);
+
   // Group sources by paper
   const byPaper = exchange.sources.reduce<Record<string, SearchResult[]>>((acc, s) => {
     const key = s.paper_id;
@@ -112,7 +134,10 @@ function ExchangeCard({ exchange }: { exchange: Exchange }) {
     acc[key].push(s);
     return acc;
   }, {});
-  const paperGroups = Object.values(byPaper);
+  const allGroups = Object.values(byPaper);
+  const paperGroups = paperFilter
+    ? allGroups.filter((g) => g[0].paper_id === paperFilter)
+    : allGroups;
 
   return (
     <div className="mb-8">
@@ -136,21 +161,29 @@ function ExchangeCard({ exchange }: { exchange: Exchange }) {
         </div>
       ) : exchange.answerError ? (
         <div className="text-[13px] text-[var(--contra)] py-2">{exchange.answerError}</div>
-      ) : paperGroups.length === 0 ? (
+      ) : allGroups.length === 0 ? (
         <div className="text-[13.5px] text-[var(--text-3)] py-2 pl-1">
           No relevant passages found. Try different keywords or a broader question.
         </div>
       ) : (
         <div>
-          {/* Result summary */}
-          <div className="flex items-center gap-2 mb-3 pl-1">
+          {/* Result summary + paper filter chips */}
+          <div className="flex flex-wrap items-center gap-2 mb-3 pl-1">
             <span className="text-[12px] text-[var(--text-3)]">
               <span className="font-medium text-[var(--text-1)]">{exchange.sources.length}</span> passage{exchange.sources.length !== 1 ? "s" : ""} across{" "}
-              <span className="font-medium text-[var(--text-1)]">{paperGroups.length}</span> paper{paperGroups.length !== 1 ? "s" : ""}
+              <span className="font-medium text-[var(--text-1)]">{allGroups.length}</span> paper{allGroups.length !== 1 ? "s" : ""}
             </span>
-            <span className="text-[10px] text-[var(--text-4)] px-2 py-0.5 rounded-full bg-[var(--surface-2)] border border-[var(--line)]">
-              ranked by relevance
-            </span>
+            {allGroups.length > 1 && allGroups.map((g) => {
+              const on = paperFilter === g[0].paper_id;
+              const title = g[0].paper_title;
+              return (
+                <button key={g[0].paper_id}
+                  onClick={() => setPaperFilter(on ? null : g[0].paper_id)}
+                  className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10.5px] border t-all ${on ? "bg-[var(--gen-dim)] text-[var(--gen)] border-[var(--gen-line)]" : "bg-[var(--surface-2)] text-[var(--text-3)] border-[var(--line)] hover:border-[var(--line-2)] hover:text-[var(--text-1)]"}`}>
+                  {title.length > 28 ? title.slice(0, 28) + "…" : title}
+                </button>
+              );
+            })}
           </div>
           {/* Paper cards */}
           <div className="space-y-3">
@@ -159,6 +192,7 @@ function ExchangeCard({ exchange }: { exchange: Exchange }) {
                 key={group[0].paper_id}
                 title={group[0].paper_title}
                 passages={group}
+                query={exchange.question}
               />
             ))}
           </div>
@@ -235,6 +269,8 @@ export default function SearchPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const heroInputRef = useRef<HTMLInputElement>(null);
+  const autoSubmittedRef = useRef(false);
+  const searchParams = useSearchParams();
 
   useEffect(() => {
     const saved = cache.read<Exchange[]>(CACHE_KEY);
@@ -251,8 +287,18 @@ export default function SearchPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [exchanges]);
 
-  async function submit() {
-    const q = input.trim();
+  // Auto-submit from URL ?q= param (used by "Find source" links in paper detail)
+  useEffect(() => {
+    const urlQ = searchParams.get("q");
+    if (urlQ && !autoSubmittedRef.current) {
+      autoSubmittedRef.current = true;
+      submit(urlQ);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  async function submit(override?: string) {
+    const q = (override ?? input).trim();
     if (!q || submitting) return;
 
     const exchangeId = crypto.randomUUID();
@@ -306,7 +352,7 @@ export default function SearchPage() {
         <div className="mb-8 flex flex-col items-center gap-4">
           <div className="w-14 h-14 rounded-[16px] bg-[var(--gen)] flex items-center justify-center shadow-lg"
             style={{ boxShadow: "0 8px 32px var(--gen-dim), 0 0 0 1px var(--gen-line)" }}>
-            <Sparkles size={24} className="text-white" />
+            <LogoMark size={26} className="text-white" />
           </div>
           <div className="text-center">
             <h1 className="font-display text-[28px] text-[var(--text-1)] tracking-tight leading-tight mb-2">
@@ -365,7 +411,7 @@ export default function SearchPage() {
       <div className="flex items-center justify-between pt-4 pb-3 shrink-0 border-b border-[var(--line)] mb-1">
         <div className="flex items-center gap-2.5">
           <div className="w-6 h-6 rounded-[7px] bg-[var(--gen)] flex items-center justify-center">
-            <Sparkles size={12} className="text-white" />
+            <LogoMark size={13} className="text-white" />
           </div>
           <span className="text-[13.5px] font-medium text-[var(--text-1)]">Search</span>
           <span className="text-[11.5px] text-[var(--text-4)]">
