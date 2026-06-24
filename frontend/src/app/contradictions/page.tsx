@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, Paper, ContradictionResult } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, Claim, REL } from "@/components/ui";
-import { Zap, Settings2, AlertCircle } from "lucide-react";
+import { Zap, Settings2, AlertCircle, Download, ThumbsUp, ThumbsDown, Flag } from "lucide-react";
 import { cache } from "@/lib/cache";
 
 // ── Lightweight markdown renderer ────────────────────────────
@@ -75,9 +75,11 @@ export default function ContradictionsPage() {
   const [stage, setStage] = useState("");
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<string | null>(null);
+  const [paperFilter, setPaperFilter] = useState<string | null>(null);
   const [selected, setSelected] = useState<ContradictionResult | null>(null);
   const [showConfig, setShowConfig] = useState(false);
   const [libraryChanged, setLibraryChanged] = useState(false);
+  const [feedbacks, setFeedbacks] = useState<Record<string, "agree" | "disagree" | "flag">>({});
 
   useEffect(() => {
     const cachedPapers = cache.read<Paper[]>("papers");
@@ -133,8 +135,21 @@ export default function ContradictionsPage() {
   // Cleanup on unmount
   useEffect(() => () => stopPolling(), []);
 
+  const handleExport = (fmt: "markdown" | "json") => {
+    const url = api.exportContradictions(fmt);
+    const a = document.createElement("a");
+    a.href = url; a.download = `contradictions.${fmt === "markdown" ? "md" : "json"}`; a.click();
+  };
+
+  const handleFeedback = async (relId: string, verdict: "agree" | "disagree" | "flag") => {
+    try {
+      await api.contradictionFeedback(relId, verdict);
+      setFeedbacks((f) => ({ ...f, [relId]: verdict }));
+    } catch { /* ignore */ }
+  };
+
   const runScan = async () => {
-    setLoading(true); setResults([]); setFilter(null); setSelected(null); setError("");
+    setLoading(true); setResults([]); setFilter(null); setPaperFilter(null); setSelected(null); setError("");
     setLibraryChanged(false);
     const stages = ["Extracting claims from papers", "Embedding & comparing claims", "Judging relationships"];
     let si = 0; setStage(stages[0]);
@@ -194,7 +209,22 @@ export default function ContradictionsPage() {
   const counts: Record<string, number> = {};
   results.forEach((r) => { counts[r.relationship] = (counts[r.relationship] || 0) + 1; });
   const displayResults = results.filter((r) => r.relationship !== "error");
-  const filtered = filter ? displayResults.filter((r) => r.relationship === filter) : displayResults;
+
+  // Unique papers involved in results
+  const involvedPapers = (() => {
+    const map = new Map<string, string>();
+    displayResults.forEach((r) => {
+      map.set(r.claim_a.paper_title, r.claim_a.paper_title);
+      map.set(r.claim_b.paper_title, r.claim_b.paper_title);
+    });
+    return [...map.values()];
+  })();
+
+  const filtered = displayResults.filter((r) => {
+    if (filter && r.relationship !== filter) return false;
+    if (paperFilter && r.claim_a.paper_title !== paperFilter && r.claim_b.paper_title !== paperFilter) return false;
+    return true;
+  });
 
   return (
     <div>
@@ -202,10 +232,18 @@ export default function ContradictionsPage() {
         title="Conflict map"
         subtitle="Where your papers disagree — claim against claim."
         action={
-          <button onClick={() => setShowConfig((s) => !s)}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)]">
-            <Settings2 size={14} /> {showConfig ? "Hide" : "New scan"}
-          </button>
+          <div className="flex items-center gap-2">
+            {results.length > 0 && (
+              <button onClick={() => handleExport("markdown")}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)]">
+                <Download size={14} /> Export
+              </button>
+            )}
+            <button onClick={() => setShowConfig((s) => !s)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)]">
+              <Settings2 size={14} /> {showConfig ? "Hide" : "New scan"}
+            </button>
+          </div>
         }
       />
 
@@ -294,7 +332,7 @@ export default function ContradictionsPage() {
 
           {results.length > 0 && (
             <div className="fade-up">
-              <div className="grid grid-cols-4 gap-3 mb-5">
+              <div className="grid grid-cols-4 gap-3 mb-4">
                 {(["contradiction", "nuance", "support", "unrelated"] as const).map((type) => {
                   const on = filter === type;
                   return (
@@ -308,9 +346,27 @@ export default function ContradictionsPage() {
                 })}
               </div>
 
+              {/* Per-paper filter chips */}
+              {involvedPapers.length > 1 && (
+                <div className="flex flex-wrap gap-1.5 mb-4">
+                  <span className="text-[11px] text-[var(--text-4)] self-center mr-1">Filter by paper:</span>
+                  {involvedPapers.map((title) => {
+                    const on = paperFilter === title;
+                    return (
+                      <button key={title} onClick={() => setPaperFilter(on ? null : title)}
+                        className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] border t-all ${on ? "bg-[var(--gen-dim)] text-[var(--gen)] border-[var(--gen-line)]" : "bg-[var(--surface-2)] text-[var(--text-2)] border-[var(--line)] hover:border-[var(--line-2)]"}`}>
+                        {title.length > 36 ? title.slice(0, 36) + "…" : title}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               <div className="grid grid-cols-[1fr_340px] gap-4">
                 <div className="space-y-3">
-                  {filtered.map((r) => {
+                  {filtered.length === 0 ? (
+                    <div className="text-[13px] text-[var(--text-3)] text-center py-8">No results match the current filters.</div>
+                  ) : filtered.map((r) => {
                     const isSel = selected?.id === r.id;
                     return (
                       <button key={r.id} onClick={() => setSelected(r)}
@@ -322,7 +378,11 @@ export default function ContradictionsPage() {
                   })}
                 </div>
                 <div className="sticky top-6 self-start">
-                  {selected ? <Adjudication r={selected} /> : (
+                  {selected ? (
+                    <Adjudication r={selected}
+                      feedback={feedbacks[selected.id] || null}
+                      onFeedback={(v) => handleFeedback(selected.id, v)} />
+                  ) : (
                     <Card><div className="text-[13px] text-[var(--text-3)] text-center py-8">Select a pair to see the model's reasoning.</div></Card>
                   )}
                 </div>
@@ -363,7 +423,11 @@ function TensionPair({ r }: { r: ContradictionResult }) {
   );
 }
 
-function Adjudication({ r }: { r: ContradictionResult }) {
+function Adjudication({ r, feedback, onFeedback }: {
+  r: ContradictionResult;
+  feedback: "agree" | "disagree" | "flag" | null;
+  onFeedback: (verdict: "agree" | "disagree" | "flag") => void;
+}) {
   const s = REL[r.relationship] ?? REL["unrelated"];
   const stronger = r.stronger_evidence === "paper_a" ? r.claim_a.paper_title
     : r.stronger_evidence === "paper_b" ? r.claim_b.paper_title : null;
@@ -389,6 +453,28 @@ function Adjudication({ r }: { r: ContradictionResult }) {
           <div className="text-[12.5px] text-[var(--text-2)] leading-[1.6]">{r.resolution}</div>
         </div>
       )}
+
+      {/* Feedback row */}
+      <div className="mt-4 pt-4 border-t border-[var(--line)]">
+        <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2">Your verdict</div>
+        <div className="flex items-center gap-2">
+          {([
+            { v: "agree"    as const, icon: <ThumbsUp size={12} />,   label: "Agree",    active: "bg-[var(--support-dim)] text-[var(--support)] border-[var(--support-line)]" },
+            { v: "disagree" as const, icon: <ThumbsDown size={12} />, label: "Disagree", active: "bg-[var(--contra-dim)] text-[var(--contra)] border-[var(--contra-line)]" },
+            { v: "flag"     as const, icon: <Flag size={12} />,       label: "Flag",     active: "bg-[var(--nuance-dim)] text-[var(--nuance)] border-[var(--nuance-line)]" },
+          ]).map(({ v, icon, label, active }) => (
+            <button key={v} onClick={() => onFeedback(v)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--r-md)] text-[11.5px] border t-all ${
+                feedback === v ? active : "bg-[var(--surface-1)] text-[var(--text-3)] border-[var(--line)] hover:border-[var(--line-2)] hover:text-[var(--text-1)]"
+              }`}>
+              {icon} {label}
+            </button>
+          ))}
+          {feedback && (
+            <span className="ml-auto text-[10.5px] text-[var(--text-4)]">Saved</span>
+          )}
+        </div>
+      </div>
     </Card>
   );
 }
