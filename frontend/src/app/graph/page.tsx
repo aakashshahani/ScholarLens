@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { api, Paper, GraphPayload, GraphNode, GraphEdge } from "@/lib/api";
 import { PageHeader, EmptyState, Spinner, PrimaryButton, REL } from "@/components/ui";
-import { Network, AlertCircle, Info, Zap } from "lucide-react";
+import { Network, AlertCircle, Info, Zap, Download, Search } from "lucide-react";
 import { cache } from "@/lib/cache";
 import Link from "next/link";
 
@@ -46,8 +46,10 @@ export default function GraphPage() {
     contradiction: true, support: true, nuance: true,
   });
   const [sims, setSims]       = useState<Sim[]>([]);
+  const [search, setSearch]   = useState("");
   const rafRef                = useRef<number>(0);
   const simsRef               = useRef<Sim[]>([]);
+  const svgRef                = useRef<SVGSVGElement>(null);
 
   useEffect(() => {
     // Cache-first for papers list
@@ -106,6 +108,52 @@ export default function GraphPage() {
       setData(g); cache.write("graph", g); seedPositions(g);
     } catch (e: any) { setError(e.message); }
     setLoading(false);
+  };
+
+  const exportPNG = () => {
+    const svg = svgRef.current;
+    if (!svg) return;
+
+    // Walk every live SVG element, read its browser-computed fill/stroke
+    // (which resolves CSS custom properties), then inline those values into
+    // a detached clone so the serialized SVG is self-contained.
+    const clone = svg.cloneNode(true) as SVGSVGElement;
+    const origEls  = [svg,   ...Array.from(svg.querySelectorAll("*"))];
+    const cloneEls = [clone, ...Array.from(clone.querySelectorAll("*"))];
+    origEls.forEach((orig, i) => {
+      const cs  = getComputedStyle(orig);
+      const cel = cloneEls[i] as SVGElement;
+      for (const prop of ["fill", "stroke", "opacity", "fill-opacity", "stroke-opacity", "stroke-width"]) {
+        const val = cs.getPropertyValue(prop);
+        if (val && val !== "none" && val !== "") cel.setAttribute(prop, val);
+      }
+      cel.removeAttribute("class"); // animations won't work in a standalone blob
+    });
+
+    const bg = getComputedStyle(document.documentElement).getPropertyValue("--surface-1").trim() || "#14141f";
+    const svgStr = new XMLSerializer().serializeToString(clone);
+
+    const canvas = document.createElement("canvas");
+    const scale = 2;
+    canvas.width = W * scale; canvas.height = H * scale;
+    const ctx = canvas.getContext("2d")!;
+    ctx.scale(scale, scale);
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    const blob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
+    const url  = URL.createObjectURL(blob);
+    const img  = new Image();
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0, W, H);
+      URL.revokeObjectURL(url);
+      const a = document.createElement("a");
+      a.download = "knowledge-graph.png";
+      a.href = canvas.toDataURL("image/png");
+      a.click();
+    };
+    img.onerror = () => URL.revokeObjectURL(url);
+    img.src = url;
   };
 
   const tick = useCallback(() => {
@@ -181,6 +229,10 @@ export default function GraphPage() {
         subtitle="Every extracted claim is a node. Every detected relationship is an edge. Node size reflects how connected a claim is across your library."
         action={data && (
           <div className="flex items-center gap-2">
+            <button onClick={exportPNG}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)]">
+              <Download size={14} /> Export PNG
+            </button>
             <button onClick={run} disabled={loading}
               className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)] disabled:opacity-40">
               <Network size={14} /> Refresh
@@ -225,6 +277,20 @@ export default function GraphPage() {
 
           {/* ── Graph canvas ── */}
           <div className="bg-[var(--surface-1)] border border-[var(--line)] rounded-[var(--r-lg)] overflow-hidden relative">
+
+            {/* Node search */}
+            <div className="absolute top-3 right-3 z-10">
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--r-md)] bg-[var(--surface-2)] border border-[var(--line)] focus-within:border-[var(--gen-line)] t-all">
+                <Search size={11} className="text-[var(--text-4)] shrink-0" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search nodes…"
+                  className="bg-transparent text-[11.5px] text-[var(--text-1)] placeholder-[var(--text-4)] outline-none w-[130px]"
+                />
+              </div>
+            </div>
 
             {/* Relationship filter chips */}
             <div className="absolute top-3 left-3 z-10 flex gap-1.5">
@@ -272,7 +338,7 @@ export default function GraphPage() {
             })()}
 
             {/* SVG graph */}
-            <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }}>
+            <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }}>
               {/* Edges */}
               {data.edges.filter((e) => active[e.relationship]).map((e, i) => {
                 const a = pos(e.source), b = pos(e.target);
@@ -290,35 +356,50 @@ export default function GraphPage() {
               })}
 
               {/* Nodes */}
-              {sims.map((s) => {
-                const dim    = neighbors && !neighbors.has(s.id);
-                const isSel  = sel?.id === s.id;
-                const isHov  = hovered?.id === s.id;
-                const r      = nodeR(s.node.degree, isSel || isHov);
-                const pColor = paperColor(s.node.paper_id, data);
-                return (
-                  <g key={s.id}
-                    onClick={() => setSel(isSel ? null : s.node)}
-                    onMouseEnter={() => setHovered(s)}
-                    onMouseLeave={() => setHovered(null)}
-                    style={{ cursor: "pointer", opacity: dim ? 0.10 : 1 }}
-                    className="t-all">
-                    {/* Paper colour ring */}
-                    <circle cx={s.x} cy={s.y} r={r + 3} fill="none"
-                      stroke={pColor} strokeWidth={1.8}
-                      strokeOpacity={isSel ? 1 : isHov ? 0.8 : 0.45} />
-                    {/* Node body */}
-                    <circle cx={s.x} cy={s.y} r={r}
-                      fill="var(--surface-3)"
-                      stroke={isSel ? "var(--gen)" : "var(--line-3)"}
-                      strokeWidth={isSel ? 2 : 1} />
-                    {/* Centre dot */}
-                    <circle cx={s.x} cy={s.y} r={isSel ? 5 : 3.5}
-                      fill={isSel ? "var(--gen)" : pColor}
-                      fillOpacity={0.9} />
-                  </g>
-                );
-              })}
+              {(() => {
+                const q = search.trim().toLowerCase();
+                const hasQ = q.length > 0;
+                return sims.map((s) => {
+                  const dim     = neighbors && !neighbors.has(s.id);
+                  const isSel   = sel?.id === s.id;
+                  const isHov   = hovered?.id === s.id;
+                  const isMatch = hasQ && (
+                    s.node.claim.toLowerCase().includes(q) ||
+                    s.node.paper_title.toLowerCase().includes(q)
+                  );
+                  const dimBySearch = hasQ && !isMatch;
+                  const r       = nodeR(s.node.degree, isSel || isHov || isMatch);
+                  const pColor  = paperColor(s.node.paper_id, data);
+                  return (
+                    <g key={s.id}
+                      onClick={() => setSel(isSel ? null : s.node)}
+                      onMouseEnter={() => setHovered(s)}
+                      onMouseLeave={() => setHovered(null)}
+                      style={{ cursor: "pointer", opacity: (dim || dimBySearch) ? 0.10 : 1 }}
+                      className="t-all">
+                      {/* Search highlight ring */}
+                      {isMatch && (
+                        <circle cx={s.x} cy={s.y} r={r + 7} fill="none"
+                          stroke="var(--gen)" strokeWidth={1.5} strokeOpacity={0.55}
+                          strokeDasharray="3 2" />
+                      )}
+                      {/* Paper colour ring */}
+                      <circle cx={s.x} cy={s.y} r={r + 3} fill="none"
+                        stroke={pColor} strokeWidth={1.8}
+                        strokeOpacity={isSel ? 1 : isHov ? 0.8 : 0.45} />
+                      {/* Node body */}
+                      <circle cx={s.x} cy={s.y} r={r}
+                        fill="var(--surface-3)"
+                        stroke={isSel ? "var(--gen)" : "var(--line-3)"}
+                        strokeWidth={isSel ? 2 : 1} />
+                      {/* Centre dot */}
+                      <circle cx={s.x} cy={s.y} r={isSel ? 5 : 3.5}
+                        fill={isSel ? "var(--gen)" : pColor}
+                        fillOpacity={0.9} />
+                    </g>
+                  );
+                });
+              })()}
             </svg>
 
             {/* Footer legend */}
