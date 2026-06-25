@@ -25,6 +25,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const applyUser = useCallback((u: AuthUser | null) => {
     setUser(u);
     cache.setUser(u?.id ?? null);
+    // Non-secret hint so a full page load of "/" can tell a likely-returning
+    // user (show a loader over the SSR'd landing) from a fresh visitor (show
+    // the landing instantly). The real auth check is still api.me(); this only
+    // avoids a marketing-page flash for signed-in users. Cleared by clearAll()
+    // on logout (it strips every "sl_" key).
+    try {
+      if (u) localStorage.setItem("sl_session", "1");
+      else localStorage.removeItem("sl_session");
+    } catch { /* SSR / storage blocked */ }
   }, []);
 
   const refresh = useCallback(async () => {
@@ -37,6 +46,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [applyUser]);
 
+  // Run the initial session check once on mount. The setState inside refresh()
+  // happens after an await (not synchronously in the effect), so the
+  // set-state-in-effect rule is a false positive here.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { refresh(); }, [refresh]);
 
   const login = useCallback(async (email: string, password: string) => {

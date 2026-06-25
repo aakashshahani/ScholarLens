@@ -17,7 +17,9 @@ const geist = Geist({
 });
 const fraunces = Fraunces({
   subsets: ["latin"],
-  weight: ["400", "500", "600"],
+  // Only weight 600 is ever rendered (via the .font-display class) — loading
+  // 400/500 was dead weight that delayed the headline's webfont swap (LCP).
+  weight: ["600"],
   variable: "--font-fraunces",
   display: "swap",
 });

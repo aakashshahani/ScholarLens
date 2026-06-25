@@ -23,6 +23,9 @@
   --text-2: #9BA1AD;
   --text-3: #5E6470;
   --text-4: #3A3F4A;
+  /* AA-compliant (≥4.5:1) muted text for fine print on canvas + surface-1.
+     Used on the landing where --text-3/4 fail contrast. */
+  --text-muted: #868D9B;
 
   --contra: #FF5C5C;
   --contra-dim: rgba(255,92,92,0.14);
@@ -166,4 +169,110 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .reveal.in {
   opacity: 1;
   transform: translateY(0);
+}
+
+/* ══════════════════════════════════════════════════════════
+   Landing — Awwwards layer
+   Custom lens cursor · kinetic type · marquee · clip reveals
+   All effects below are gated behind (hover:hover) + reduced-motion.
+   ══════════════════════════════════════════════════════════ */
+
+/* ── Custom lens cursor ──────────────────────────────────── */
+/* Echoes the product name + logo: the pointer becomes an aperture.
+   mix-blend-mode:difference makes it read on both dark and light. */
+html.lens-cursor, html.lens-cursor * { cursor: none !important; }
+.lens-ring, .lens-dot {
+  position: fixed; top: 0; left: 0;
+  pointer-events: none; z-index: 9999;
+  border-radius: 999px;
+  translate: -50% -50%;            /* centers; JS drives `transform` */
+  will-change: transform;
+  mix-blend-mode: difference;
+}
+.lens-ring {
+  width: 32px; height: 32px;
+  border: 1.5px solid rgba(255,255,255,0.75);
+  transition: width .24s cubic-bezier(.16,1,.3,1),
+              height .24s cubic-bezier(.16,1,.3,1),
+              background .24s, border-color .24s, opacity .24s;
+}
+.lens-dot { width: 5px; height: 5px; background: #fff; }
+.lens-ring.is-hot {                /* over an interactive element */
+  width: 58px; height: 58px;
+  background: rgba(255,255,255,0.14);
+  border-color: rgba(255,255,255,0.95);
+}
+.lens-ring.is-down { width: 24px; height: 24px; }
+.lens-ring.is-hide, .lens-dot.is-hide { opacity: 0; }
+
+/* ── Kinetic headline (mask-rise per word) ───────────────── */
+.kin-line { overflow: hidden; padding-bottom: 0.08em; }
+/* CSS-driven so the server-rendered headline animates in without waiting for
+   JS/hydration — this is what keeps LCP fast now that "/" is SSR'd. Stagger
+   is applied per-word via inline animation-delay. */
+.kin-word {
+  display: inline-block;
+  opacity: 0;
+  transform: translateY(115%);
+  animation: kin-rise .8s cubic-bezier(.16,1,.3,1) both;
+}
+@keyframes kin-rise { to { opacity: 1; transform: translateY(0); } }
+/* per-letter repel keyword — JS sets --tx/--ty per glyph */
+.kin-char { display: inline-block; will-change: transform; }
+.kin-char.react {
+  transform: translate(var(--tx, 0), var(--ty, 0));
+  transition: transform .35s cubic-bezier(.16,1,.3,1);
+}
+
+/* the red strike that draws through "papers" as the documents shatter */
+.strike-papers {
+  position: absolute;
+  left: -2%; top: 56%;
+  height: 3px; width: 0;
+  background: var(--contra);
+  border-radius: 3px;
+  box-shadow: 0 0 9px rgba(255,92,92,0.6);
+  animation: strike-draw .5s cubic-bezier(.16,1,.3,1) .95s forwards;
+}
+@keyframes strike-draw { to { width: 104%; } }
+@media (prefers-reduced-motion: reduce) {
+  .strike-papers { width: 104%; animation: none; }
+}
+
+/* ── Marquee of verbatim claims ──────────────────────────── */
+@keyframes marquee-x { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.marquee-mask {
+  -webkit-mask: linear-gradient(90deg, transparent, #000 9%, #000 91%, transparent);
+          mask: linear-gradient(90deg, transparent, #000 9%, #000 91%, transparent);
+}
+.marquee-track {
+  display: inline-flex; flex-wrap: nowrap; width: max-content;
+  animation: marquee-x 46s linear infinite;
+}
+.marquee-track.rev { animation-direction: reverse; animation-duration: 58s; }
+.marquee-host:hover .marquee-track { animation-play-state: paused; }
+
+/* ── Clip-path section reveal ────────────────────────────── */
+.clip-reveal {
+  clip-path: inset(0 0 100% 0);
+  transition: clip-path 1.05s cubic-bezier(.16,1,.3,1);
+}
+.clip-reveal.in { clip-path: inset(0 0 0 0); }
+
+/* ── Parallax tilt card (product shots) ──────────────────── */
+.tilt {
+  transform: perspective(1200px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+  transition: transform .3s cubic-bezier(.16,1,.3,1);
+  transform-style: preserve-3d;
+}
+
+@media (hover: none), (prefers-reduced-motion: reduce) {
+  .lens-ring, .lens-dot { display: none !important; }
+  html.lens-cursor, html.lens-cursor * { cursor: auto !important; }
+  .tilt { transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .marquee-track { animation: none; }
+  .kin-word { animation: none; transform: none; opacity: 1; }
+  .clip-reveal { clip-path: none; }
 }
