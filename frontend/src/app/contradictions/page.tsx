@@ -66,9 +66,9 @@ function MarkdownAnswer({ text }: { text: string }) {
 }
 
 const PRESETS = {
-  quick:    { label: "Quick",    threshold: 0.55, maxPairs: 10, time: "~15s" },
-  balanced: { label: "Balanced", threshold: 0.50, maxPairs: 15, time: "~30s" },
-  deep:     { label: "Deep",     threshold: 0.40, maxPairs: 25, time: "~60s" },
+  quick:    { label: "Quick",    threshold: 0.55, maxPairs: 25,  time: "~30s" },
+  balanced: { label: "Balanced", threshold: 0.50, maxPairs: 50,  time: "~2min" },
+  deep:     { label: "Deep",     threshold: 0.40, maxPairs: 100, time: "~5min" },
 } as const;
 type Preset = keyof typeof PRESETS;
 

@@ -141,6 +141,22 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .glow-contra { box-shadow: 0 0 24px -8px rgba(255,92,92,0.5); }
 .glow-support { box-shadow: 0 0 24px -8px rgba(61,212,160,0.5); }
 
+/* ── Knowledge graph edge animations ────────────────────── */
+@keyframes edge-contra-flow {
+  from { stroke-dashoffset: 28; }
+  to   { stroke-dashoffset: 0; }
+}
+.edge-contra {
+  stroke-dasharray: 9 5;
+  animation: edge-contra-flow 0.52s linear infinite;
+}
+
+@keyframes edge-support-breathe {
+  0%, 100% { stroke-opacity: 0.30; }
+  50%       { stroke-opacity: 0.65; }
+}
+.edge-support { animation: edge-support-breathe 2.6s ease-in-out infinite; }
+
 /* ── Scroll-reveal (used by landing page) ────────────────── */
 .reveal {
   opacity: 0;

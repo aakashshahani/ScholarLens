@@ -137,22 +137,13 @@ class ContradictionAgent:
         if cached:
             return [_stored_to_claim(sc, paper.title) for sc in cached]
 
-        # ── Cache miss: extract via LLM, then persist ───────────
-        analyses = self.db.get_analyses_for_paper(paper_id)
-        if not analyses:
+        # ── Cache miss: extract from source text, then persist ──────
+        if not paper.full_text:
             return []
 
-        claim_sources = []
-        for a in analyses:
-            if a.analysis_type in ("key_claims", "findings", "summary"):
-                claim_sources.append((a.analysis_type, a.content))
-
-        if not claim_sources:
-            return []
-
-        source_text = "\n\n".join(
-            f"[{atype}]\n{content}" for atype, content in claim_sources
-        )
+        source_text = paper.full_text[:32000]
+        if len(paper.full_text) > 32000:
+            source_text += "\n\n[text truncated — only the first 32 000 characters were processed]"
 
         try:
             response = self._anthropic(api_key).messages.create(
@@ -161,8 +152,9 @@ class ContradictionAgent:
                 messages=[{
                     "role": "user",
                     "content": (
-                        "Extract specific, falsifiable claims from this paper analysis. "
-                        "Each claim must be narrow enough that another paper could plausibly disagree with it.\n\n"
+                        "Extract specific, falsifiable claims from the full text of this academic paper. "
+                        "Each claim must come directly from what the paper reports — not from inference or summary — "
+                        "and must be narrow enough that another paper could plausibly disagree with it.\n\n"
                         "HARD RULES — violating any of these makes a claim useless:\n"
                         "1. Name the exact system/method (never 'it', 'the approach', 'the authors')\n"
                         "2. Name the exact outcome variable or metric being measured\n"
@@ -189,12 +181,12 @@ class ContradictionAgent:
                         "in the Johnson et al. dataset, outperforming human rater agreement on the same task.'\n\n"
                         "Return ONLY valid JSON: a list of objects with fields:\n"
                         '"text" (the self-contained claim — must satisfy all 5 rules above),\n'
-                        '"section" (key_claims/findings/summary),\n'
-                        '"confidence" (high=quantitative evidence, medium=qualitative with clear direction, '
+                        '"section" (the paper section this claim comes from: abstract/introduction/methods/results/discussion/conclusion),\n'
+                        '"confidence" (high=quantitative evidence with numbers, medium=qualitative with clear direction, '
                         'low=speculative or indirect).\n\n'
                         "Return 6-10 claims. Fewer high-quality claims beat many vague ones. "
                         "No preamble, no markdown fences.\n\n"
-                        f"Paper: {paper.title}\n\n{source_text}"
+                        f"Paper: {paper.title}\n\n<document>\n{source_text}\n</document>"
                     ),
                 }],
             )
@@ -535,7 +527,7 @@ class ContradictionAgent:
         self,
         paper_ids: list[str] | None = None,
         similarity_threshold: float = 0.6,
-        max_pairs: int = 20,
+        max_pairs: int = 50,
         api_key: str | None = None,
         model: str | None = None,
     ) -> list[ContradictionResult]:
@@ -567,28 +559,203 @@ class ContradictionAgent:
 
         pairs = self.find_claim_pairs(all_claims, similarity_threshold)
 
-        # Deduplicate: each claim appears at most once across all pairs.
-        # Without this, one dominant claim can monopolise all result slots.
-        # Pairs are sorted by similarity descending so we keep the
-        # highest-similarity match for each claim and discard the rest.
-        seen_claim_ids: set[str] = set()
-        deduped: list[ClaimPair] = []
+        # Skip pairs already in the DB — incremental scanning: never recompute
+        # relationships that exist, only evaluate truly new pairs.
+        # This allows the graph to grow without redundant LLM calls.
+        already_seen: set[tuple[str, str]] = set()
+        new_pairs: list[ClaimPair] = []
+        existing_pairs: list[ClaimPair] = []
         for pair in pairs:
-            if pair.claim_a.id not in seen_claim_ids and pair.claim_b.id not in seen_claim_ids:
-                deduped.append(pair)
-                seen_claim_ids.add(pair.claim_a.id)
-                seen_claim_ids.add(pair.claim_b.id)
-        pairs = deduped[:max_pairs]
+            lo, hi = sorted([pair.claim_a.id, pair.claim_b.id])
+            if (lo, hi) in already_seen:
+                continue
+            already_seen.add((lo, hi))
+            if self.db.get_relationship(pair.claim_a.id, pair.claim_b.id) is not None:
+                existing_pairs.append(pair)
+            else:
+                new_pairs.append(pair)
 
-        if not pairs:
+        # Evaluate new pairs up to max_pairs; existing ones are returned from DB.
+        pairs_to_judge = new_pairs[:max_pairs]
+
+        if not pairs_to_judge and not existing_pairs:
             return []
 
-        results = []
-        for pair in pairs:
+        # Judge new pairs via LLM
+        new_results = []
+        for pair in pairs_to_judge:
             result = self.judge_pair(pair, api_key=api_key, model=model)
-            results.append(result)
+            new_results.append(result)
 
+        # Load existing pairs from DB cache (no LLM call)
+        existing_results = []
+        for pair in existing_pairs[:max_pairs]:
+            result = self.judge_pair(pair, use_cache=True, api_key=api_key, model=model)
+            existing_results.append(result)
+
+        results = new_results + existing_results
         priority = {"contradiction": 0, "nuance": 1, "support": 2, "unrelated": 3, "error": 4}
         results.sort(key=lambda r: priority.get(r.relationship, 5))
 
         return results
+
+    # ── Cluster detection ─────────────────────────────────────
+
+    def detect_clusters(
+        self,
+        paper_ids: list[str] | None = None,
+        user_id: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+    ) -> list:
+        """
+        Find connected components in the claim-relationship graph and name each one.
+
+        Algorithm:
+          1. Load all non-unrelated relationships for these papers
+          2. Build adjacency list: claim_id → list[StoredRelationship]
+          3. BFS to find connected components (claim clusters)
+          4. For each component ≥ 2 claims: ask LLM to name the cluster
+          5. Persist to clusters table and return
+
+        Returns a list of Cluster dataclass instances.
+        """
+        from db.database import Cluster
+        from datetime import datetime, timezone
+
+        rels = self.db.list_relationships(
+            paper_ids=paper_ids,
+            relationships=["contradiction", "nuance", "support"],
+            strict=bool(paper_ids),
+        )
+        if not rels:
+            return []
+
+        # Build adjacency list
+        adjacency: dict[str, list] = {}
+        for rel in rels:
+            for cid in (rel.claim_lo, rel.claim_hi):
+                adjacency.setdefault(cid, [])
+            adjacency[rel.claim_lo].append(rel)
+            adjacency[rel.claim_hi].append(rel)
+
+        # BFS to find connected components
+        visited: set[str] = set()
+        components: list[list[str]] = []
+        for start in adjacency:
+            if start in visited:
+                continue
+            component: list[str] = []
+            queue = [start]
+            while queue:
+                node = queue.pop(0)
+                if node in visited:
+                    continue
+                visited.add(node)
+                component.append(node)
+                for rel in adjacency.get(node, []):
+                    other = rel.claim_hi if rel.claim_lo == node else rel.claim_lo
+                    if other not in visited:
+                        queue.append(other)
+            if len(component) >= 2:
+                components.append(component)
+
+        if not components:
+            return []
+
+        # Load claim texts + paper info in batch
+        paper_ids_needed = list({r.paper_a for r in rels} | {r.paper_b for r in rels})
+        claims_by_paper = self.db.get_claims_for_papers(paper_ids_needed)
+        claim_by_id = {}
+        claim_paper_id: dict[str, str] = {}
+        for pid, claims in claims_by_paper.items():
+            for c in claims:
+                claim_by_id[c.id] = c
+                claim_paper_id[c.id] = pid
+
+        # Build set of all relationship IDs for fast lookup
+        rel_set: dict[tuple[str, str], str] = {
+            (r.claim_lo, r.claim_hi): r.id for r in rels
+        }
+
+        clusters = []
+        for comp in components:
+            comp_set = set(comp)
+            comp_rels = [
+                r for r in rels
+                if r.claim_lo in comp_set and r.claim_hi in comp_set
+            ]
+            contra_count = sum(1 for r in comp_rels if r.relationship == "contradiction")
+            support_count = sum(1 for r in comp_rels if r.relationship == "support")
+            nuance_count = sum(1 for r in comp_rels if r.relationship == "nuance")
+            paper_ids_in = list({claim_paper_id[cid] for cid in comp if cid in claim_paper_id})
+
+            claim_texts = [claim_by_id[cid].text for cid in comp if cid in claim_by_id]
+            name, rq, desc = self._name_cluster(claim_texts, contra_count, api_key, model)
+
+            clusters.append(Cluster(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                name=name,
+                research_question=rq,
+                description=desc,
+                claim_ids=comp,
+                relationship_ids=[r.id for r in comp_rels],
+                contradiction_count=contra_count,
+                support_count=support_count,
+                nuance_count=nuance_count,
+                paper_count=len(paper_ids_in),
+                created_at=datetime.now(timezone.utc).isoformat(),
+            ))
+
+        if clusters and user_id:
+            self.db.save_clusters(clusters)
+
+        return clusters
+
+    def _name_cluster(
+        self,
+        claim_texts: list[str],
+        contradiction_count: int,
+        api_key: str | None = None,
+        model: str | None = None,
+    ) -> tuple[str, str | None, str | None]:
+        """Ask LLM to produce a short cluster name, research question, and description."""
+        if not claim_texts:
+            return "Research Cluster", None, None
+        sample = claim_texts[:6]
+        formatted = "\n".join(f"- {t}" for t in sample)
+        try:
+            response = self._anthropic(api_key).messages.create(
+                model=(model or settings.anthropic_model),
+                max_tokens=256,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "These research claims are connected through support/contradiction/nuance "
+                        "relationships and form a cluster around a shared scientific question.\n\n"
+                        f"Claims:\n{formatted}\n\n"
+                        "Return ONLY valid JSON with:\n"
+                        '- "name": 4-7 word topic label (noun phrase, title case)\n'
+                        '- "research_question": the specific question these claims address\n'
+                        '- "description": one sentence summarizing this research debate\n\n'
+                        "No preamble, no markdown fences."
+                    ),
+                }],
+            )
+            raw = response.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+                if raw.endswith("```"):
+                    raw = raw[:-3]
+                raw = raw.strip()
+            parsed = json.loads(raw)
+            return (
+                parsed.get("name", "Research Cluster"),
+                parsed.get("research_question"),
+                parsed.get("description"),
+            )
+        except Exception as e:
+            print(f"Cluster naming failed: {e}")
+            first = claim_texts[0][:50] if claim_texts else "Research"
+            return f"Cluster: {first}…", None, None

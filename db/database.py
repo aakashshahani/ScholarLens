@@ -160,6 +160,41 @@ class User:
 
 
 @dataclass
+class HypothesisRun:
+    id: str
+    user_id: str | None
+    paper_ids: list[str]
+    research_question: str | None
+    hypotheses: list[dict]
+    grounding: str
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @staticmethod
+    def new_id() -> str:
+        return str(uuid.uuid4())
+
+
+@dataclass
+class Cluster:
+    id: str
+    user_id: str | None
+    name: str
+    research_question: str | None
+    description: str | None
+    claim_ids: list[str]
+    relationship_ids: list[str]
+    contradiction_count: int
+    support_count: int
+    nuance_count: int
+    paper_count: int
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @staticmethod
+    def new_id() -> str:
+        return str(uuid.uuid4())
+
+
+@dataclass
 class MonitorTopicRow:
     """Persisted monitor topic (DB representation)."""
     id: str
@@ -303,6 +338,33 @@ class Database:
             "ALTER TABLE hypothesis_cache ADD COLUMN IF NOT EXISTS user_id TEXT"
         )
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS hypothesis_runs (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT REFERENCES users(id) ON DELETE CASCADE,
+                paper_ids       TEXT NOT NULL,
+                research_question TEXT,
+                hypotheses      TEXT NOT NULL,
+                grounding       TEXT NOT NULL,
+                created_at      TEXT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS clusters (
+                id                  TEXT PRIMARY KEY,
+                user_id             TEXT REFERENCES users(id) ON DELETE CASCADE,
+                name                TEXT NOT NULL,
+                research_question   TEXT,
+                description         TEXT,
+                claim_ids           TEXT NOT NULL,
+                relationship_ids    TEXT NOT NULL,
+                contradiction_count INTEGER NOT NULL DEFAULT 0,
+                support_count       INTEGER NOT NULL DEFAULT 0,
+                nuance_count        INTEGER NOT NULL DEFAULT 0,
+                paper_count         INTEGER NOT NULL DEFAULT 0,
+                created_at          TEXT NOT NULL
+            )
+        """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 token       TEXT PRIMARY KEY,
                 user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -362,6 +424,9 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_monitor_topics_user ON monitor_topics(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_paper_tags_paper ON paper_tags(paper_id)",
             "CREATE INDEX IF NOT EXISTS idx_paper_tags_user ON paper_tags(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_hyp_runs_user ON hypothesis_runs(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_hyp_runs_created ON hypothesis_runs(created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_clusters_user ON clusters(user_id)",
         ]:
             cur.execute(idx_sql)
         conn.commit()
@@ -964,6 +1029,140 @@ class Database:
         conn.commit()
         cur.close()
         self._put_conn(conn)
+
+    # ── Hypothesis runs (permanent, never invalidated) ────────────────────────
+
+    def save_hypothesis_run(self, run) -> str:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO hypothesis_runs
+               (id, user_id, paper_ids, research_question, hypotheses, grounding, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (run.id, run.user_id, json.dumps(run.paper_ids), run.research_question,
+             json.dumps(run.hypotheses), run.grounding, run.created_at),
+        )
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+        return run.id
+
+    def list_hypothesis_runs(self, user_id: str, limit: int = 20) -> list:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM hypothesis_runs WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+            (user_id, limit),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        return [self._row_to_hypothesis_run(r) for r in rows]
+
+    def get_hypothesis_run(self, run_id: str):
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM hypothesis_runs WHERE id = %s", (run_id,))
+        row = cur.fetchone()
+        cur.close()
+        self._put_conn(conn)
+        return self._row_to_hypothesis_run(row) if row else None
+
+    def get_recent_hypothesis_run(self, user_id: str, question_hash: str, paper_ids_hash: str, max_age_minutes: int = 5):
+        """Return most recent matching run within max_age_minutes, or None."""
+        import hashlib as _hl
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)).isoformat()
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM hypothesis_runs WHERE user_id = %s AND created_at > %s ORDER BY created_at DESC LIMIT 10",
+            (user_id, cutoff),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        for row in rows:
+            run = self._row_to_hypothesis_run(row)
+            rph = _hl.sha256(json.dumps(sorted(run.paper_ids)).encode()).hexdigest()[:12]
+            rqh = _hl.sha256((run.research_question or "").strip().lower().encode()).hexdigest()[:8]
+            if rph == paper_ids_hash and rqh == question_hash:
+                return run
+        return None
+
+    @staticmethod
+    def _row_to_hypothesis_run(r):
+        return HypothesisRun(
+            id=r["id"], user_id=r["user_id"],
+            paper_ids=json.loads(r["paper_ids"]) if r["paper_ids"] else [],
+            research_question=r["research_question"],
+            hypotheses=json.loads(r["hypotheses"]) if r["hypotheses"] else [],
+            grounding=r["grounding"],
+            created_at=r["created_at"],
+        )
+
+    # ── Clusters ──────────────────────────────────────────────────────────────
+
+    def save_clusters(self, clusters: list) -> None:
+        if not clusters:
+            return
+        user_id = clusters[0].user_id
+        conn = self._get_conn()
+        cur = conn.cursor()
+        if user_id:
+            cur.execute("DELETE FROM clusters WHERE user_id = %s", (user_id,))
+        psycopg2.extras.execute_batch(
+            cur,
+            """INSERT INTO clusters
+               (id, user_id, name, research_question, description, claim_ids,
+                relationship_ids, contradiction_count, support_count, nuance_count,
+                paper_count, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            [(c.id, c.user_id, c.name, c.research_question, c.description,
+              json.dumps(c.claim_ids), json.dumps(c.relationship_ids),
+              c.contradiction_count, c.support_count, c.nuance_count,
+              c.paper_count, c.created_at)
+             for c in clusters],
+        )
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+
+    def list_clusters(self, user_id: str) -> list:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM clusters WHERE user_id = %s ORDER BY contradiction_count DESC, paper_count DESC",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        return [self._row_to_cluster(r) for r in rows]
+
+    def get_cluster(self, cluster_id: str):
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM clusters WHERE id = %s", (cluster_id,))
+        row = cur.fetchone()
+        cur.close()
+        self._put_conn(conn)
+        return self._row_to_cluster(row) if row else None
+
+    @staticmethod
+    def _row_to_cluster(r):
+        return Cluster(
+            id=r["id"], user_id=r["user_id"], name=r["name"],
+            research_question=r["research_question"], description=r["description"],
+            claim_ids=json.loads(r["claim_ids"]) if r["claim_ids"] else [],
+            relationship_ids=json.loads(r["relationship_ids"]) if r["relationship_ids"] else [],
+            contradiction_count=r["contradiction_count"],
+            support_count=r["support_count"],
+            nuance_count=r["nuance_count"],
+            paper_count=r["paper_count"],
+            created_at=r["created_at"],
+        )
+
 
     # â”€â”€ Users / Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 

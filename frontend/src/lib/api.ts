@@ -193,6 +193,30 @@ export interface GraphPayload {
   papers: { id: string; title: string }[];
 }
 
+export interface HypothesisRunMeta {
+  id: string;
+  paper_count: number;
+  paper_ids: string[];
+  research_question: string | null;
+  hypothesis_count: number;
+  grounding: string;
+  created_at: string;
+}
+
+export interface DebateCluster {
+  id: string;
+  name: string;
+  research_question: string | null;
+  description: string | null;
+  claim_ids: string[];
+  relationship_ids: string[];
+  contradiction_count: number;
+  support_count: number;
+  nuance_count: number;
+  paper_count: number;
+  created_at: string;
+}
+
 export interface Insight {
   id: string;
   type: "contradiction" | "consensus" | "gap" | "hypothesis" | "new_paper";
@@ -426,6 +450,12 @@ export const api = {
   getCachedHypotheses: () =>
     apiFetch<Hypothesis[]>("/api/hypotheses"),
 
+  listHypothesisRuns: () =>
+    apiFetch<HypothesisRunMeta[]>("/api/hypotheses/runs"),
+
+  getHypothesisRun: (runId: string) =>
+    apiFetch<Hypothesis[]>(`/api/hypotheses/runs/${runId}`),
+
   generateHypotheses: (opts?: { researchQuestion?: string; paperIds?: string[]; numHypotheses?: number; refresh?: boolean }) =>
     apiFetch<{ job_id: string; status: string }>("/api/hypotheses", {
       method: "POST",
@@ -570,6 +600,16 @@ export const api = {
         max_pairs: opts?.maxPairs ?? 30,
         compute: opts?.compute ?? false,
       }),
+    }),
+
+  // ── Clusters ──────────────────────────────────────────────
+  listClusters: () =>
+    apiFetch<DebateCluster[]>("/api/graph/clusters"),
+
+  detectClusters: (paperIds?: string[]) =>
+    apiFetch<{ job_id: string; status: string }>("/api/graph/clusters", {
+      method: "POST",
+      body: JSON.stringify({ paper_ids: paperIds || null }),
     }),
 
   insights: (opts?: { paperIds?: string[]; limit?: number }) =>

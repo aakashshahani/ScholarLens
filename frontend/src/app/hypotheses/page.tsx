@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, Paper, Hypothesis } from "@/lib/api";
+import { api, Paper, Hypothesis, HypothesisRunMeta } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, Slider, SelectChip, PrimaryButton, SectionLabel, Claim } from "@/components/ui";
-import { FlaskConical, TriangleAlert, GitBranch, AlertCircle, CheckCircle2, Zap, RefreshCw, ThumbsUp, ThumbsDown, Download } from "lucide-react";
+import { FlaskConical, TriangleAlert, GitBranch, AlertCircle, CheckCircle2, Zap, RefreshCw, ThumbsUp, ThumbsDown, Download, Clock } from "lucide-react";
 import Link from "next/link";
 import { cache } from "@/lib/cache";
 
@@ -32,12 +32,22 @@ function NoveltyBadge({ score }: { score: number }) {
   return null;
 }
 
+function fmtRunDate(iso: string) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch { return iso.slice(0, 10); }
+}
+
 export default function HypothesesPage() {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [question, setQuestion] = useState("");
   const [count, setCount] = useState(5);
   const [hypotheses, setHypotheses] = useState<Hypothesis[]>([]);
+  const [runs, setRuns] = useState<HypothesisRunMeta[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [loadingRun, setLoadingRun] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [showLineage, setShowLineage] = useState<Record<string, boolean>>({});
@@ -57,24 +67,46 @@ export default function HypothesesPage() {
       : `hypotheses:${[...ids].sort().join(",")}`;
   };
 
+  const loadRun = async (runId: string) => {
+    setLoadingRun(true);
+    setSelectedRunId(runId);
+    try {
+      const hyps = await api.getHypothesisRun(runId);
+      setHypotheses(hyps);
+      setShowConfig(false);
+    } catch { /* ignore */ }
+    setLoadingRun(false);
+  };
+
   useEffect(() => {
     const cachedPapers = cache.read<Paper[]>("papers");
     if (cachedPapers?.length) setPapers(cachedPapers);
     api.listPapers(50).then((p) => { setPapers(p); cache.write("papers", p); });
 
-    // On initial load, no selection is made yet — try the server cache directly.
-    // localStorage is only read once the user has an active selection (in generate).
-    api.getCachedHypotheses()
-      .then((hyps) => {
-        if (hyps && hyps.length > 0) {
-          setHypotheses(hyps);
-          // Write under the "all" key so subsequent loads with no selection hit this
-          cache.write(selectionCacheKey([], papers), hyps);
-        } else {
-          setShowConfig(true);
-        }
-      })
-      .catch(() => setShowConfig(true));
+    // Load run history — permanent records, never lost
+    api.listHypothesisRuns().then((r) => {
+      setRuns(r);
+      if (r.length > 0) {
+        // Auto-select the most recent run
+        setSelectedRunId(r[0].id);
+        api.getHypothesisRun(r[0].id).then((hyps) => {
+          if (hyps?.length) setHypotheses(hyps);
+          else setShowConfig(true);
+        }).catch(() => setShowConfig(true));
+      } else {
+        // Fall back to legacy cache
+        api.getCachedHypotheses()
+          .then((hyps) => {
+            if (hyps?.length) setHypotheses(hyps);
+            else setShowConfig(true);
+          })
+          .catch(() => setShowConfig(true));
+      }
+    }).catch(() => {
+      api.getCachedHypotheses()
+        .then((hyps) => { if (hyps?.length) setHypotheses(hyps); else setShowConfig(true); })
+        .catch(() => setShowConfig(true));
+    });
 
     // Fingerprint check — warn if library changed since last generation
     api.health().then((h) => {
@@ -133,6 +165,11 @@ export default function HypothesesPage() {
             cache.write(cacheKey, job.result);
             setShowConfig(false);
             setLibraryChanged(false);
+            // Refresh run history so the new run appears
+            api.listHypothesisRuns().then((r) => {
+              setRuns(r);
+              if (r.length > 0) setSelectedRunId(r[0].id);
+            }).catch(() => {});
             api.health().then((h) => {
               const fp = h.library_fingerprint || "default";
               cache.write("hypotheses_fp", fp);
@@ -221,6 +258,31 @@ ${rows}
           </div>
         }
       />
+
+      {/* Run history — permanent records that survive contradiction rescans */}
+      {runs.length > 1 && (
+        <div className="flex items-center gap-2 mb-4 overflow-x-auto pb-1">
+          <span className="flex items-center gap-1 text-[11px] text-[var(--text-4)] shrink-0">
+            <Clock size={11} /> Runs:
+          </span>
+          {runs.map((r, i) => (
+            <button
+              key={r.id}
+              onClick={() => loadRun(r.id)}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] border shrink-0 t-all ${
+                selectedRunId === r.id
+                  ? "bg-[var(--gen-dim)] border-[var(--gen-line)] text-[var(--gen)]"
+                  : "bg-[var(--surface-2)] border-[var(--line)] text-[var(--text-3)] hover:border-[var(--line-2)]"
+              }`}
+            >
+              {loadingRun && selectedRunId === r.id
+                ? <Spinner />
+                : <>{i === 0 ? "Latest" : fmtRunDate(r.created_at)} · {r.hypothesis_count}H</>
+              }
+            </button>
+          ))}
+        </div>
+      )}
 
       {libraryChanged && !showConfig && (
         <div className="bg-[var(--nuance-dim)] border border-[var(--nuance-line)] rounded-[var(--r-lg)] p-4 mb-4 flex items-center gap-3">

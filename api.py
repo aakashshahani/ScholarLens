@@ -295,7 +295,7 @@ class AskRequest(BaseModel):
 class ContradictionRequest(BaseModel):
     paper_ids: Optional[list[str]] = None
     similarity_threshold: float = Field(0.5, ge=0.0, le=1.0)
-    max_pairs: int = Field(15, ge=1, le=50)
+    max_pairs: int = Field(50, ge=1, le=120)
 
 
 class HypothesisRequest(BaseModel):
@@ -1184,7 +1184,7 @@ def list_contradictions(user: User = Depends(authlib.get_current_user)):
 
 
 def _contradiction_bg(job_id: str, scope: list[str], similarity_threshold: float,
-                       max_pairs: int, api_key: str | None, model: str):
+                       max_pairs: int, api_key: str | None, model: str, user_id: str | None = None):
     try:
         results = contradiction_agent.run_contradiction_scan(
             paper_ids=scope,
@@ -1194,6 +1194,15 @@ def _contradiction_bg(job_id: str, scope: list[str], similarity_threshold: float
             model=model,
         )
         _invalidate_insight_cache()
+        try:
+            contradiction_agent.detect_clusters(
+                paper_ids=scope,
+                user_id=user_id,
+                api_key=api_key,
+                model=model,
+            )
+        except Exception as _ce:
+            print(f"[cluster detection] {_ce}")
         _finish_job(job_id, [
             {
                 "id": r.id,
@@ -1238,7 +1247,7 @@ def run_contradictions(request: Request, req: ContradictionRequest,
     background_tasks.add_task(
         _contradiction_bg, job_id, scope,
         req.similarity_threshold, req.max_pairs,
-        authlib.resolve_user_api_key(user), _resolve_model_and_meter(user),
+        authlib.resolve_user_api_key(user), _resolve_model_and_meter(user), user.id,
     )
     return {"job_id": job_id, "status": "running"}
 
@@ -1248,17 +1257,49 @@ def run_contradictions(request: Request, req: ContradictionRequest,
 @app.get("/api/hypotheses")
 def get_cached_hypotheses(user: User = Depends(authlib.get_current_user)):
     """
-    Return the most recent cached hypotheses for this user.
-    Zero LLM calls — pure DB read from hypothesis_cache table.
-    Returns [] if no cache exists yet.
+    Return the most recent hypothesis run's hypotheses for this user.
+    Falls back to the legacy hypothesis_cache if no runs exist yet.
+    Zero LLM calls — pure DB reads.
     """
+    runs = db.list_hypothesis_runs(user.id, limit=1)
+    if runs:
+        try:
+            return runs[0].hypotheses
+        except Exception:
+            pass
+    # Legacy fallback
     paper_ids = db.list_paper_ids_for_user(user.id)
     entries = db.list_hypothesis_cache(paper_ids, user_id=user.id)
-    if not entries:
-        return []
-    # Return the most recent entry's hypotheses
-    latest = entries[0]
-    return latest["hypotheses"]
+    if entries:
+        return entries[0]["hypotheses"]
+    return []
+
+
+@app.get("/api/hypotheses/runs")
+def list_hypothesis_runs(user: User = Depends(authlib.get_current_user)):
+    """Return all hypothesis generation runs for this user, newest first."""
+    runs = db.list_hypothesis_runs(user.id, limit=20)
+    return [
+        {
+            "id": r.id,
+            "paper_count": len(r.paper_ids),
+            "paper_ids": r.paper_ids,
+            "research_question": r.research_question,
+            "hypothesis_count": len(r.hypotheses),
+            "grounding": r.grounding,
+            "created_at": r.created_at,
+        }
+        for r in runs
+    ]
+
+
+@app.get("/api/hypotheses/runs/{run_id}")
+def get_hypothesis_run(run_id: str, user: User = Depends(authlib.get_current_user)):
+    """Return the full hypotheses for a specific run."""
+    run = db.get_hypothesis_run(run_id)
+    if not run or run.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run.hypotheses
 
 
 def _hypothesis_bg(job_id: str, research_question: str | None, scope: list[str],
@@ -1856,6 +1897,84 @@ def build_graph(request: Request, req: GraphRequest, user: User = Depends(authli
     if req.compute:
         return _build_graph_compute(req, papers, authlib.resolve_user_api_key(user), _resolve_model_and_meter(user))
     return _build_graph_readonly(papers)
+
+
+# ── Clusters ──────────────────────────────────────────────────────────────────
+
+class ClusterRequest(BaseModel):
+    paper_ids: Optional[list[str]] = None
+
+
+def _cluster_bg(job_id: str, scope: list[str], api_key: str | None, model: str, user_id: str):
+    try:
+        clusters = contradiction_agent.detect_clusters(
+            paper_ids=scope,
+            user_id=user_id,
+            api_key=api_key,
+            model=model,
+        )
+        _finish_job(job_id, [
+            {
+                "id": c.id,
+                "name": c.name,
+                "research_question": c.research_question,
+                "description": c.description,
+                "claim_ids": c.claim_ids,
+                "relationship_ids": c.relationship_ids,
+                "contradiction_count": c.contradiction_count,
+                "support_count": c.support_count,
+                "nuance_count": c.nuance_count,
+                "paper_count": c.paper_count,
+                "created_at": c.created_at,
+            }
+            for c in clusters
+        ])
+    except Exception as e:
+        _fail_job(job_id, str(e))
+
+
+@app.get("/api/graph/clusters")
+def list_clusters(user: User = Depends(authlib.get_current_user)):
+    """Return detected debate clusters for this user — pure DB read."""
+    clusters = db.list_clusters(user.id)
+    return [
+        {
+            "id": c.id,
+            "name": c.name,
+            "research_question": c.research_question,
+            "description": c.description,
+            "claim_ids": c.claim_ids,
+            "relationship_ids": c.relationship_ids,
+            "contradiction_count": c.contradiction_count,
+            "support_count": c.support_count,
+            "nuance_count": c.nuance_count,
+            "paper_count": c.paper_count,
+            "created_at": c.created_at,
+        }
+        for c in clusters
+    ]
+
+
+@app.post("/api/graph/clusters")
+@limiter.limit(settings.rl_contradictions)
+def detect_clusters(request: Request, req: ClusterRequest,
+                    background_tasks: BackgroundTasks,
+                    user: User = Depends(authlib.get_current_user)):
+    """Detect and name debate clusters from existing relationships. Background job."""
+    scope = _scope_ids(user, req.paper_ids)
+    if not scope:
+        return {"job_id": None, "status": "done", "result": []}
+    existing = _get_or_reuse_job(user.id, "clusters")
+    if existing:
+        return {"job_id": existing, "status": "running"}
+    job_id = _new_job(user.id, "clusters")
+    background_tasks.add_task(
+        _cluster_bg, job_id, scope,
+        authlib.resolve_user_api_key(user), _resolve_model_and_meter(user),
+        user.id,
+    )
+    return {"job_id": job_id, "status": "running"}
+
 
 
 # â"€â"€ Insight Feed â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€

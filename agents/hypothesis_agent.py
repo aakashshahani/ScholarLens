@@ -13,10 +13,10 @@ Session changes:
       When no conflicts exist, falls back to research_gaps analyses and labels
       grounding honestly as "single_paper_gaps".
 
-  1b. OUTPUT CACHE — results are stored in the hypothesis_cache table, keyed
-      on (sorted paper IDs + relationships watermark + question hash). Cache is
-      read on every call and written on every successful generation. Pass
-      force_refresh=True to bypass the cache.
+  1b. PERMANENT RUNS — results are stored in the hypothesis_runs table, keyed
+      by user + question + paper scope. A 5-minute dedup window prevents back-to-
+      back duplicate calls from re-running the LLM. Runs are never deleted — the
+      UI shows a browsable history. Pass force_refresh=True to bypass the dedup.
 
   2.  NOVELTY VIA COSINE DISTANCE — after generation, each hypothesis statement
       is embedded and compared against the nearest library chunk. novelty_score
@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from anthropic import Anthropic
 
 from config import settings
-from db import Database, StoredRelationship, StoredClaim
+from db import Database, StoredRelationship, StoredClaim, HypothesisRun
 from utils import VectorStore
 
 
@@ -96,34 +96,18 @@ class HypothesisAgent:
         self.db = Database()
         self.vector_store = VectorStore()
 
-    # ── Cache key ────────────────────────────────────────────
+    # ── Run identity hashes ──────────────────────────────────
 
-    def _cache_key(
-        self,
-        paper_ids: list[str] | None,
-        research_question: str | None,
-    ) -> str:
-        """
-        Deterministic cache key from three inputs:
-          - sorted paper IDs in scope (or all library paper IDs)
-          - relationships watermark: max created_at over scoped relationships
-            — changes when a new contradiction scan runs, which invalidates
-            hypotheses that were grounded in the old conflict set
-          - normalized question hash
+    @staticmethod
+    def _paper_ids_hash(paper_ids: list[str] | None) -> str:
+        ids = sorted(paper_ids) if paper_ids else []
+        return hashlib.sha256(json.dumps(ids).encode()).hexdigest()[:12]
 
-        Changing any of these three things means the cached result is stale.
-        """
-        scoped_ids = sorted(paper_ids) if paper_ids else []
-
-        watermark = self.db.relationships_watermark(
-            paper_ids=paper_ids  # None → all papers
-        )
-        question_hash = hashlib.sha256(
+    @staticmethod
+    def _question_hash(research_question: str | None) -> str:
+        return hashlib.sha256(
             (research_question or "").strip().lower().encode()
         ).hexdigest()[:8]
-
-        raw = f"{'|'.join(scoped_ids)}||{watermark}||{question_hash}"
-        return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
     # ── Conflict context (primary grounding input) ───────────
 
@@ -304,13 +288,11 @@ class HypothesisAgent:
         """
         Generate testable hypotheses from the library.
 
-        Cache behaviour:
-          - Computes a cache key from (paper scope, relationships watermark,
-            question hash). Returns cached result when key matches unless
-            force_refresh=True.
-          - Cache auto-invalidates when a new contradiction scan runs (the
-            watermark changes), so hypotheses always reflect the latest
-            conflict data.
+        Dedup behaviour:
+          - Within a 5-minute window, an identical (user, question, paper scope)
+            combination returns the most recent stored run without calling the LLM.
+          - Runs are stored permanently in hypothesis_runs and never deleted.
+          - Pass force_refresh=True to bypass the dedup and force a new LLM call.
 
         Grounding:
           - Primary: detected contradictions/nuances from the relationships
@@ -326,17 +308,17 @@ class HypothesisAgent:
 
         Impact: removed — no reliable signal available.
         """
-        cache_key = self._cache_key(paper_ids, research_question)
+        ph = self._paper_ids_hash(paper_ids)
+        qh = self._question_hash(research_question)
 
-        # ── Cache read ────────────────────────────────────────
-        if not force_refresh:
-            cached = self.db.get_hypothesis_cache(cache_key)
-            if cached:
+        # ── Recent-run dedup: skip generation if an identical run just ran ──
+        if not force_refresh and user_id:
+            recent = self.db.get_recent_hypothesis_run(user_id, qh, ph, max_age_minutes=5)
+            if recent:
                 try:
-                    return [Hypothesis.from_dict(h) for h in cached["hypotheses"]]
+                    return [Hypothesis.from_dict(h) for h in recent.hypotheses]
                 except Exception as e:
-                    print(f"Hypothesis cache deserialisation failed: {e}")
-                    # Fall through to regeneration
+                    print(f"Recent run deserialisation failed: {e}")
 
         # ── Gather grounding inputs ───────────────────────────
         context_text, conflict_ids, grounding, label_to_real = self._gather_conflict_context(paper_ids)
@@ -494,16 +476,19 @@ class HypothesisAgent:
                 research_question=rq,
             ))
 
-        # ── Cache write ───────────────────────────────────────
-        if hypotheses:
+        # ── Save permanent run record ─────────────────────────
+        if hypotheses and user_id:
             try:
-                self.db.set_hypothesis_cache(
-                    cache_key,
-                    [h.to_dict() for h in hypotheses],
-                    grounding,
+                run = HypothesisRun(
+                    id=HypothesisRun.new_id(),
                     user_id=user_id,
+                    paper_ids=sorted(paper_ids) if paper_ids else [],
+                    research_question=research_question,
+                    hypotheses=[h.to_dict() for h in hypotheses],
+                    grounding=grounding,
                 )
+                self.db.save_hypothesis_run(run)
             except Exception as e:
-                print(f"Hypothesis cache write failed (non-fatal): {e}")
+                print(f"Hypothesis run save failed (non-fatal): {e}")
 
         return hypotheses
