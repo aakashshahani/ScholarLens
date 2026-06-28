@@ -218,6 +218,7 @@ function ChapterGlyph({ n, accent, className = "" }: { n: string; accent: string
 export default function Landing({ onSignIn }: { onSignIn: () => void }) {
   const go = onSignIn;
   const [enhance, setEnhance] = useState(false);
+  const [cinematicReady, setCinematicReady] = useState(false);
   const [chamberOpen, setChamberOpen] = useState(false);
   const announceRef = useRef<HTMLDivElement>(null);
   const closeChamber = useCallback(() => setChamberOpen(false), []);
@@ -267,7 +268,7 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
       <div ref={announceRef} aria-live="polite" className="sr-only" />
 
       {/* the cinematic enhancement — covers the static narrative when capable */}
-      {enhance && <LandingCinematic onOpenChamber={openChamber} announceRef={announceRef} />}
+      {enhance && <LandingCinematic onOpenChamber={openChamber} onReady={() => setCinematicReady(true)} announceRef={announceRef} />}
 
       {/* ── persistent header (always visible, in both modes, SSR'd) ── */}
       <header className="fixed top-0 left-0 right-0 z-30 h-[60px] flex items-center justify-between px-5 sm:px-7 backdrop-blur-[10px]" style={{ background: "linear-gradient(180deg, rgba(11,13,18,0.85), transparent)" }}>
@@ -288,8 +289,9 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
       {/* ── static narrative (canonical content; scroll driver when enhanced) ──
           Kept fully accessible in BOTH modes: the cinematic above is aria-hidden
           decoration, so screen-reader / keyboard users navigate this real content
-          even when it's visually covered by the canvas. */}
-      <main className="relative z-0">
+          even when it's visually covered by the canvas. Cross-fades out as the
+          cinematic fades in, so the hand-off reads as one motion, not two pages. */}
+      <main className="relative z-0" style={{ opacity: cinematicReady ? 0 : 1, transition: "opacity 0.8s ease" }}>
         {/* hero */}
         <section className="relative min-h-screen flex flex-col items-center justify-center text-center px-6 overflow-hidden">
           <FieldGlyph className="absolute inset-0 w-full h-full opacity-[0.5] pointer-events-none" />

@@ -25,15 +25,19 @@ const SANS = "var(--font-sans), sans-serif";
 interface Props {
   /** Opens the React-owned Evidence Chamber dialog (clicked a contradiction marker). */
   onOpenChamber: () => void;
+  /** Fires once the first frame is drawn — lets the parent cross-fade the static hero out. */
+  onReady?: () => void;
   /** aria-live region the loop writes the active chapter label into. */
   announceRef: RefObject<HTMLElement | null>;
 }
 
-export default function LandingCinematic({ onOpenChamber, announceRef }: Props) {
+export default function LandingCinematic({ onOpenChamber, onReady, announceRef }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const onOpenRef = useRef(onOpenChamber);
   onOpenRef.current = onOpenChamber;
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   useEffect(() => {
     const root = rootRef.current;
@@ -300,8 +304,8 @@ export default function LandingCinematic({ onOpenChamber, announceRef }: Props) 
 
         rdr.render(scene, camera);
         // Cross-fade the cinematic in over the static hero once the first frame is drawn
-        // (no hard "initializing" veil pop).
-        if (!shown) { shown = true; root.style.opacity = "1"; }
+        // (no hard "initializing" veil pop). onReady lets the parent fade the hero out in sync.
+        if (!shown) { shown = true; root.style.opacity = "1"; onReadyRef.current?.(); }
       };
       loop();
     });
