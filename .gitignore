@@ -23,3 +23,6 @@ chroma/
 uploads/
 __pycache__/
 *.pyc
+
+# Design handoff — local design reference, not part of the app build
+design_handoff_scholarlens/
