@@ -64,8 +64,8 @@ export default function LandingCinematic({ onOpenChamber, onReady, announceRef }
       };
 
       const rdr = new T.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: "high-performance" });
-      // Additive glow point cloud is fill-rate bound; cap DPR (1.5) + drop MSAA — big perf win on retina.
-      rdr.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+      // Additive glow point cloud is fill-rate bound; cap DPR (1.25) + drop MSAA — big perf win on retina / iGPU.
+      rdr.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
       rdr.setClearColor(0x04050a, 1);
       renderer = rdr;
       const scene = new T.Scene();
@@ -207,7 +207,7 @@ export default function LandingCinematic({ onOpenChamber, onReady, announceRef }
       const coords = q('[data-readout="coords"]');
 
       // ── input + clock ──
-      let progress = 0, target = 0, time = 0;
+      let progress = 0, target = 0, time = 0, lastT = 0, frame = 0;
       let mx = window.innerWidth / 2, my = window.innerHeight / 2, pmx = 0, pmy = 0;
       let w = window.innerWidth, h = window.innerHeight;
       let lastScene = -1, shown = false;
@@ -221,12 +221,19 @@ export default function LandingCinematic({ onOpenChamber, onReady, announceRef }
       cleanups.push(() => { window.removeEventListener("scroll", onScroll); window.removeEventListener("resize", resize); window.removeEventListener("pointermove", onMove); });
       onScroll(); resize();
 
-      const loop = () => {
+      const loop = (now: number) => {
         raf = requestAnimationFrame(loop);
+        frame++;
+        // Real elapsed time so the smoothing + ambient drift are frame-rate independent.
+        // Old `*0.1`/frame lagged badly on sub-60fps machines (the field trailed the scroll);
+        // the exp form closes the same fraction per second regardless of fps. dt clamped so a
+        // backgrounded tab doesn't snap on return.
+        const dt = lastT ? Math.min(0.05, (now - lastT) / 1000) : 0.016;
+        lastT = now;
         const aw = window.innerWidth, ah = window.innerHeight;
         if (aw && ah && (aw !== w || ah !== h)) resize();
-        time += 0.016;
-        progress += (target - progress) * 0.1;
+        time += dt;
+        progress += (target - progress) * (1 - Math.exp(-dt * 8));
         const p = progress, t = time, W = window.innerWidth, H = window.innerHeight;
 
         pmx += ((mx / W * 2 - 1) - pmx) * 0.04; pmy += ((my / H * 2 - 1) - pmy) * 0.04;
@@ -252,14 +259,19 @@ export default function LandingCinematic({ onOpenChamber, onReady, announceRef }
         posAttr.needsUpdate = true; alphaAttr.needsUpdate = true;
 
         const edgeBase = smooth(0.18, 0.32, p);
-        for (let e = 0; e < E; e++) {
-          const a = pairs[e * 2], b = pairs[e * 2 + 1];
-          epos[e * 6] = pos[a * 3]; epos[e * 6 + 1] = pos[a * 3 + 1]; epos[e * 6 + 2] = pos[a * 3 + 2];
-          epos[e * 6 + 3] = pos[b * 3]; epos[e * 6 + 4] = pos[b * 3 + 1]; epos[e * 6 + 5] = pos[b * 3 + 2];
-          const ea = types[e] === 1 ? edgeBase * (0.12 + tension * 0.85) : edgeBase * 0.14 * Math.min(alpha[a], alpha[b]);
-          ealpha[e * 2] = ea; ealpha[e * 2 + 1] = ea;
+        // ~2700 edges × 6 floats re-uploaded every frame is the heaviest CPU cost here.
+        // Edges connect slow-moving nodes, so updating them at half-rate is imperceptible
+        // and frees real headroom on weaker GPUs.
+        if ((frame & 1) === 0) {
+          for (let e = 0; e < E; e++) {
+            const a = pairs[e * 2], b = pairs[e * 2 + 1];
+            epos[e * 6] = pos[a * 3]; epos[e * 6 + 1] = pos[a * 3 + 1]; epos[e * 6 + 2] = pos[a * 3 + 2];
+            epos[e * 6 + 3] = pos[b * 3]; epos[e * 6 + 4] = pos[b * 3 + 1]; epos[e * 6 + 5] = pos[b * 3 + 2];
+            const ea = types[e] === 1 ? edgeBase * (0.12 + tension * 0.85) : edgeBase * 0.14 * Math.min(alpha[a], alpha[b]);
+            ealpha[e * 2] = ea; ealpha[e * 2 + 1] = ea;
+          }
+          egeo.attributes.position.needsUpdate = true; egeo.attributes.aAlpha.needsUpdate = true;
         }
-        egeo.attributes.position.needsUpdate = true; egeo.attributes.aAlpha.needsUpdate = true;
 
         // markers
         group.updateMatrixWorld();
@@ -307,7 +319,7 @@ export default function LandingCinematic({ onOpenChamber, onReady, announceRef }
         // (no hard "initializing" veil pop). onReady lets the parent fade the hero out in sync.
         if (!shown) { shown = true; root.style.opacity = "1"; onReadyRef.current?.(); }
       };
-      loop();
+      loop(performance.now());
     });
 
     return () => {
