@@ -169,6 +169,51 @@ function FieldGlyph({ className = "" }: { className?: string }) {
   );
 }
 
+/* Small per-chapter motif — enriches the static / reduced-motion narrative. */
+function ChapterGlyph({ n, accent, className = "" }: { n: string; accent: string; className?: string }) {
+  const c = accent;
+  return (
+    <svg viewBox="0 0 80 80" className={className} aria-hidden fill="none">
+      {n === "01" && <circle cx="40" cy="40" r="6" fill={c} />}
+      {n === "02" && (
+        <>
+          <circle cx="40" cy="20" r="5" fill="#9fb4d8" />
+          <line x1="40" y1="25" x2="22" y2="55" stroke={c} strokeWidth="1" opacity="0.5" />
+          <line x1="40" y1="25" x2="40" y2="58" stroke={c} strokeWidth="1" opacity="0.5" />
+          <line x1="40" y1="25" x2="58" y2="55" stroke={c} strokeWidth="1" opacity="0.5" />
+          <circle cx="22" cy="57" r="4" fill={c} /><circle cx="40" cy="60" r="4" fill={c} /><circle cx="58" cy="57" r="4" fill={c} />
+        </>
+      )}
+      {n === "03" && (
+        <>
+          <line x1="20" y1="30" x2="45" y2="48" stroke={c} strokeWidth="1.4" /><line x1="45" y1="48" x2="62" y2="26" stroke={c} strokeWidth="1.4" /><line x1="45" y1="48" x2="40" y2="64" stroke={c} strokeWidth="1.4" />
+          <circle cx="20" cy="30" r="4" fill="#9fb4d8" /><circle cx="45" cy="48" r="5" fill="#9fb4d8" /><circle cx="62" cy="26" r="4" fill="#9fb4d8" /><circle cx="40" cy="64" r="4" fill="#9fb4d8" />
+        </>
+      )}
+      {n === "04" && (
+        <>
+          <line x1="26" y1="30" x2="54" y2="52" stroke={c} strokeWidth="1.6" strokeDasharray="4 3" />
+          <circle cx="26" cy="30" r="5" fill={c} /><circle cx="54" cy="52" r="5" fill={c} />
+        </>
+      )}
+      {n === "05" && [[24, 28], [34, 24], [30, 38], [56, 30], [60, 42], [50, 34], [34, 58], [46, 62], [40, 50]].map(([x, y], i) => <circle key={i} cx={x} cy={y} r="3.2" fill="#9fb4d8" opacity="0.85" />)}
+      {n === "06" && (
+        <>
+          {[[24, 28], [60, 30], [34, 60], [56, 60]].map(([x, y], i) => <circle key={i} cx={x} cy={y} r="3.2" fill="#9fb4d8" opacity="0.55" />)}
+          <circle cx="42" cy="44" r="8" fill="none" stroke={c} strokeWidth="1.4" strokeDasharray="3 3" />
+        </>
+      )}
+      {n === "07" && (
+        <>
+          <rect x="18" y="22" width="44" height="36" rx="4" stroke={c} strokeWidth="1.3" />
+          <line x1="18" y1="32" x2="62" y2="32" stroke={c} strokeWidth="1.3" opacity="0.6" />
+          <line x1="34" y1="32" x2="34" y2="58" stroke={c} strokeWidth="1.3" opacity="0.6" />
+        </>
+      )}
+    </svg>
+  );
+}
+
 /* ════════════════════════════════════ Page ════════════════════════════════════ */
 export default function Landing({ onSignIn }: { onSignIn: () => void }) {
   const go = onSignIn;
@@ -212,7 +257,7 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
   }, []);
 
   return (
-    <div className="bg-[var(--canvas)] text-[var(--text-1)]" style={{ minHeight: enhance ? "640vh" : undefined }}>
+    <div className="bg-[var(--canvas)] text-[var(--text-1)]" style={{ minHeight: enhance ? "920vh" : undefined }}>
       {/* skip link */}
       <a href="#get-started" className="sr-only focus:not-sr-only focus:fixed focus:z-[60] focus:top-3 focus:left-3 focus:bg-[var(--surface-2)] focus:border focus:border-[var(--line-3)] focus:rounded-[var(--r-md)] focus:px-4 focus:py-2 focus:text-[13px]">
         Skip the intro
@@ -255,13 +300,13 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
               A new way of reading the literature
             </div>
             <h1 className="font-display text-[clamp(40px,6.6vw,82px)] leading-[1.02] tracking-[-0.025em]">
-              Science is not papers.
+              Your field disagrees with itself.
               <br />
-              <span className="italic text-[var(--gen)]">It&apos;s connected claims.</span>
+              <span className="italic text-[var(--gen)]">See exactly where.</span>
             </h1>
-            <p className="text-[clamp(15px,1.9vw,18.5px)] leading-[1.55] text-[var(--text-2)] max-w-[600px] mx-auto mt-7">
-              ScholarLens reads the literature down to its atomic claims and maps how they support,
-              contradict, and refine one another — so you explore the debate, not the documents.
+            <p className="text-[clamp(15px,1.9vw,18.5px)] leading-[1.55] text-[var(--text-2)] max-w-[620px] mx-auto mt-7">
+              ScholarLens reads your papers down to individual claims and maps how they support,
+              contradict, and qualify each other — the structure of the debate, traced to the sentence.
             </p>
             <div className="flex flex-col items-center mt-9">
               <div className="flex gap-3 justify-center items-center flex-wrap">
@@ -287,12 +332,13 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
           <div className="max-w-[1000px] mx-auto px-6 py-[90px]">
             <div className="lz-reveal mb-14 max-w-[640px]">
               <div className="mono text-[11px] uppercase tracking-[0.14em] text-[var(--gen)] mb-3.5">How it reads a literature</div>
-              <h2 className="font-display text-[clamp(28px,3.6vw,46px)] leading-[1.08]">From a single paper to a field you can see — in seven moves.</h2>
+              <h2 className="font-display text-[clamp(28px,3.6vw,46px)] leading-[1.08]">From one paper to your whole field — in seven steps.</h2>
             </div>
             <ol className="relative border-l border-[var(--line-2)] ml-3">
               {CHAPTERS.map((c) => (
-                <li key={c.n} className="lz-reveal relative pl-8 pb-12 last:pb-0">
+                <li key={c.n} className="lz-reveal relative pl-8 pb-12 last:pb-0 md:pr-24">
                   <span className="absolute -left-[7px] top-1 w-3.5 h-3.5 rounded-full border-2" style={{ borderColor: ACCENT[c.accent], background: "var(--surface-1)" }} />
+                  <ChapterGlyph n={c.n} accent={ACCENT[c.accent]} className="hidden md:block absolute right-0 top-0 w-[68px] h-[68px] opacity-90" />
                   <div className="mono text-[10px] tracking-[0.16em] mb-2" style={{ color: ACCENT[c.accent] }}>{c.eyebrow}</div>
                   <h3 className="font-display text-[clamp(19px,2.3vw,26px)] leading-[1.15] text-[var(--text-1)] mb-2.5">{c.title}</h3>
                   <p className="text-[14.5px] leading-[1.65] text-[var(--text-2)] max-w-[620px]">{c.body}</p>
@@ -322,15 +368,20 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
           </div>
         </section>
 
-        {/* metrics — labelled as the example field, not a real claim */}
+        {/* what you get — qualitative, no invented numbers */}
         <div className="border-y border-[var(--line)]" style={{ background: "var(--surface-1)" }}>
           <section className="lz-reveal max-w-[1000px] mx-auto px-6 py-[64px]">
-            <div className="mono text-[10px] tracking-[0.16em] text-[var(--text-muted)] mb-7 text-center">IN THIS EXAMPLE FIELD — NEGOTIATION AI</div>
-            <div className="grid grid-cols-3 gap-8 text-center">
-              {[{ v: "512", l: "claims extracted" }, { v: "147", l: "papers, one graph" }, { v: "37", l: "contradictions found" }].map((m) => (
-                <div key={m.l}>
-                  <div className="font-display text-[clamp(34px,5vw,56px)] text-[var(--text-1)] leading-none">{m.v}</div>
-                  <div className="text-[12.5px] text-[var(--text-3)] mt-2.5">{m.l}</div>
+            <div className="mono text-[10px] tracking-[0.16em] text-[var(--text-muted)] mb-9 text-center">WHAT YOU GET FROM EVERY LIBRARY</div>
+            <div className="grid sm:grid-cols-3 gap-8">
+              {[
+                { t: "Every claim, extracted", d: "Each finding pulled out as a discrete claim, traced to the exact paper it came from.", c: "var(--text-2)" },
+                { t: "Every conflict, surfaced", d: "Pairs of claims that directly contradict each other, with the reasoning laid out.", c: "var(--contra)" },
+                { t: "Every gap, a hypothesis", d: "The questions your evidence points to but no paper has answered yet.", c: "#35d0c0" },
+              ].map((m) => (
+                <div key={m.t}>
+                  <div className="w-8 h-[2px] rounded-full mb-4" style={{ background: m.c }} />
+                  <div className="font-display text-[19px] text-[var(--text-1)] leading-snug mb-2">{m.t}</div>
+                  <div className="text-[13.5px] text-[var(--text-2)] leading-[1.6]">{m.d}</div>
                 </div>
               ))}
             </div>
@@ -342,12 +393,12 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
           <div className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(ellipse 60% 50% at 50% 100%, rgba(124,111,255,0.12) 0%, transparent 70%)" }} />
           <div className="relative z-[1] inline-block border border-[var(--line-2)] rounded-[var(--r-xl)] px-8 sm:px-10 py-12 max-w-[620px]" style={{ background: "var(--surface-1)", boxShadow: "0 0 80px -20px rgba(124,111,255,0.18)" }}>
             <h2 className="font-display text-[clamp(26px,3.8vw,48px)] leading-[1.05]">
-              Not a reader. Not a search engine.
+              You can&apos;t read all of it.
               <br />
-              <span className="italic text-[var(--gen)]">A new way of seeing science.</span>
+              <span className="italic text-[var(--gen)]">You don&apos;t have to.</span>
             </h2>
             <p className="text-[15.5px] text-[var(--text-2)] mt-4 leading-[1.6]">
-              Upload your first paper. See its claims extracted, compared, and argued in under 60 seconds.
+              Point ScholarLens at your library and watch the claims, contradictions, and gaps surface — in minutes.
             </p>
             <div className="mt-7 flex flex-col items-center gap-3">
               <button onClick={go} className="inline-flex items-center gap-2 text-[14.5px] font-medium text-white bg-[#6a5cea] px-[22px] py-3 rounded-[var(--r-md)] t-all hover:opacity-90 hover:glow-gen">
