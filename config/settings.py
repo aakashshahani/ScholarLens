@@ -156,6 +156,16 @@ class Settings:
     # then set FERNET_KEY in .env.
     fernet_key: str = field(default_factory=lambda: os.getenv("FERNET_KEY", ""))
 
+    # ── Auth provider ────────────────────────────────────────
+    # "password" (built-in bcrypt + sessions, default) or "clerk" (verify a
+    # Clerk session JWT and resolve/link the internal user). Switching to clerk
+    # requires CLERK_JWKS_URL + CLERK_ISSUER; CLERK_SECRET_KEY is optional and
+    # only used to look up an email when the JWT has no email claim.
+    auth_provider: str = field(default_factory=lambda: os.getenv("AUTH_PROVIDER", "password").strip().lower())
+    clerk_jwks_url: str = field(default_factory=lambda: os.getenv("CLERK_JWKS_URL", ""))
+    clerk_issuer: str = field(default_factory=lambda: os.getenv("CLERK_ISSUER", ""))
+    clerk_secret_key: str = field(default_factory=lambda: os.getenv("CLERK_SECRET_KEY", ""))
+
     session_cookie_name: str = "session"
     session_ttl_days: int = field(default_factory=lambda: _env_int("SESSION_TTL_DAYS", 7))
     # Secure flag MUST be False on localhost (http) or the browser drops the

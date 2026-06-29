@@ -27,6 +27,20 @@ function getToken(): string | null {
   try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
 }
 
+// Optional async token source. When AUTH_PROVIDER=clerk, the ClerkProvider sets
+// this to return Clerk's short-lived session JWT. Password auth leaves it null
+// and the localStorage token is used — so this is a no-op until Clerk is wired.
+let _tokenGetter: (() => Promise<string | null>) | null = null;
+export function setAuthTokenGetter(fn: (() => Promise<string | null>) | null) {
+  _tokenGetter = fn;
+}
+async function getAuthToken(): Promise<string | null> {
+  if (_tokenGetter) {
+    try { return await _tokenGetter(); } catch { return null; }
+  }
+  return getToken();
+}
+
 // ── Types ───────────────────────────────────────────────────
 
 export interface Paper {
@@ -284,7 +298,7 @@ export class ApiError extends Error {
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = getToken();
+  const token = await getAuthToken();
   const authHeaders: Record<string, string> = token
     ? { "Authorization": `Bearer ${token}` }
     : {};
@@ -382,7 +396,7 @@ export const api = {
   uploadPapersBatch: async (files: File[]) => {
     const formData = new FormData();
     for (const f of files) formData.append("files", f);
-    const uploadToken = getToken();
+    const uploadToken = await getAuthToken();
     const headers: Record<string, string> = uploadToken ? { Authorization: `Bearer ${uploadToken}` } : {};
     const res = await fetch(`${API_BASE}/api/papers/upload-batch`, {
       method: "POST", body: formData, credentials: "include", headers,
@@ -398,7 +412,7 @@ export const api = {
     const formData = new FormData();
     formData.append("file", file);
     // NOTE: no Content-Type header — the browser sets the multipart boundary.
-    const uploadToken = getToken();
+    const uploadToken = await getAuthToken();
     const uploadAuthHeaders: Record<string, string> = uploadToken
       ? { "Authorization": `Bearer ${uploadToken}` }
       : {};
@@ -580,7 +594,7 @@ export const api = {
 
   // ── Citation export ───────────────────────────────────────
   exportCitation: async (paperId: string, format: "bibtex" | "ris" | "apa" | "chicago" | "mla") => {
-    const token = getToken();
+    const token = await getAuthToken();
     const res = await fetch(`${API_BASE}/api/papers/${paperId}/export?format=${format}`, {
       credentials: "include",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -598,7 +612,7 @@ export const api = {
 
   // ── Export reports ────────────────────────────────────────
   exportContradictions: async (format: "markdown" | "json" = "markdown") => {
-    const token = getToken();
+    const token = await getAuthToken();
     const res = await fetch(`${API_BASE}/api/contradictions/export?format=${format}`, {
       credentials: "include",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -608,7 +622,7 @@ export const api = {
   },
 
   exportHypotheses: async (format: "markdown" | "json" = "markdown") => {
-    const token = getToken();
+    const token = await getAuthToken();
     const res = await fetch(`${API_BASE}/api/hypotheses/export?format=${format}`, {
       credentials: "include",
       headers: token ? { Authorization: `Bearer ${token}` } : {},

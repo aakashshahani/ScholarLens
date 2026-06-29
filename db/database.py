@@ -432,6 +432,14 @@ class Database:
         cur.execute(
             "ALTER TABLE relationships ADD COLUMN IF NOT EXISTS user_feedback TEXT"
         )
+        # External identity link for Clerk auth. Nullable so password-auth rows
+        # are untouched; partial unique index lets many NULLs coexist while
+        # guaranteeing one internal user per Clerk id.
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS clerk_user_id TEXT")
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_clerk "
+            "ON users(clerk_user_id) WHERE clerk_user_id IS NOT NULL"
+        )
         # Enable RLS on all tables so PostgREST has no public access.
         # The app connects as the postgres superuser via psycopg2, which bypasses
         # RLS entirely, so these statements have no effect on app behaviour.
@@ -1208,6 +1216,7 @@ class Database:
             digest_email=row["digest_email"], library_name=row["library_name"],
             free_actions_used=row["free_actions_used"],
             free_sonnet_used=row["free_sonnet_used"], created_at=row["created_at"],
+            clerk_user_id=row.get("clerk_user_id"),
         )
 
     def create_user(self, email: str, password_hash: str) -> User:
@@ -1246,6 +1255,56 @@ class Database:
         cur.close()
         self._put_conn(conn)
         return self._row_to_user(row) if row else None
+
+    # ── Clerk identity linking ────────────────────────────────
+    # The internal `id` stays the durable key for all user data; clerk_user_id
+    # is only the link. This is what lets the migration preserve existing papers
+    # — we attach Clerk to the existing row rather than re-keying anything.
+
+    def get_user_by_clerk_id(self, clerk_id: str) -> User | None:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE clerk_user_id = %s", (clerk_id,))
+        row = cur.fetchone()
+        cur.close()
+        self._put_conn(conn)
+        return self._row_to_user(row) if row else None
+
+    def link_clerk_id(self, user_id: str, clerk_id: str) -> None:
+        """Attach a Clerk id to an existing internal user (link-by-email path)."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE users SET clerk_user_id = %s WHERE id = %s",
+            (clerk_id, user_id),
+        )
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+
+    def create_user_for_clerk(self, email: str, clerk_id: str) -> User:
+        """Create a fresh internal user backed by Clerk (no local password).
+        password_hash is an unusable sentinel so the password path can never
+        authenticate this row."""
+        user = User(id=User.new_id(), email=email, password_hash="!clerk-managed",
+                    clerk_user_id=clerk_id)
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO users
+               (id, email, password_hash, api_key_encrypted, model,
+                digest_email, library_name, free_actions_used, free_sonnet_used,
+                created_at, clerk_user_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (user.id, user.email, user.password_hash, user.api_key_encrypted,
+             user.model, user.digest_email, user.library_name,
+             user.free_actions_used, user.free_sonnet_used, user.created_at,
+             user.clerk_user_id),
+        )
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+        return user
 
     def increment_usage(self, user_id: str, is_sonnet: bool) -> tuple[int, int]:
         conn = self._get_conn()
