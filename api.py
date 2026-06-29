@@ -433,6 +433,18 @@ class SettingsUpdateRequest(BaseModel):
     library_name: Optional[str] = Field(None, max_length=120)
     api_key: Optional[str] = Field(None, max_length=200)
 
+    @field_validator("digest_email")
+    @classmethod
+    def _valid_digest_email(cls, v):
+        # Allow None / "" (clears the digest); otherwise require a valid shape.
+        # Server-side check so a crafted request can't store garbage the daily
+        # job would then try to send to.
+        if v is None or v.strip() == "":
+            return v
+        if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", v.strip()):
+            raise ValueError("Invalid email address")
+        return v
+
 
 class TestKeyRequest(BaseModel):
     # If omitted, the stored key is tested instead.
@@ -2477,8 +2489,9 @@ class FeedbackRequest(BaseModel):
 
 
 @app.post("/api/contradictions/{rel_id}/feedback")
+@limiter.limit(settings.rl_feedback)
 def contradiction_feedback(
-    rel_id: str, req: FeedbackRequest,
+    request: Request, rel_id: str, req: FeedbackRequest,
     user: User = Depends(authlib.get_current_user),
 ):
     updated = db.set_relationship_feedback(rel_id, user.id, req.verdict)
@@ -2501,8 +2514,9 @@ def list_hypothesis_feedback(user: User = Depends(authlib.get_current_user)):
 
 
 @app.post("/api/hypotheses/{hyp_id}/feedback")
+@limiter.limit(settings.rl_feedback)
 def hypothesis_feedback(
-    hyp_id: str, req: HypFeedbackRequest,
+    request: Request, hyp_id: str, req: HypFeedbackRequest,
     user: User = Depends(authlib.get_current_user),
 ):
     """Persist (or clear) a vote on a hypothesis, server-side per user."""

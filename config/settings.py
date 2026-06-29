@@ -147,6 +147,7 @@ class Settings:
     rl_test_digest: str = field(default_factory=lambda: os.getenv("RL_TEST_DIGEST", "3/hour"))
     rl_graph: str = field(default_factory=lambda: os.getenv("RL_GRAPH", "30/hour"))
     rl_insights: str = field(default_factory=lambda: os.getenv("RL_INSIGHTS", "60/hour"))
+    rl_feedback: str = field(default_factory=lambda: os.getenv("RL_FEEDBACK", "60/minute"))
     rl_upload_batch: str = field(default_factory=lambda: os.getenv("RL_UPLOAD_BATCH", "3/hour"))
 
     # ── Auth / sessions / BYOK ───────────────────────────────

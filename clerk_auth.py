@@ -71,8 +71,18 @@ def verify_token(token: str) -> dict:
 
 
 def _email_from_claims(claims: dict) -> str | None:
-    """Prefer an `email` claim (add one to the Clerk JWT template). Fall back to
-    the Clerk Backend API by `sub` when CLERK_SECRET_KEY is set."""
+    """Return a VERIFIED email for this Clerk user, or None.
+
+    Verification matters: linking to an existing internal row is keyed on email
+    (step 2 of resolution), so an unverified address must never be accepted —
+    otherwise someone could register an unverified `victim@x.com` and inherit
+    that user's library. Clerk's `primary_email_address` is verified by Clerk's
+    own invariant, but we still defend explicitly:
+      - reject a claim that carries `email_verified: false`
+      - via the Backend API, only return an address whose status is "verified"
+    """
+    if claims.get("email_verified") is False:
+        return None
     for k in ("email", "email_address", "primary_email"):
         v = claims.get(k)
         if isinstance(v, str) and "@" in v:
@@ -90,11 +100,18 @@ def _email_from_claims(claims: dict) -> str | None:
                 data = r.json()
                 addrs = data.get("email_addresses") or []
                 primary_id = data.get("primary_email_address_id")
+
+                def _verified(a: dict) -> bool:
+                    return (a.get("verification") or {}).get("status") == "verified"
+
+                # Prefer the verified primary address.
                 for a in addrs:
-                    if a.get("id") == primary_id and a.get("email_address"):
+                    if a.get("id") == primary_id and a.get("email_address") and _verified(a):
                         return a["email_address"]
-                if addrs and addrs[0].get("email_address"):
-                    return addrs[0]["email_address"]
+                # Otherwise any verified address.
+                for a in addrs:
+                    if a.get("email_address") and _verified(a):
+                        return a["email_address"]
         except Exception:
             pass
     return None
