@@ -59,6 +59,7 @@ export default function GraphPage() {
 
   const rafRef    = useRef<number>(0);
   const simsRef   = useRef<Sim[]>([]);
+  const edgesRef  = useRef<GraphEdge[]>([]);   // avoids the window global + stale closure
   const svgRef    = useRef<SVGSVGElement>(null);
   const xformRef  = useRef<XForm>({ x: 0, y: 0, k: 1 });
   const dimsRef   = useRef({ w: 1400, h: 900 });
@@ -143,9 +144,9 @@ export default function GraphPage() {
       }
     }
 
-    // we read data via closure – pass through ref to avoid stale closure
-    const edges = (window as any).__slEdges as GraphEdge[] | undefined;
-    if (edges) {
+    // Edges live in a ref to avoid both a stale closure and leaking onto window.
+    const edges = edgesRef.current;
+    if (edges.length) {
       for (const e of edges) {
         const a = ns.find((n) => n.id === e.source);
         const b = ns.find((n) => n.id === e.target);
@@ -159,19 +160,26 @@ export default function GraphPage() {
     }
 
     const pad = 70;
+    let maxV2 = 0;
     for (const n of ns) {
       n.vx *= 0.76; n.vy *= 0.76;
       n.x += n.vx; n.y += n.vy;
       n.x = Math.max(pad, Math.min(w - pad, n.x));
       n.y = Math.max(pad, Math.min(h - pad, n.y));
+      const v2 = n.vx * n.vx + n.vy * n.vy;
+      if (v2 > maxV2) maxV2 = v2;
     }
     setSims([...ns]);
-    rafRef.current = requestAnimationFrame(tick);
+    // Stop once the layout has settled — otherwise the O(n²) repulsion loop
+    // burns CPU forever on a static graph. Reheats whenever seed() runs.
+    if (maxV2 > 0.04) {
+      rafRef.current = requestAnimationFrame(tick);
+    }
   }, []);
 
   useEffect(() => {
     if (!data) return;
-    (window as any).__slEdges = data.edges;
+    edgesRef.current = data.edges;
     if (sims.length) {
       rafRef.current = requestAnimationFrame(tick);
       return () => cancelAnimationFrame(rafRef.current);

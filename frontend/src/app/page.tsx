@@ -218,12 +218,12 @@ export default function Dashboard() {
         {/* ── Stat row ───────────────────────────────────── */}
         <div className="grid grid-cols-5 gap-3 mb-5">
           {[
-            { icon: <FileStack size={18} />,    value: paperCount,         label: "Papers",            color: "var(--gen)",     delay: 0   },
-            { icon: <CheckCircle2 size={18} />, value: analyzed,           label: "Fully analyzed",    color: "var(--support)", delay: 60  },
-            { icon: <AlertTriangle size={18} />,value: contradictionCount, label: "Contradictions",    color: "var(--contra)",  delay: 120 },
-            { icon: <Link2 size={18} />,        value: crossLinks,         label: "Cross-paper links", color: "var(--nuance)",  delay: 180 },
-          ].map(({ icon, value, label, color, delay }) => (
-            <StatCard key={label} icon={icon} value={value} label={label} color={color} delay={delay} />
+            { icon: <FileStack size={18} />,    value: paperCount,         label: "Papers",            color: "var(--gen)",     delay: 0,   href: "/library" },
+            { icon: <CheckCircle2 size={18} />, value: analyzed,           label: "Fully analyzed",    color: "var(--support)", delay: 60,  href: "/library" },
+            { icon: <AlertTriangle size={18} />,value: contradictionCount, label: "Contradictions",    color: "var(--contra)",  delay: 120, href: "/contradictions" },
+            { icon: <Link2 size={18} />,        value: crossLinks,         label: "Cross-paper links", color: "var(--nuance)",  delay: 180, href: "/contradictions" },
+          ].map(({ icon, value, label, color, delay, href }) => (
+            <StatCard key={label} icon={icon} value={value} label={label} color={color} delay={delay} href={href} />
           ))}
           <StatCard
             icon={<TrendingUp size={18} />}
@@ -372,14 +372,13 @@ export default function Dashboard() {
 }
 
 // ── StatCard ──────────────────────────────────────────────────
-function StatCard({ icon, value, label, color, ring, suffix = "", sub, delay = 0 }: {
+function StatCard({ icon, value, label, color, ring, suffix = "", sub, delay = 0, href }: {
   icon: React.ReactNode; value: number; label: string; color: string;
-  ring?: number; suffix?: string; sub?: string; delay?: number;
+  ring?: number; suffix?: string; sub?: string; delay?: number; href?: string;
 }) {
   const displayed = useCountUp(value);
-  return (
-    <div className="db-stat-card bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4 relative overflow-hidden"
-      style={{ animationDelay: `${delay}ms` }}>
+  const inner = (
+    <>
       <div className="flex items-start justify-between mb-3">
         <span style={{ color }}>{icon}</span>
         {ring !== undefined && (
@@ -396,8 +395,12 @@ function StatCard({ icon, value, label, color, ring, suffix = "", sub, delay = 0
       </div>
       <div className="text-[11.5px] text-[var(--text-3)]">{label}</div>
       {sub && <div className="text-[10px] text-[var(--text-4)] mt-0.5">{sub}</div>}
-    </div>
+    </>
   );
+  const cls = `db-stat-card bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4 relative overflow-hidden block ${href ? "t-all hover:border-[var(--line-2)]" : ""}`;
+  return href
+    ? <Link href={href} className={cls} style={{ animationDelay: `${delay}ms` }}>{inner}</Link>
+    : <div className={cls} style={{ animationDelay: `${delay}ms` }}>{inner}</div>;
 }
 
 // ── SpotlightCard ─────────────────────────────────────────────

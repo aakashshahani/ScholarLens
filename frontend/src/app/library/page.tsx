@@ -42,6 +42,7 @@ export default function LibraryPage() {
   const [bulkMode, setBulkMode]         = useState(false);
   const [checkedIds, setCheckedIds]     = useState<Set<string>>(new Set());
   const [deleting, setDeleting]         = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   // Tag editing
   const [tagInput, setTagInput]         = useState("");
   const [savingTag, setSavingTag]       = useState(false);
@@ -106,15 +107,13 @@ export default function LibraryPage() {
 
   const deleteSelected = async () => {
     if (!checkedIds.size) return;
-    if (!confirm(`Delete ${checkedIds.size} paper${checkedIds.size !== 1 ? "s" : ""}? This cannot be undone.`)) return;
     setDeleting(true);
-    for (const id of checkedIds) {
-      try { await api.deletePaper(id); } catch {}
-    }
+    // Parallel deletes — sequential awaits made bulk delete slow for large sets.
+    await Promise.allSettled([...checkedIds].map((id) => api.deletePaper(id)));
     const remaining = papers.filter((p) => !checkedIds.has(p.id));
     setPapers(remaining); cache.write("papers", remaining);
     if (selected && checkedIds.has(selected.id)) setSelected(remaining[0] || null);
-    setCheckedIds(new Set()); setBulkMode(false); setDeleting(false);
+    setCheckedIds(new Set()); setBulkMode(false); setDeleting(false); setConfirmDelete(false);
   };
 
   const addTag = async (paperId: string, tag: string) => {
@@ -228,12 +227,27 @@ export default function LibraryPage() {
               : <Square size={14} />}
             {checkedIds.size === 0 ? "Select all" : `${checkedIds.size} selected`}
           </button>
-          {checkedIds.size > 0 && (
-            <button onClick={deleteSelected} disabled={deleting}
+          {checkedIds.size > 0 && !confirmDelete && (
+            <button onClick={() => setConfirmDelete(true)} disabled={deleting}
               className="flex items-center gap-1.5 ml-2 text-[12px] text-[var(--contra)] hover:opacity-80 t-all disabled:opacity-50">
-              {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+              <Trash2 size={13} />
               Delete {checkedIds.size}
             </button>
+          )}
+          {checkedIds.size > 0 && confirmDelete && (
+            <div className="flex items-center gap-2 ml-2">
+              <span className="text-[12px] text-[var(--text-2)]">
+                Delete {checkedIds.size} paper{checkedIds.size !== 1 ? "s" : ""} permanently?
+              </span>
+              <button onClick={deleteSelected} disabled={deleting}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-[var(--r-sm)] bg-[var(--contra-dim)] text-[var(--contra)] border border-[var(--contra-line)] text-[12px] t-all hover:opacity-80 disabled:opacity-50">
+                {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Confirm
+              </button>
+              <button onClick={() => setConfirmDelete(false)} disabled={deleting}
+                className="px-2.5 py-1 rounded-[var(--r-sm)] border border-[var(--line)] text-[12px] text-[var(--text-3)] t-all hover:text-[var(--text-1)]">
+                Cancel
+              </button>
+            </div>
           )}
         </div>
       )}

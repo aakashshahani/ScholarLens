@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, Paper, ContradictionResult } from "@/lib/api";
+import { api, Paper, ContradictionResult, EvidenceStrength } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, Claim, REL } from "@/components/ui";
 import { Zap, Settings2, AlertCircle, Download, ThumbsUp, ThumbsDown, Flag } from "lucide-react";
 import { cache } from "@/lib/cache";
@@ -63,6 +63,27 @@ function MarkdownAnswer({ text }: { text: string }) {
   });
   flushList("end");
   return <div className="space-y-0">{elements}</div>;
+}
+
+// ── Evidence-strength badge ──────────────────────────────────
+// Renders the computed evidence-strength signal (label + study design + the
+// cues that produced it). Independent of the LLM's stronger_evidence verdict.
+const STRENGTH_COLOR: Record<string, string> = {
+  strong: "var(--support)", moderate: "var(--nuance)", weak: "var(--text-3)",
+};
+function EvidenceBadge({ es, compact = false }: { es?: EvidenceStrength; compact?: boolean }) {
+  if (!es) return null;
+  const c = STRENGTH_COLOR[es.label] || "var(--text-3)";
+  return (
+    <span
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--r-sm)] text-[9.5px] font-medium bg-[var(--surface-3)]"
+      style={{ color: c }}
+      title={es.signals.length ? es.signals.join(" · ") : "no quantitative cues stated"}
+    >
+      <span className="w-[4px] h-[4px] rounded-full" style={{ background: c }} />
+      {es.label} evidence{es.design && !compact ? ` · ${es.design}` : ""}
+    </span>
+  );
 }
 
 const PRESETS = {
@@ -228,11 +249,20 @@ export default function ContradictionsPage() {
     return [...map.values()];
   })();
 
-  const filtered = displayResults.filter((r) => {
-    if (filter && r.relationship !== filter) return false;
-    if (paperFilter && r.claim_a.paper_title !== paperFilter && r.claim_b.paper_title !== paperFilter) return false;
-    return true;
-  });
+  const relOrder: Record<string, number> = { contradiction: 0, nuance: 1, support: 2, unrelated: 3 };
+  const filtered = displayResults
+    .filter((r) => {
+      if (filter && r.relationship !== filter) return false;
+      if (paperFilter && r.claim_a.paper_title !== paperFilter && r.claim_b.paper_title !== paperFilter) return false;
+      return true;
+    })
+    // Keep relationship grouping (contradictions first), but within a group
+    // surface the biggest evidence asymmetry first — the most decisive conflicts.
+    .sort((a, b) => {
+      const ra = relOrder[a.relationship] ?? 9, rb = relOrder[b.relationship] ?? 9;
+      if (ra !== rb) return ra - rb;
+      return Math.abs(b.evidence_gap?.gap ?? 0) - Math.abs(a.evidence_gap?.gap ?? 0);
+    });
 
   return (
     <div>
@@ -418,6 +448,9 @@ function TensionPair({ r }: { r: ContradictionResult }) {
         <div>
           <div className="text-[10px] text-[var(--text-4)] mb-1 clamp-1">{r.claim_a.paper_title}</div>
           <Claim className="clamp-2 block">{r.claim_a.text}</Claim>
+          {r.claim_a.evidence_strength && (
+            <div className="mt-1.5"><EvidenceBadge es={r.claim_a.evidence_strength} compact /></div>
+          )}
         </div>
         <div className="flex flex-col items-center w-12">
           <div className={`h-[2px] w-full ${r.relationship === "contradiction" ? "charged" : ""}`} style={{ background: s.line }} />
@@ -425,6 +458,9 @@ function TensionPair({ r }: { r: ContradictionResult }) {
         <div className="text-right">
           <div className="text-[10px] text-[var(--text-4)] mb-1 clamp-1">{r.claim_b.paper_title}</div>
           <Claim className="clamp-2 block">{r.claim_b.text}</Claim>
+          {r.claim_b.evidence_strength && (
+            <div className="mt-1.5 flex justify-end"><EvidenceBadge es={r.claim_b.evidence_strength} compact /></div>
+          )}
         </div>
       </div>
     </div>
@@ -461,6 +497,46 @@ function Adjudication({ r, feedback, onFeedback }: {
           <div className="text-[12.5px] text-[var(--support)] font-medium">{stronger}</div>
         </div>
       )}
+      {/* Computed evidence strength — independent of the LLM's stronger_evidence
+          verdict above. Derived from the cues each claim states. */}
+      {(r.claim_a.evidence_strength || r.claim_b.evidence_strength) && (
+        <div className="mb-4 pb-4 border-b border-[var(--line)]">
+          <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2">Evidence strength · computed from stated cues</div>
+          <div className="space-y-2">
+            {([
+              { claim: r.claim_a, key: "claim_a" as const },
+              { claim: r.claim_b, key: "claim_b" as const },
+            ]).map(({ claim, key }) => {
+              const es = claim.evidence_strength;
+              const winner = r.evidence_gap?.stronger === key;
+              return (
+                <div key={key}
+                  className={`p-2.5 rounded-[var(--r-md)] border ${winner ? "border-[var(--support-line)] bg-[var(--support-dim)]" : "border-[var(--line)] bg-[var(--surface-1)]"}`}>
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <span className="text-[10px] text-[var(--text-4)] clamp-1">{claim.paper_title}</span>
+                    <EvidenceBadge es={es} />
+                  </div>
+                  {es?.signals?.length ? (
+                    <div className="flex flex-wrap gap-1">
+                      {es.signals.map((sig, i) => (
+                        <span key={i} className="text-[9.5px] px-1.5 py-0.5 rounded-[var(--r-sm)] bg-[var(--surface-3)] text-[var(--text-3)]">{sig}</span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-[10px] text-[var(--text-4)]">No quantitative cues stated</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {r.evidence_gap && r.evidence_gap.stronger !== "neither" && (
+            <div className="text-[10.5px] text-[var(--text-3)] mt-2 leading-[1.5]">
+              {(r.evidence_gap.stronger === "claim_a" ? r.claim_a.paper_title : r.claim_b.paper_title)} is better supported by stated evidence (gap {Math.abs(r.evidence_gap.gap).toFixed(2)}).
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-2">Why this conflict exists</div>
       <MarkdownAnswer text={r.explanation || ""} />
 

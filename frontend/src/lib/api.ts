@@ -69,6 +69,9 @@ export interface SearchResult {
   // Backend returns a raw cosine distance (lower = more similar) plus a tier.
   relevance_score: number;
   relevance_tier?: "highly_relevant" | "related" | "tangential";
+  // Cross-encoder relevance from the Voyage reranker (0..1, higher = better).
+  // Present when reranking ran; results are already ordered by it. Null on fallback.
+  rerank_score?: number | null;
 }
 
 export interface ContradictionResult {
@@ -78,10 +81,21 @@ export interface ContradictionResult {
   explanation: string;
   resolution: string;
   stronger_evidence: string;
+  // Computed evidence-strength comparison (independent of the LLM verdict),
+  // derived from the cues each claim states. Optional: older cached results
+  // predate it.
+  evidence_gap?: { gap: number; stronger: "claim_a" | "claim_b" | "neither" };
   similarity?: number;
-  claim_a: { paper_id: string; paper_title: string; text: string; confidence: string };
-  claim_b: { paper_id: string; paper_title: string; text: string; confidence: string };
+  claim_a: { paper_id: string; paper_title: string; text: string; confidence: string; evidence_strength?: EvidenceStrength };
+  claim_b: { paper_id: string; paper_title: string; text: string; confidence: string; evidence_strength?: EvidenceStrength };
   created_at: string;
+}
+
+export interface EvidenceStrength {
+  score: number;                              // 0..1, higher = better supported
+  label: "strong" | "moderate" | "weak";
+  design: string | null;                      // detected study design, if any
+  signals: string[];                          // human-readable cues that drove the score
 }
 
 export interface Hypothesis {
@@ -456,6 +470,15 @@ export const api = {
   getHypothesisRun: (runId: string) =>
     apiFetch<Hypothesis[]>(`/api/hypotheses/runs/${runId}`),
 
+  getHypothesisFeedback: () =>
+    apiFetch<Record<string, "up" | "down">>("/api/hypotheses/feedback"),
+
+  setHypothesisFeedback: (hypId: string, verdict: "up" | "down" | null) =>
+    apiFetch<{ id: string; verdict: string | null }>(`/api/hypotheses/${hypId}/feedback`, {
+      method: "POST",
+      body: JSON.stringify({ verdict }),
+    }),
+
   generateHypotheses: (opts?: { researchQuestion?: string; paperIds?: string[]; numHypotheses?: number; refresh?: boolean }) =>
     apiFetch<{ job_id: string; status: string }>("/api/hypotheses", {
       method: "POST",
@@ -473,7 +496,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({
         query,
-        sources: sources || ["arxiv", "semantic_scholar"],
+        sources: sources || ["semantic_scholar", "openalex", "arxiv"],
         max_per_source: maxPerSource ?? 5,
       }),
     }),
@@ -506,6 +529,10 @@ export const api = {
         max_per_source: opts.maxPerSource ?? 5,
       }),
     }),
+
+  // Latest persisted scan results across all topics — pure DB read, instant.
+  getMonitorResults: () =>
+    apiFetch<{ digests: MonitorDigest[] }>("/api/monitor/results"),
 
   // ── Monitor topics (saved) ───────────────────────────────
   listMonitorTopics: () =>
