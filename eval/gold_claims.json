@@ -538,5 +538,245 @@
     "label": "support",
     "category": "findings",
     "notes": "Trucey and Rehearsal. Both find AI-assisted practice does not boost self-efficacy - Trucey negligible, Rehearsal a decrease. Same directional conclusion that AI practice does not build confidence."
+  },
+  {
+    "id": "ir_001",
+    "domain": "information_retrieval",
+    "split": "test",
+    "claim_a": {
+      "text": "Combining BM25 with dense retrieval raised Recall@100 from 0.71 to 0.88 over dense-only retrieval on the benchmark",
+      "paper_title": "Hybrid Sparse-Dense Retrieval for Open-Domain QA",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Adding a lexical BM25 pass to a dense retriever recovered relevant passages that the embedding model ranked far apart, improving recall on out-of-vocabulary queries",
+      "paper_title": "When Dense Retrieval Misses: A Lexical Safety Net",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "findings",
+    "notes": "Two IR papers independently conclude hybrid lexical+dense beats dense-only on recall. Same direction."
+  },
+  {
+    "id": "ir_002",
+    "domain": "information_retrieval",
+    "split": "test",
+    "claim_a": {
+      "text": "Increasing embedding dimensionality consistently improved retrieval accuracy across all tested corpora, with the 1536-dim model best",
+      "paper_title": "Scaling Embedding Dimensions for Retrieval",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Retrieval accuracy plateaued beyond 768 dimensions and degraded at very high dimensions as added components captured noise rather than signal",
+      "paper_title": "Diminishing Returns in High-Dimensional Embeddings",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "contradiction",
+    "category": "findings",
+    "notes": "Directly opposing conclusions on whether more embedding dimensions keep improving retrieval."
+  },
+  {
+    "id": "ir_003",
+    "domain": "information_retrieval",
+    "split": "test",
+    "claim_a": {
+      "text": "Cross-encoder reranking of the top-100 candidates substantially improved Precision@10 over the first-stage retriever",
+      "paper_title": "Reranking for Precision in Two-Stage Retrieval",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Cross-encoder reranking added 400-600ms of latency per query, making it impractical for sub-second interactive search at scale without aggressive candidate pruning",
+      "paper_title": "The Latency Cost of Neural Reranking",
+      "section": "limitations",
+      "confidence": "high"
+    },
+    "label": "nuance",
+    "category": "scope",
+    "notes": "Reranking helps precision AND hurts latency. Both true on different axes — not a contradiction."
+  },
+  {
+    "id": "ir_004",
+    "domain": "information_retrieval",
+    "split": "test",
+    "claim_a": {
+      "text": "The corpus was deduplicated with MinHash LSH at a Jaccard threshold of 0.8 before indexing",
+      "paper_title": "Scaling Embedding Dimensions for Retrieval",
+      "section": "methods",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Cross-encoder reranking substantially improved Precision@10 over the first-stage retriever",
+      "paper_title": "Reranking for Precision in Two-Stage Retrieval",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "unrelated",
+    "category": "scope",
+    "notes": "A preprocessing detail vs a reranking finding. No logical relationship."
+  },
+  {
+    "id": "ir_005",
+    "domain": "information_retrieval",
+    "split": "train",
+    "claim_a": {
+      "text": "Query expansion with generated paraphrases improved Recall@20 for short, underspecified queries by 6 points",
+      "paper_title": "Generative Query Expansion for Sparse Queries",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Pseudo-relevance feedback raised recall most on short queries that lacked sufficient terms to match relevant documents directly",
+      "paper_title": "Revisiting Pseudo-Relevance Feedback",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "findings",
+    "notes": "Both find that enriching short/underspecified queries raises recall. Same direction, different mechanism."
+  },
+  {
+    "id": "ir_006",
+    "domain": "information_retrieval",
+    "split": "train",
+    "claim_a": {
+      "text": "In-domain fine-tuned bi-encoders matched cross-encoder relevance while retrieving an order of magnitude faster",
+      "paper_title": "Closing the Bi-Encoder Gap with In-Domain Training",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Cross-encoders consistently outperformed bi-encoders on relevance regardless of fine-tuning, because joint query-document attention captures interactions a bi-encoder cannot",
+      "paper_title": "Why Cross-Encoders Still Win on Relevance",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "contradiction",
+    "category": "findings",
+    "notes": "Opposite conclusions on whether fine-tuned bi-encoders can match cross-encoder relevance."
+  },
+  {
+    "id": "llm_001",
+    "domain": "llm_reasoning",
+    "split": "train",
+    "claim_a": {
+      "text": "Chain-of-thought prompting improved accuracy on multi-step arithmetic and symbolic reasoning by a large margin",
+      "paper_title": "Chain-of-Thought Prompting Elicits Reasoning",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Chain-of-thought provided negligible benefit on single-step tasks and occasionally hurt accuracy by introducing spurious intermediate steps",
+      "paper_title": "When Chain-of-Thought Does Not Help",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "nuance",
+    "category": "scope",
+    "notes": "CoT helps multi-step but not single-step tasks. Scope difference, both true — not a contradiction."
+  },
+  {
+    "id": "llm_002",
+    "domain": "llm_reasoning",
+    "split": "test",
+    "claim_a": {
+      "text": "The model was instruction-tuned on 1.5M examples drawn from a mixture of 12 task families",
+      "paper_title": "Chain-of-Thought Prompting Elicits Reasoning",
+      "section": "methods",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Chain-of-thought prompting improved accuracy on multi-step arithmetic reasoning",
+      "paper_title": "Chain-of-Thought Prompting Elicits Reasoning",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "unrelated",
+    "category": "scope",
+    "notes": "A training-data detail vs a prompting finding. No logical relationship."
+  },
+  {
+    "id": "llm_003",
+    "domain": "llm_reasoning",
+    "split": "train",
+    "claim_a": {
+      "text": "Larger models hallucinated less because better calibration let them abstain when uncertain",
+      "paper_title": "Scale and Calibration in Language Models",
+      "section": "findings",
+      "confidence": "medium"
+    },
+    "claim_b": {
+      "text": "Larger models hallucinated more confidently, producing fluent but false statements that were harder for users to detect",
+      "paper_title": "Confident Hallucination at Scale",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "contradiction",
+    "category": "findings",
+    "notes": "Opposite directional conclusions on how model scale affects hallucination."
+  },
+  {
+    "id": "llm_004",
+    "domain": "llm_reasoning",
+    "split": "train",
+    "claim_a": {
+      "text": "Self-consistency, sampling multiple reasoning chains and taking the majority answer, improved benchmark accuracy over greedy decoding",
+      "paper_title": "Self-Consistency Improves Chain-of-Thought",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Majority voting over independently sampled reasoning paths raised accuracy on arithmetic and commonsense benchmarks",
+      "paper_title": "Sampling-and-Voting for Reasoning",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "support",
+    "category": "methodological",
+    "notes": "Both describe the same mechanism — sample multiple chains, vote — and find it raises accuracy. Same conclusion."
+  },
+  {
+    "id": "llm_005",
+    "domain": "llm_reasoning",
+    "split": "test",
+    "claim_a": {
+      "text": "Retrieval-augmented generation reduced factual hallucination on knowledge-intensive queries by grounding answers in retrieved passages",
+      "paper_title": "Retrieval-Augmented Generation for Knowledge Tasks",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Retrieval augmentation introduced new errors when the retrieved context was irrelevant, as the model deferred to misleading passages over its parametric knowledge",
+      "paper_title": "When Retrieval Hurts: Context Distraction in RAG",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "nuance",
+    "category": "scope",
+    "notes": "RAG reduces hallucination with good context but can add errors with bad context. Both true, conditioned on retrieval quality."
+  },
+  {
+    "id": "llm_006",
+    "domain": "llm_reasoning",
+    "split": "train",
+    "claim_a": {
+      "text": "Evaluation used 5-shot prompting at temperature 0 with a fixed prompt template across all tasks",
+      "paper_title": "Self-Consistency Improves Chain-of-Thought",
+      "section": "methods",
+      "confidence": "high"
+    },
+    "claim_b": {
+      "text": "Self-consistency sampling improved reasoning accuracy over greedy decoding",
+      "paper_title": "Self-Consistency Improves Chain-of-Thought",
+      "section": "findings",
+      "confidence": "high"
+    },
+    "label": "unrelated",
+    "category": "scope",
+    "notes": "An evaluation-setup detail vs the paper's headline finding. No logical relationship."
   }
 ]
