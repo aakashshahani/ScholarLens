@@ -41,6 +41,22 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     return _pool
 
 
+def _reset_pool() -> None:
+    """Drop the pool so the next _get_pool() rebuilds it. Self-heals from the one
+    structural weakness in the connection-per-call style: a method that raised
+    between getconn() and putconn() leaks its connection. After enough leaks the
+    pool would exhaust and every query would hang. Rebuilding on exhaustion turns
+    that hang into a transient recovery instead."""
+    global _pool
+    p = _pool
+    _pool = None
+    if p is not None:
+        try:
+            p.closeall()
+        except Exception:
+            pass
+
+
 # â”€â”€ Data Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _clean(val):
@@ -232,8 +248,13 @@ class Database:
         self._init_db()
 
     def _get_conn(self):
-        """Borrow a connection from the shared pool."""
-        conn = _get_pool().getconn()
+        """Borrow a connection from the shared pool. Recovers automatically if
+        the pool was exhausted by leaked connections from earlier query errors."""
+        try:
+            conn = _get_pool().getconn()
+        except psycopg2.pool.PoolError:
+            _reset_pool()
+            conn = _get_pool().getconn()
         # Ensure RealDictCursor is used for all queries
         conn.cursor_factory = RealDictCursor
         return conn

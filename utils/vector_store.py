@@ -12,10 +12,11 @@ from dataclasses import dataclass
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 from psycopg2.extras import RealDictCursor
 
 from config import settings
-from db.database import _get_pool
+from db.database import _get_pool, _reset_pool
 
 
 @dataclass
@@ -38,8 +39,13 @@ class VectorStore:
         self._init_table()
 
     def _get_conn(self):
-        """Borrow a connection from the shared pool."""
-        conn = _get_pool().getconn()
+        """Borrow a connection from the shared pool, recovering if it was
+        exhausted by leaked connections from earlier query errors."""
+        try:
+            conn = _get_pool().getconn()
+        except psycopg2.pool.PoolError:
+            _reset_pool()
+            conn = _get_pool().getconn()
         conn.cursor_factory = RealDictCursor
         return conn
 

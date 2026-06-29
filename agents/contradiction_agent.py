@@ -100,6 +100,11 @@ class ContradictionAgent:
         # Keys are text-hash strings; values are ContradictionResult objects.
         # Does NOT persist across restarts — the relationships table is truth.
         self._judgment_cache: dict[str, ContradictionResult] = {}
+        # Claim-embedding cache keyed by claim id. A claim's text is immutable for
+        # a given id, so its vector stays valid for the process lifetime — this
+        # stops every contradiction scan from re-embedding the whole library via
+        # the Voyage API (the previous behaviour). Bounded by library size.
+        self._embed_cache: dict[str, list[float]] = {}
 
     def _anthropic(self, api_key: str | None = None):
         """Per-request Anthropic client: the caller's BYOK key when provided,
@@ -273,7 +278,15 @@ class ContradictionAgent:
         texts = [c.text for c in all_claims]
 
         # ── Dense pass ────────────────────────────────────────
-        embeddings = self.vector_store.embed_texts(texts)
+        # Embed only claims not already cached this process-lifetime; reuse
+        # vectors for the rest. Avoids re-embedding the whole library on every
+        # scan (claim text is immutable per id).
+        missing = [c for c in all_claims if c.id not in self._embed_cache]
+        if missing:
+            new_vecs = self.vector_store.embed_texts([c.text for c in missing])
+            for c, v in zip(missing, new_vecs):
+                self._embed_cache[c.id] = v
+        embeddings = [self._embed_cache[c.id] for c in all_claims]
 
         # pair_key → ClaimPair; used for dedup across passes
         pair_map: dict[tuple[str, str], ClaimPair] = {}
