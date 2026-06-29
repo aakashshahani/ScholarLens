@@ -153,6 +153,10 @@ class User:
     free_actions_used: int = 0
     free_sonnet_used: int = 0
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    # External identity (Clerk) when auth is delegated. The internal `id` stays
+    # the durable key everything else (papers, claims) references — clerk_user_id
+    # is just the link, so swapping auth providers never re-keys user data.
+    clerk_user_id: str | None = None
 
     @staticmethod
     def new_id() -> str:
@@ -394,6 +398,36 @@ class Database:
                 UNIQUE(paper_id, tag)
             )
         """)
+        # Latest monitor scan per (user, topic). The scan worker upserts one row
+        # per topic and moves on, so peak memory never holds every topic's
+        # results at once. Reading these is a pure DB read — the monitor page
+        # renders instantly and results survive restarts, the same persistence
+        # contract the rest of the app follows.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS monitor_results (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                topic_name      TEXT NOT NULL,
+                payload         JSONB NOT NULL DEFAULT '[]',
+                papers_found    INTEGER NOT NULL DEFAULT 0,
+                papers_relevant INTEGER NOT NULL DEFAULT 0,
+                scanned_at      TEXT NOT NULL,
+                UNIQUE(user_id, topic_name)
+            )
+        """)
+        # Per-hypothesis 👍/👎 feedback, one row per (user, hypothesis). Persisted
+        # server-side (not localStorage) so votes survive devices and can inform
+        # future generation — matching how contradiction feedback is stored.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS hypothesis_feedback (
+                id            TEXT PRIMARY KEY,
+                user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                hypothesis_id TEXT NOT NULL,
+                verdict       TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                UNIQUE(user_id, hypothesis_id)
+            )
+        """)
         # Migrations: add columns to existing tables
         cur.execute(
             "ALTER TABLE relationships ADD COLUMN IF NOT EXISTS user_feedback TEXT"
@@ -404,7 +438,8 @@ class Database:
         for tbl in [
             "users", "papers", "chunks", "analysis_results", "claims",
             "relationships", "hypothesis_cache", "sessions",
-            "monitor_topics", "paper_tags",
+            "monitor_topics", "paper_tags", "monitor_results",
+            "hypothesis_feedback",
         ]:
             cur.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
         # Indexes
@@ -1376,9 +1411,68 @@ class Database:
         cur.close()
         self._put_conn(conn)
 
+    def save_monitor_result(
+        self,
+        user_id: str,
+        topic_name: str,
+        payload: list,
+        papers_found: int,
+        papers_relevant: int,
+    ) -> None:
+        """Upsert the latest scan for one topic. Replaces the previous row for
+        this (user, topic) so storage stays bounded to one row per topic and
+        the worker can persist-then-release as it streams through topics."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO monitor_results
+                 (id, user_id, topic_name, payload, papers_found,
+                  papers_relevant, scanned_at)
+               VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s)
+               ON CONFLICT (user_id, topic_name) DO UPDATE SET
+                 payload=EXCLUDED.payload,
+                 papers_found=EXCLUDED.papers_found,
+                 papers_relevant=EXCLUDED.papers_relevant,
+                 scanned_at=EXCLUDED.scanned_at""",
+            (str(uuid.uuid4()), user_id, topic_name, json.dumps(payload),
+             papers_found, papers_relevant,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+
+    def get_monitor_results(self, user_id: str) -> list[dict]:
+        """Return the latest persisted scan results for every topic, newest
+        first. Pure DB read — no external calls, no recompute."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT topic_name, payload, papers_found, papers_relevant, scanned_at
+               FROM monitor_results WHERE user_id = %s
+               ORDER BY scanned_at DESC""",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        out = []
+        for r in rows:
+            payload = r["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            out.append({
+                "topic": r["topic_name"],
+                "scored_papers": payload,
+                "papers_found": r["papers_found"],
+                "papers_relevant": r["papers_relevant"],
+                "scan_time": r["scanned_at"],
+            })
+        return out
+
     def list_users_with_active_topics(self) -> list[User]:
         """Return all users who have at least one active monitor topic.
-        Used by the APScheduler job to know who to scan for."""
+        Used by the monitor worker to know who to scan for."""
         conn = self._get_conn()
         cur = conn.cursor()
         cur.execute(
@@ -1505,4 +1599,40 @@ class Database:
         cur.close()
         self._put_conn(conn)
         return updated
+
+    def set_hypothesis_feedback(self, user_id: str, hyp_id: str, verdict: str | None) -> None:
+        """Upsert a 👍/👎 vote on a hypothesis. verdict=None clears the vote
+        (toggling the same button off)."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        if verdict is None:
+            cur.execute(
+                "DELETE FROM hypothesis_feedback WHERE user_id = %s AND hypothesis_id = %s",
+                (user_id, hyp_id),
+            )
+        else:
+            cur.execute(
+                """INSERT INTO hypothesis_feedback (id, user_id, hypothesis_id, verdict, created_at)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (user_id, hypothesis_id) DO UPDATE SET
+                     verdict = EXCLUDED.verdict, created_at = EXCLUDED.created_at""",
+                (str(uuid.uuid4()), user_id, hyp_id, verdict,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+
+    def get_hypothesis_feedback(self, user_id: str) -> dict[str, str]:
+        """Return {hypothesis_id: verdict} for all of a user's votes."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT hypothesis_id, verdict FROM hypothesis_feedback WHERE user_id = %s",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        return {r["hypothesis_id"]: r["verdict"] for r in rows}
 
