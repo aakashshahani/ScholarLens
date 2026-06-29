@@ -13,13 +13,14 @@ Built because I was spending weeks manually cross-referencing papers for my own 
 ## Features
 
 - **Parallel paper analysis** — Six structured analyses per paper (summary, methods, findings, limitations, key claims, research gaps) run concurrently via `ThreadPoolExecutor`, ~5× faster than sequential
-- **Two-stage contradiction detection** — BM25 + dense hybrid retrieval pre-filters candidate claim pairs; LLM judge classifies surviving pairs (macro-F1 **0.788**, kappa **0.683** on 30-pair gold set)
+- **Two-stage contradiction detection** — BM25 + dense hybrid retrieval pre-filters candidate claim pairs; LLM judge classifies surviving pairs (macro-F1 **0.788**, kappa **0.683**; gold set now 42 pairs across 3 domains with a train/test split)
+- **Evidence-strength scoring** — each claim is scored on the empirical cues it states (study design, sample size, effect size, p-value, hedging) to compute which side of a contradiction is better supported — a transparent second opinion alongside the LLM's verdict
 - **Conflict-grounded hypothesis generation** — Hypotheses cite specific contradiction IDs from the database; novelty scored via cosine distance against the library (no LLM self-assessment)
 - **Interactive knowledge graph** — Custom JS force simulation (no D3), paper-colored nodes, degree-scaled, hover tooltips, zero LLM calls on re-render
-- **Semantic search** — pgvector cosine search with calibrated relevance tiers; no fake percentage scores
-- **Research monitoring** — Watches Semantic Scholar, OpenAlex, and arXiv for new papers matching configured topics; scores candidates against library embeddings; sends Gmail digest
+- **Semantic search with reranking** — pgvector cosine retrieval (HNSW-indexed) feeds a Voyage cross-encoder reranker that re-scores `(query, passage)` relevance; calibrated relevance tiers, no fake percentage scores. Reranking is API-based, so it adds no local model weight
+- **Research monitoring** — Watches Semantic Scholar, OpenAlex, and arXiv for new papers matching configured topics; scores candidates against library embeddings; persists results per topic and sends a Gmail digest. Runs as a standalone, memory-bounded cron worker (`jobs.run_monitor`) so the heavy scan stays off the web process
 - **Insight feed** — Pure DB read on every load; zero LLM calls regardless of library size
-- **Multi-user + BYOK** — Per-user library isolation, bcrypt auth, httpOnly session cookies, per-user Anthropic keys encrypted at rest with Fernet
+- **Multi-user + BYOK** — Per-user library isolation, per-user Anthropic keys encrypted at rest with Fernet. Auth is pluggable via `AUTH_PROVIDER`: built-in bcrypt + httpOnly session cookies (default), or Clerk (JWT verification with link-by-identity that preserves an existing library)
 
 ---
 
@@ -172,7 +173,9 @@ The frontend runs a custom JavaScript force simulation with centering, repulsion
 
 ### 8. Semantic search and relevance tiers
 
-Search queries are embedded using **Voyage AI** (`voyage-3.5-lite`, `input_type="query"`). pgvector returns the top-k nearest chunks by **cosine distance** (lower = more similar) using the `<=>` operator. Relevance is reported as a tier rather than a percentage, using thresholds calibrated for voyage-3.5-lite on narrow-domain academic text:
+Search runs in two stages. **Stage 1 (retrieve):** the query is embedded via **Voyage AI** (`voyage-3.5-lite`, `input_type="query"`) and pgvector returns a wide candidate pool by **cosine distance** using the `<=>` operator, accelerated by an **HNSW index** (`vector_cosine_ops`) so lookups stay sub-linear as the corpus grows. **Stage 2 (rerank):** those candidates are re-scored by a **Voyage cross-encoder reranker** (`rerank-2.5-lite`), which reads each `(query, passage)` pair jointly — a far better relevance signal than cosine distance for jargon-dense academic text. The reranker is an API call (no local cross-encoder weights, so it stays within the free-tier memory budget) and degrades gracefully to pure vector ordering if unavailable. A self-contained eval (`eval/rerank_eval.py`, nDCG/MRR over a graded gold set) measures the lift.
+
+Relevance is still reported as a tier rather than a percentage, using thresholds calibrated for voyage-3.5-lite on narrow-domain academic text:
 
 - **Highly relevant** — distance < 0.35
 - **Related** — 0.35 ≤ distance < 0.55
@@ -261,10 +264,12 @@ ScholarLens is multi-user: every account has its own private library, and the ba
 | Backend | FastAPI | Async, typed, automatic OpenAPI docs at `/api/docs` |
 | Frontend | Next.js 16 + TypeScript + Tailwind v4 | App Router, server components, Turbopack |
 | Embeddings | Voyage AI voyage-3.5-lite (1024 dims) | API-based, eliminates ~400MB torch RAM overhead on Render free tier, higher retrieval quality than MiniLM or BGE on narrow-domain text |
+| Reranker | Voyage rerank-2.5-lite | Cross-encoder second stage on search; API-based so it adds no local model weight |
+| Vector index | pgvector HNSW (`vector_cosine_ops`) | Sub-linear nearest-neighbour lookups; falls back to exact scan on older pgvector |
 | Lexical retrieval | rank-bm25 | Hybrid Stage-1 pass alongside dense retrieval; recovers vocabulary-distant claim pairs |
 | Vector store | pgvector (Supabase) | Native Postgres extension, `<=>` cosine operator, no separate vector DB process |
 | Database | Postgres via psycopg2 (Supabase) | Persistent, FK cascades, scales beyond SQLite |
-| Auth | bcrypt + httpOnly session cookies | No external dependency; cookie invisible to JS |
+| Auth | bcrypt + httpOnly sessions, or Clerk | Pluggable via `AUTH_PROVIDER`; Clerk adds passkeys / email-passcodes / OAuth and verifies a JWT, linking to the existing user row so libraries are preserved |
 | Key encryption | cryptography (Fernet) | Encrypts per-user Anthropic keys at rest |
 | Rate limiting | slowapi | Per-IP limits on expensive endpoints + login brute-force defense |
 | PDF parsing | PyMuPDF (`fitz`) | Fast, column-aware extraction with dynamic gutter detection |

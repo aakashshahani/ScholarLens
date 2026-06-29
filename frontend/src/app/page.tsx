@@ -109,12 +109,18 @@ export default function Dashboard() {
         .catch((e) => setError(e.message)),
       api.listPapers(50)
         .then((p) => { setPapers(p); cache.write("papers", p); }),
-      api.insights({ limit: 8 })
-        .then((i) => { setInsights(i); cache.write("insights_short", i); }),
       api.contradictionCount()
         .then((d) => { const c = d.counts || null; setRelCounts(c); if (c) cache.write("rel_counts", c); }),
+      // One insights fetch, not two — the short feed is just the first slice of
+      // the long list (same endpoint, same ordering). Saves a round trip.
       api.insights({ limit: 30 })
-        .then((rows) => { cache.write("insights_long", rows); applyInsightsLong(rows); }),
+        .then((rows) => {
+          cache.write("insights_long", rows);
+          applyInsightsLong(rows);
+          const shortList = rows.slice(0, 8);
+          setInsights(shortList);
+          cache.write("insights_short", shortList);
+        }),
       api.getCachedHypotheses()
         .then((hyps) => {
           if (hyps && hyps.length > 0) { setTopHypo(hyps[0]); cache.write("hypotheses", hyps); }
