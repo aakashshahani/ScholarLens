@@ -25,6 +25,10 @@ class SearchResult:
     text: str
     section: str | None
     score: float  # cosine distance, lower = more similar
+    # Cross-encoder relevance from the Voyage reranker, in [0, 1] (higher =
+    # more relevant). None when reranking is disabled or unavailable, in which
+    # case ordering falls back to `score` (cosine distance).
+    rerank_score: float | None = None
 
 
 class VectorStore:
@@ -70,7 +74,27 @@ class VectorStore:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_embeddings_paper ON embeddings(paper_id)"
         )
+        # Commit the table + btree index before attempting the ANN index, so a
+        # failure there can be rolled back in isolation without discarding the
+        # schema we just created.
         conn.commit()
+
+        # Approximate-nearest-neighbour index for cosine distance. Without it,
+        # every `<=>` query is a sequential scan over the whole table — slow and
+        # memory-spiky as the corpus grows. HNSW gives sub-linear lookups; the
+        # `vector_cosine_ops` opclass matches the `<=>` operator used in search.
+        # IF NOT EXISTS keeps this a no-op on every boot after the first.
+        try:
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_embeddings_hnsw "
+                "ON embeddings USING hnsw (embedding vector_cosine_ops)"
+            )
+            conn.commit()
+        except psycopg2.Error as exc:
+            # Older pgvector (<0.5.0) lacks HNSW. Roll back just this statement;
+            # search falls back to the exact sequential scan — correct, slower.
+            conn.rollback()
+            print(f"[vector_store] HNSW index unavailable, using exact scan: {exc}")
         cur.close()
         self._put_conn(conn)
 
@@ -89,6 +113,31 @@ class VectorStore:
         """Embed a single search query."""
         result = self.client.embed([query], model="voyage-3.5-lite", input_type="query")
         return result.embeddings[0]
+
+    def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        top_k: int | None = None,
+    ) -> list[tuple[int, float]]:
+        """Re-score (query, document) pairs with the Voyage cross-encoder.
+
+        Returns (original_index, relevance_score) tuples sorted best-first.
+        relevance_score is in [0, 1], higher = more relevant. The index refers
+        back into `documents` so the caller can re-order its own objects.
+
+        API-based by design: no local cross-encoder weights, so this adds zero
+        resident memory — the whole point of staying on the Voyage stack.
+        """
+        if not documents:
+            return []
+        result = self.client.rerank(
+            query=query,
+            documents=documents,
+            model=settings.rerank_model,
+            top_k=top_k,
+        )
+        return [(r.index, r.relevance_score) for r in result.results]
 
     def add_chunks(
         self,
@@ -127,6 +176,7 @@ class VectorStore:
         section: str | None = None,
         exclude_sections: list[str] | None = None,
         paper_ids: list[str] | None = None,
+        rerank: bool | None = None,
     ) -> list[SearchResult]:
         if exclude_sections is None:
             exclude_sections = ["references", "appendix"]
@@ -154,7 +204,12 @@ class VectorStore:
             params.append(exclude_sections)
 
         where = " AND ".join(conditions)
-        fetch_n = n_results * 3
+
+        do_rerank = settings.search_rerank_enabled if rerank is None else rerank
+        # When reranking, pull a wider candidate pool so the cross-encoder can
+        # promote relevant passages the embedding ranked just outside the top-k.
+        # Without reranking, the old 3x overshoot is enough.
+        fetch_n = max(settings.search_rerank_fetch, n_results * 3) if do_rerank else n_results * 3
 
         sql = f"""
             SELECT chunk_id, paper_id, text, section,
@@ -173,19 +228,38 @@ class VectorStore:
         cur.close()
         self._put_conn(conn)
 
-        results = []
-        for r in rows:
-            if len(results) >= n_results:
-                break
-            results.append(SearchResult(
+        # All candidates, still in cosine-distance order from SQL.
+        candidates = [
+            SearchResult(
                 chunk_id=r["chunk_id"],
                 paper_id=r["paper_id"],
                 text=r["text"],
                 section=r["section"],
                 score=float(r["score"]),
-            ))
+            )
+            for r in rows
+        ]
 
-        return results
+        # Stage 2: cross-encoder rerank. Reorders by true (query, passage)
+        # relevance and attaches rerank_score. Any failure (model unavailable,
+        # quota, network) degrades gracefully to the vector ordering — search
+        # never goes down because the reranker did.
+        if do_rerank and len(candidates) > 1:
+            try:
+                order = self.rerank(
+                    query, [c.text for c in candidates], top_k=n_results
+                )
+                reranked = []
+                for idx, rscore in order:
+                    c = candidates[idx]
+                    c.rerank_score = float(rscore)
+                    reranked.append(c)
+                if reranked:
+                    return reranked[:n_results]
+            except Exception as exc:  # noqa: BLE001 — fall back, never fail search
+                print(f"[vector_store] rerank unavailable, using vector order: {exc}")
+
+        return candidates[:n_results]
 
     def search_by_embedding(
         self,

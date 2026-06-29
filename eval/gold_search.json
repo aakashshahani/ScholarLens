@@ -1,0 +1,67 @@
+[
+  {
+    "id": "s1",
+    "query": "Does giving an LLM a structured negotiation script improve a human's bargaining outcomes?",
+    "passages": [
+      {"relevance": 3, "text": "In a randomized study of 240 participants, users coached by an LLM that followed a structured BATNA-anchoring script reached agreements with 12% higher joint surplus than an unscripted-chatbot control, and the effect held after controlling for prior negotiation experience."},
+      {"relevance": 3, "text": "Pairing novice negotiators with a turn-by-turn LLM advisor that prompted them to state their reservation value before conceding raised their individual payoff by 0.4 standard deviations relative to negotiating alone."},
+      {"relevance": 2, "text": "Participants reported higher confidence when an AI assistant suggested concession sequences, though the paper notes subjective confidence did not always track objective deal quality."},
+      {"relevance": 2, "text": "A simulation of automated agent-to-agent bargaining showed that explicit scripts reduced impasse rates, but the agents were not human and no human-outcome measure was reported."},
+      {"relevance": 1, "text": "Large language models can be prompted to role-play distinct negotiation personas, which is useful for generating training dialogues."},
+      {"relevance": 0, "text": "Transformer attention complexity grows quadratically with sequence length, motivating sparse-attention variants for long documents."},
+      {"relevance": 0, "text": "Retrieval-augmented generation grounds model outputs in an external corpus to reduce hallucination on factual queries."}
+    ]
+  },
+  {
+    "id": "s2",
+    "query": "What sample sizes are typical in studies measuring AI coaching effects on negotiation skill?",
+    "passages": [
+      {"relevance": 3, "text": "Across eight published trials of AI negotiation coaching, sample sizes ranged from 48 to 612 participants, with a median of 180; only three were powered to detect effects smaller than 0.3 standard deviations."},
+      {"relevance": 3, "text": "The authors recruited 312 undergraduates and assigned them to AI-coached, human-coached, or no-coaching arms, reporting that the AI arm needed roughly 100 participants per cell to detect the observed effect at 80% power."},
+      {"relevance": 2, "text": "A meta-analysis of computer-assisted negotiation training emphasized that underpowered samples (n < 60) dominated early work and likely inflated reported effect sizes."},
+      {"relevance": 1, "text": "Effect sizes in behavioral negotiation research are commonly reported as Cohen's d, which complicates pooling when studies differ in outcome scaling."},
+      {"relevance": 1, "text": "Recruiting professional negotiators is expensive, so most studies rely on student convenience samples."},
+      {"relevance": 0, "text": "Voyage embeddings produce 1024-dimensional vectors suitable for cosine-similarity retrieval over academic text."},
+      {"relevance": 0, "text": "BM25 is a lexical ranking function that scores documents by term frequency and inverse document frequency."}
+    ]
+  },
+  {
+    "id": "s3",
+    "query": "Do LLM negotiation agents concede too quickly compared to humans?",
+    "passages": [
+      {"relevance": 3, "text": "When pitted against human counterparts, GPT-class negotiation agents conceded on price an average of 1.8 rounds earlier than humans and captured 9% less of the surplus, a gap the authors attribute to the model's bias toward agreeableness."},
+      {"relevance": 3, "text": "Ablating the politeness-tuned reward made the agent hold firm longer and improved its captured value, directly linking premature concession to alignment tuning."},
+      {"relevance": 2, "text": "Human negotiators in the same protocol anchored aggressively and rarely made the first concession, whereas the baseline model frequently opened with a near-final offer."},
+      {"relevance": 1, "text": "The study used an ultimatum-game variant with monetary stakes paid as a bonus."},
+      {"relevance": 1, "text": "Concession behavior was coded from transcripts by two raters with substantial inter-rater agreement."},
+      {"relevance": 0, "text": "Fine-tuning on domain text generally improves retrieval relevance for specialized corpora."},
+      {"relevance": 0, "text": "pgvector adds an approximate nearest-neighbor index to Postgres via the HNSW method."}
+    ]
+  },
+  {
+    "id": "s4",
+    "query": "How is the quality of an AI-generated research hypothesis evaluated for novelty?",
+    "passages": [
+      {"relevance": 3, "text": "The authors operationalized novelty as the cosine distance between a generated hypothesis embedding and its nearest neighbor in an existing literature corpus, avoiding the unreliability of asking the model to rate its own originality."},
+      {"relevance": 3, "text": "Hypotheses were scored by expert reviewers on novelty and plausibility, and the embedding-distance proxy correlated r=0.61 with reviewer novelty judgments."},
+      {"relevance": 2, "text": "Self-assessed novelty from the language model was systematically inflated, rating nearly every hypothesis as highly original regardless of overlap with prior work."},
+      {"relevance": 2, "text": "Grounding each hypothesis in cited contradictions from the source set made its provenance auditable against the underlying papers."},
+      {"relevance": 1, "text": "Generated hypotheses were de-duplicated before scoring to avoid rewarding repetition."},
+      {"relevance": 0, "text": "SMTP over TLS on port 587 is the standard submission path for outbound email."},
+      {"relevance": 0, "text": "Cohen's kappa corrects observed agreement for the agreement expected by chance."}
+    ]
+  },
+  {
+    "id": "s5",
+    "query": "Does hybrid lexical-plus-dense retrieval beat dense-only retrieval for finding contradicting scientific claims?",
+    "passages": [
+      {"relevance": 3, "text": "Adding a BM25 pass to dense retrieval raised recall of genuinely contradicting claim pairs from 0.71 to 0.88, because lexically overlapping but semantically reframed claims fell below the dense similarity threshold."},
+      {"relevance": 3, "text": "The union of dense and lexical candidate pairs surfaced contradictions that shared rare tokens such as dataset and metric names which the embedding model mapped far apart in vector space."},
+      {"relevance": 2, "text": "Dense-only retrieval favored paraphrase similarity and missed pairs that disagreed using different terminology for the same construct."},
+      {"relevance": 1, "text": "Each candidate pair was tagged with the retriever that surfaced it so per-retriever coverage could be measured."},
+      {"relevance": 1, "text": "Reranking the merged candidate list further trimmed false positives before the expensive judgment stage."},
+      {"relevance": 0, "text": "Fernet provides symmetric authenticated encryption built on AES-128 in CBC mode with an HMAC."},
+      {"relevance": 0, "text": "React escapes interpolated text by default, mitigating a class of cross-site scripting bugs."}
+    ]
+  }
+]

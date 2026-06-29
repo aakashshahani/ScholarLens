@@ -72,6 +72,20 @@ class Settings:
     )
     embedding_model: str = "voyage-3.5-lite"
 
+    # Voyage reranker — a second relevance pass over the candidates that the
+    # vector search returns. A cross-encoder reads (query, passage) jointly and
+    # scores true relevance, which pure cosine distance approximates poorly for
+    # narrow, jargon-dense academic text. This runs as an API call, so it adds
+    # no local model weights — deliberately NOT a torch cross-encoder, which
+    # would reintroduce the RAM overhead the Voyage migration removed.
+    # Disable with SEARCH_RERANK=false; falls back to pure vector ordering.
+    rerank_model: str = field(default_factory=lambda: os.getenv("RERANK_MODEL", "rerank-2.5-lite"))
+    search_rerank_enabled: bool = field(default_factory=lambda: _env_bool("SEARCH_RERANK", True))
+    # How many vector candidates to pull before reranking down to n_results.
+    # A wider pool lets the reranker recover relevant passages the embedding
+    # ranked just out of the top-k; too wide wastes rerank tokens.
+    search_rerank_fetch: int = field(default_factory=lambda: _env_int("SEARCH_RERANK_FETCH", 30))
+
     # Chunking params
     chunk_size: int = 500          # tokens per chunk
     chunk_overlap: int = 50        # overlap tokens
