@@ -17,7 +17,7 @@ Built because I was spending weeks manually cross-referencing papers for my own 
 - **Conflict-grounded hypothesis generation** — Hypotheses cite specific contradiction IDs from the database; novelty scored via cosine distance against the library (no LLM self-assessment)
 - **Interactive knowledge graph** — Custom JS force simulation (no D3), paper-colored nodes, degree-scaled, hover tooltips, zero LLM calls on re-render
 - **Semantic search** — pgvector cosine search with calibrated relevance tiers; no fake percentage scores
-- **Research monitoring** — Watches arXiv and Semantic Scholar for new papers matching configured topics; scores candidates against library embeddings; sends Gmail digest
+- **Research monitoring** — Watches Semantic Scholar, OpenAlex, and arXiv for new papers matching configured topics; scores candidates against library embeddings; sends Gmail digest
 - **Insight feed** — Pure DB read on every load; zero LLM calls regardless of library size
 - **Multi-user + BYOK** — Per-user library isolation, bcrypt auth, httpOnly session cookies, per-user Anthropic keys encrypted at rest with Fernet
 
@@ -184,7 +184,7 @@ The previous implementation showed `(1 - cosine_distance) * 100` as a percentage
 
 ### 9. Research monitoring
 
-The monitoring agent searches arXiv and Semantic Scholar for papers matching configured keywords, filters out papers already in the library by title-key deduplication, and scores each candidate by embedding its abstract against the library's existing chunks via pgvector. Candidate abstracts are batch-embedded in one Voyage API call per topic scan. Results are grouped by topic with relevance tiers. Per-source failures are reported honestly (a `SourceUnavailable` exception and a `sources_failed` field surface an arXiv-down banner rather than silently returning empty results), and queries are sanitised before dispatch. When Gmail credentials are configured, the agent sends an HTML digest email via SMTP after each scan, with honest `email_sent`/`email_error` status reporting. Topics and results are cached in localStorage so they survive page reloads.
+The monitoring agent searches Semantic Scholar, OpenAlex, and arXiv (in that priority order) for papers matching configured keywords, filters out papers already in the library by title-key deduplication, and scores each candidate by embedding its abstract against the library's existing chunks via pgvector. Candidate abstracts are batch-embedded in one Voyage API call per topic scan. Results are grouped by topic with relevance tiers. Per-source failures are reported honestly (a `SourceUnavailable` exception and a `sources_failed` field surface an arXiv-down banner rather than silently returning empty results), and queries are sanitised before dispatch. When Gmail credentials are configured, the agent sends an HTML digest email via SMTP after each scan, with honest `email_sent`/`email_error` status reporting. Topics and results are cached in localStorage so they survive page reloads.
 
 ---
 
@@ -237,7 +237,7 @@ ScholarLens is multi-user: every account has its own private library, and the ba
 │  PDFAnalysisAgent   — 6 parallel LLM calls/paper       │
 │  ContradictionAgent — 2-stage pipeline (BM25+dense→LLM)│
 │  HypothesisAgent    — conflict-grounded synthesis      │
-│  PaperImporter      — arXiv + Semantic Scholar         │
+│  PaperImporter      — S2 + OpenAlex + arXiv (priority) │
 │  MonitoringAgent    — topic watch + Gmail digest       │
 └──────────────┬──────────────────────────────────────────┘
                │
@@ -327,7 +327,7 @@ scholarlens/
     pdf_analyst.py          Parallel 6-type analysis pipeline + single-pass RAG (ask)
     contradiction_agent.py  Two-stage pipeline (BM25+dense → LLM judge), eval harness support
     hypothesis_agent.py     Conflict-grounded hypothesis synthesis with batch novelty scoring
-    paper_import.py         arXiv + Semantic Scholar import + dedup + retry
+    paper_import.py         Semantic Scholar + OpenAlex + arXiv import + dedup + retry
     monitoring_agent.py     Topic monitoring + Gmail email digest
   utils/
     pdf_parser.py           PyMuPDF extraction, dynamic column detection, section-aware chunking
@@ -394,7 +394,7 @@ Full interactive docs at `/api/docs`.
 
 **Done**
 
-Core pipeline: 6-type parallel analysis, two-stage contradiction detection (macro-F1 0.788, kappa 0.683), evidence-grounded claim extraction, BM25+dense hybrid retrieval, hypothesis generation with batch novelty scoring, research monitor with Gmail digest, semantic search with relevance tiers, insight feed as a pure DB read, read-only knowledge graph with gated compute path, arXiv + Semantic Scholar import with dedup.
+Core pipeline: 6-type parallel analysis, two-stage contradiction detection (macro-F1 0.788, kappa 0.683), evidence-grounded claim extraction, BM25+dense hybrid retrieval, hypothesis generation with batch novelty scoring, research monitor with Gmail digest, semantic search with relevance tiers, insight feed as a pure DB read, read-only knowledge graph with gated compute path, Semantic Scholar + OpenAlex + arXiv import with dedup.
 
 Security and multi-user: email + password auth (bcrypt, httpOnly session cookies), per-user library scoping and IDOR-safe ownership checks, BYOK with Fernet key encryption, model selection with server-side ceiling, upload hardening (magic-byte check, size cap, path-traversal-safe UUID filenames), per-IP rate limiting, parameterized queries throughout.
 
