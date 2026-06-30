@@ -26,7 +26,33 @@ Built because I was spending weeks manually cross-referencing papers for my own 
 
 ## Screenshots
 
-> *Add screenshots or a GIF here — dashboard, contradiction map, knowledge graph*
+**Conflict map** — every place your papers disagree, claim against claim, with the LLM verdict and a computed evidence-strength second opinion.
+
+![Conflict map](frontend/public/screenshots/conflict-map.png)
+
+**Dashboard** — the situation room: library state and where the tension is, at a glance.
+
+![Dashboard](frontend/public/screenshots/dashboard.png)
+
+**Knowledge graph** — claim-level force simulation (no D3), paper-colored nodes, contradiction/support/nuance edges, with a debate-cluster view.
+
+![Knowledge graph](frontend/public/screenshots/knowledge-graph.png)
+
+**Search → answer** — retrieve passages by meaning (reranked), then synthesize a grounded answer over those same sources on demand.
+
+![Search and answer](frontend/public/screenshots/search.png)
+
+**Research monitor** — new papers matching your topics, plus citation alerts and author-follow native to your own library.
+
+![Research monitor](frontend/public/screenshots/monitor.png)
+
+**Hypotheses** — conflict-grounded hypotheses that cite specific contradictions, scored for novelty against your library.
+
+![Hypotheses](frontend/public/screenshots/hypotheses.png)
+
+**Library** — the corpus and its six structured analyses per paper, with one-click export to BibTeX / RIS / APA.
+
+![Library](frontend/public/screenshots/library.png)
 
 ---
 
