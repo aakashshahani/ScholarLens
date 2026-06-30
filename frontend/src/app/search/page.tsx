@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { api, type SearchResult } from "@/lib/api";
+import { api, type SearchResult, type Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { Card } from "@/components/ui";
 import { Trash2, ChevronDown, ChevronUp, ArrowUp } from "lucide-react";
@@ -22,12 +22,23 @@ interface Exchange {
 const CACHE_KEY = "search_conversation";
 const POLL_INTERVAL = 2500;
 
-const SUGGESTIONS = [
+// Domain-agnostic starters that work for any library. A library-specific
+// prompt is appended at runtime from the user's actual papers.
+const BASE_SUGGESTIONS = [
   "What are the main contradictions across these papers?",
-  "How do these papers measure negotiation outcomes?",
   "What research gaps do these papers identify?",
   "Which methodologies are most common in this literature?",
+  "Summarize the key findings across my library.",
 ];
+
+function buildSuggestions(papers: Paper[]): string[] {
+  if (!papers.length) return BASE_SUGGESTIONS;
+  // Swap in one concrete, library-specific prompt referencing a real paper so
+  // the chips feel tailored rather than canned.
+  const t = papers[0].title;
+  const shortTitle = t.length > 48 ? t.slice(0, 48) + "…" : t;
+  return [BASE_SUGGESTIONS[0], BASE_SUGGESTIONS[1], `What does "${shortTitle}" conclude?`, BASE_SUGGESTIONS[2]];
+}
 
 // ── Relevance tier badge ──────────────────────────────────────────────────────
 
@@ -67,17 +78,22 @@ function HighlightedText({ text, query }: { text: string; query: string }) {
 
 // ── Paper result card ─────────────────────────────────────────────────────────
 
-function PaperResult({ title, passages, query }: { title: string; passages: SearchResult[]; query: string }) {
+function PaperResult({ title, passages, query, topMatch = false }: { title: string; passages: SearchResult[]; query: string; topMatch?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const shown = expanded ? passages : passages.slice(0, 2);
   const best = passages[0];
 
   return (
-    <div className="border border-[var(--line)] rounded-[var(--r-lg)] overflow-hidden bg-[var(--surface-1)] hover:border-[var(--line-2)] t-all">
+    <div className={`border rounded-[var(--r-lg)] overflow-hidden bg-[var(--surface-1)] t-all ${topMatch ? "border-[var(--gen-line)]" : "border-[var(--line)] hover:border-[var(--line-2)]"}`}>
       {/* Paper header */}
       <div className="flex items-start justify-between gap-3 px-4 pt-4 pb-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+            {topMatch && (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10.5px] font-medium text-[var(--gen)] bg-[var(--gen-dim)] border border-[var(--gen-line)]">
+                Top match
+              </span>
+            )}
             <TierBadge tier={best.relevance_tier} />
             <span className="text-[10.5px] text-[var(--text-4)] capitalize">
               {best.section || "general"}
@@ -138,6 +154,10 @@ function ExchangeCard({ exchange }: { exchange: Exchange }) {
   const paperGroups = paperFilter
     ? allGroups.filter((g) => g[0].paper_id === paperFilter)
     : allGroups;
+  // Results arrive already ordered by the reranker, so sources[0] is the single
+  // best passage. Flag its paper group so we can badge it "Top match".
+  const reranked = exchange.sources.some((s) => s.rerank_score != null);
+  const topSource = exchange.sources[0];
 
   return (
     <div className="mb-8">
@@ -193,6 +213,7 @@ function ExchangeCard({ exchange }: { exchange: Exchange }) {
                 title={group[0].paper_title}
                 passages={group}
                 query={exchange.question}
+                topMatch={reranked && !paperFilter && group[0] === topSource}
               />
             ))}
           </div>
@@ -264,6 +285,7 @@ function InputBar({
 
 export default function SearchPage() {
   const [exchanges, setExchanges] = useState<Exchange[]>([]);
+  const [papers, setPapers] = useState<Paper[]>([]);
   const [input, setInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -275,7 +297,13 @@ export default function SearchPage() {
   useEffect(() => {
     const saved = cache.read<Exchange[]>(CACHE_KEY);
     if (saved?.length) setExchanges(saved.filter((e) => !e.answerLoading));
+    // Papers power the library-specific suggestion chip.
+    const cachedPapers = cache.read<Paper[]>("papers");
+    if (cachedPapers?.length) setPapers(cachedPapers);
+    api.listPapers(50).then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
   }, []);
+
+  const suggestions = buildSuggestions(papers);
 
   useEffect(() => {
     if (exchanges.length > 0) {
@@ -356,7 +384,7 @@ export default function SearchPage() {
             </h1>
             <p className="text-[14px] text-[var(--text-3)] max-w-[360px] leading-relaxed">
               Find relevant passages across all your papers.
-              Results ranked by semantic similarity and grouped by paper.
+              Retrieved by meaning, reranked for relevance, and grouped by paper.
             </p>
           </div>
         </div>
@@ -376,7 +404,7 @@ export default function SearchPage() {
 
         {/* Suggestion chips */}
         <div className="w-full grid grid-cols-2 gap-2">
-          {SUGGESTIONS.map((s) => (
+          {suggestions.map((s) => (
             <button
               key={s}
               onClick={() => {
@@ -394,7 +422,7 @@ export default function SearchPage() {
         </div>
 
         <p className="mt-5 text-[11.5px] text-[var(--text-4)] text-center">
-          Semantic search · finds passages by meaning, not just keywords
+          Semantic search + cross-encoder reranking · finds passages by meaning
         </p>
       </div>
     );
@@ -439,7 +467,7 @@ export default function SearchPage() {
           size="default"
         />
         <p className="text-[11px] text-[var(--text-4)] mt-2 px-1">
-          Semantic search · results ranked by meaning, not just keywords
+          Semantic search + reranking · ordered by relevance, not just keywords
         </p>
       </div>
     </div>

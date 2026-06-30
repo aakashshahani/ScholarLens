@@ -351,6 +351,101 @@ class MonitoringAgent:
             return False
 
 
+    @staticmethod
+    def _tier_from_similarity(sim: float) -> str:
+        """Map a library-similarity score (0..1, HIGHER = more relevant) to the
+        same tier vocabulary the search UI uses. Note this is the inverse of
+        settings.relevance_tier, which takes a cosine *distance* (lower = better)
+        — passing this similarity there would invert the labels, which is the bug
+        that made every monitored paper read as 'Broader field'."""
+        if sim >= 0.55:
+            return "highly_relevant"
+        if sim >= 0.42:
+            return "related"
+        return "tangential"
+
+    @staticmethod
+    def _serialize_scored(sp: ScoredPaper) -> dict:
+        """Flatten a ScoredPaper into a JSON-storable dict for monitor_results.
+        Abstracts are trimmed so the persisted payload stays small."""
+        p = sp.paper
+        return {
+            "title": p.title,
+            "authors": p.authors[:5],
+            "year": p.year,
+            "abstract": (p.abstract or "")[:500],
+            "url": p.url,
+            "pdf_url": p.pdf_url,
+            "source": p.source,
+            "citation_count": p.citation_count,
+            "relevance_score": sp.relevance_score,
+            "relevance_tier": MonitoringAgent._tier_from_similarity(sp.relevance_score),
+            "relevance_reason": sp.relevance_reason,
+        }
+
+    def run_scan_persisted(
+        self,
+        topics: list[MonitorTopic],
+        user_id: str,
+        recipient: str | None = None,
+        max_per_source: int = 5,
+        relevance_threshold: float = 0.3,
+        api_key: str | None = None,
+        model: str | None = None,
+    ) -> tuple[list[DigestResult], bool, str | None, list[str]]:
+        """Memory-bounded monitoring scan.
+
+        Scans one topic, persists its results to monitor_results, and only then
+        moves to the next — so peak memory never holds every topic's results at
+        once, and a crash mid-run keeps the topics already scanned. This is the
+        path the standalone cron worker uses, keeping the heavy work off the web
+        process entirely.
+
+        Email still needs every topic's papers together, so when a recipient is
+        given we keep the (small, abstract-trimmed) results to build the digest;
+        without a recipient nothing accumulates across the loop.
+
+        Returns the same 4-tuple shape as run_full_scan.
+        """
+        self._failed_sources = set()
+        title_map = self.db.paper_title_map(user_id=user_id)
+        lib_ids = list(title_map.keys())
+        lib_titles = {t.lower().strip()[:60] for t in title_map.values()}
+
+        kept: list[DigestResult] = []
+        for topic in topics:
+            result = self.scan_topic(
+                topic, max_per_source, relevance_threshold,
+                lib_ids=lib_ids, lib_titles=lib_titles,
+            )
+            # Persist immediately, then this topic's heavy data can be released.
+            self.db.save_monitor_result(
+                user_id=user_id,
+                topic_name=result.topic,
+                payload=[self._serialize_scored(sp) for sp in result.scored_papers],
+                papers_found=result.papers_found,
+                papers_relevant=result.papers_relevant,
+            )
+            if recipient:
+                kept.append(result)  # needed for the digest email
+            # else: drop the reference; the loop holds nothing across topics
+
+        email_sent = False
+        email_error: str | None = None
+        if recipient and any(r.scored_papers for r in kept):
+            summary = self.generate_digest_summary(kept, api_key=api_key, model=model)
+            if not os.getenv("GMAIL_USER") or not os.getenv("GMAIL_APP_PASSWORD"):
+                email_error = "Email is not configured on the server (GMAIL_USER / GMAIL_APP_PASSWORD missing)."
+            else:
+                try:
+                    email_sent = self.send_digest_email(recipient, kept, summary)
+                    if not email_sent:
+                        email_error = "Email send failed — check GMAIL_USER and GMAIL_APP_PASSWORD in server config."
+                except Exception as e:  # noqa: BLE001
+                    email_error = f"Email failed: {e}"
+
+        return kept, email_sent, email_error, sorted(self._failed_sources)
+
     def run_full_scan(
         self,
         topics: list[MonitorTopic],

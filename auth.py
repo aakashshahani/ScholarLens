@@ -123,6 +123,12 @@ def get_current_user(request: Request) -> User:
       2. Authorization: Bearer <token> header (cross-origin production)
 
     Use as: `user: User = Depends(get_current_user)`."""
+    # Delegate to Clerk when configured. Kept as a lazy import so PyJWT/Clerk
+    # code never loads in the default password deployment.
+    if settings.auth_provider == "clerk":
+        from clerk_auth import get_current_user_clerk
+        return get_current_user_clerk(request)
+
     token = request.cookies.get(settings.session_cookie_name)
     if not token:
         # Fall back to Authorization header for cross-origin requests

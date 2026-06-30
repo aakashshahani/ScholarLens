@@ -41,6 +41,22 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     return _pool
 
 
+def _reset_pool() -> None:
+    """Drop the pool so the next _get_pool() rebuilds it. Self-heals from the one
+    structural weakness in the connection-per-call style: a method that raised
+    between getconn() and putconn() leaks its connection. After enough leaks the
+    pool would exhaust and every query would hang. Rebuilding on exhaustion turns
+    that hang into a transient recovery instead."""
+    global _pool
+    p = _pool
+    _pool = None
+    if p is not None:
+        try:
+            p.closeall()
+        except Exception:
+            pass
+
+
 # â”€â”€ Data Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _clean(val):
@@ -153,6 +169,10 @@ class User:
     free_actions_used: int = 0
     free_sonnet_used: int = 0
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    # External identity (Clerk) when auth is delegated. The internal `id` stays
+    # the durable key everything else (papers, claims) references — clerk_user_id
+    # is just the link, so swapping auth providers never re-keys user data.
+    clerk_user_id: str | None = None
 
     @staticmethod
     def new_id() -> str:
@@ -228,8 +248,13 @@ class Database:
         self._init_db()
 
     def _get_conn(self):
-        """Borrow a connection from the shared pool."""
-        conn = _get_pool().getconn()
+        """Borrow a connection from the shared pool. Recovers automatically if
+        the pool was exhausted by leaked connections from earlier query errors."""
+        try:
+            conn = _get_pool().getconn()
+        except psycopg2.pool.PoolError:
+            _reset_pool()
+            conn = _get_pool().getconn()
         # Ensure RealDictCursor is used for all queries
         conn.cursor_factory = RealDictCursor
         return conn
@@ -394,9 +419,47 @@ class Database:
                 UNIQUE(paper_id, tag)
             )
         """)
+        # Latest monitor scan per (user, topic). The scan worker upserts one row
+        # per topic and moves on, so peak memory never holds every topic's
+        # results at once. Reading these is a pure DB read — the monitor page
+        # renders instantly and results survive restarts, the same persistence
+        # contract the rest of the app follows.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS monitor_results (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                topic_name      TEXT NOT NULL,
+                payload         JSONB NOT NULL DEFAULT '[]',
+                papers_found    INTEGER NOT NULL DEFAULT 0,
+                papers_relevant INTEGER NOT NULL DEFAULT 0,
+                scanned_at      TEXT NOT NULL,
+                UNIQUE(user_id, topic_name)
+            )
+        """)
+        # Per-hypothesis 👍/👎 feedback, one row per (user, hypothesis). Persisted
+        # server-side (not localStorage) so votes survive devices and can inform
+        # future generation — matching how contradiction feedback is stored.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS hypothesis_feedback (
+                id            TEXT PRIMARY KEY,
+                user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                hypothesis_id TEXT NOT NULL,
+                verdict       TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                UNIQUE(user_id, hypothesis_id)
+            )
+        """)
         # Migrations: add columns to existing tables
         cur.execute(
             "ALTER TABLE relationships ADD COLUMN IF NOT EXISTS user_feedback TEXT"
+        )
+        # External identity link for Clerk auth. Nullable so password-auth rows
+        # are untouched; partial unique index lets many NULLs coexist while
+        # guaranteeing one internal user per Clerk id.
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS clerk_user_id TEXT")
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_clerk "
+            "ON users(clerk_user_id) WHERE clerk_user_id IS NOT NULL"
         )
         # Enable RLS on all tables so PostgREST has no public access.
         # The app connects as the postgres superuser via psycopg2, which bypasses
@@ -404,7 +467,8 @@ class Database:
         for tbl in [
             "users", "papers", "chunks", "analysis_results", "claims",
             "relationships", "hypothesis_cache", "sessions",
-            "monitor_topics", "paper_tags",
+            "monitor_topics", "paper_tags", "monitor_results",
+            "hypothesis_feedback",
         ]:
             cur.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
         # Indexes
@@ -1173,6 +1237,7 @@ class Database:
             digest_email=row["digest_email"], library_name=row["library_name"],
             free_actions_used=row["free_actions_used"],
             free_sonnet_used=row["free_sonnet_used"], created_at=row["created_at"],
+            clerk_user_id=row.get("clerk_user_id"),
         )
 
     def create_user(self, email: str, password_hash: str) -> User:
@@ -1211,6 +1276,56 @@ class Database:
         cur.close()
         self._put_conn(conn)
         return self._row_to_user(row) if row else None
+
+    # ── Clerk identity linking ────────────────────────────────
+    # The internal `id` stays the durable key for all user data; clerk_user_id
+    # is only the link. This is what lets the migration preserve existing papers
+    # — we attach Clerk to the existing row rather than re-keying anything.
+
+    def get_user_by_clerk_id(self, clerk_id: str) -> User | None:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE clerk_user_id = %s", (clerk_id,))
+        row = cur.fetchone()
+        cur.close()
+        self._put_conn(conn)
+        return self._row_to_user(row) if row else None
+
+    def link_clerk_id(self, user_id: str, clerk_id: str) -> None:
+        """Attach a Clerk id to an existing internal user (link-by-email path)."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE users SET clerk_user_id = %s WHERE id = %s",
+            (clerk_id, user_id),
+        )
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+
+    def create_user_for_clerk(self, email: str, clerk_id: str) -> User:
+        """Create a fresh internal user backed by Clerk (no local password).
+        password_hash is an unusable sentinel so the password path can never
+        authenticate this row."""
+        user = User(id=User.new_id(), email=email, password_hash="!clerk-managed",
+                    clerk_user_id=clerk_id)
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO users
+               (id, email, password_hash, api_key_encrypted, model,
+                digest_email, library_name, free_actions_used, free_sonnet_used,
+                created_at, clerk_user_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (user.id, user.email, user.password_hash, user.api_key_encrypted,
+             user.model, user.digest_email, user.library_name,
+             user.free_actions_used, user.free_sonnet_used, user.created_at,
+             user.clerk_user_id),
+        )
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+        return user
 
     def increment_usage(self, user_id: str, is_sonnet: bool) -> tuple[int, int]:
         conn = self._get_conn()
@@ -1376,9 +1491,68 @@ class Database:
         cur.close()
         self._put_conn(conn)
 
+    def save_monitor_result(
+        self,
+        user_id: str,
+        topic_name: str,
+        payload: list,
+        papers_found: int,
+        papers_relevant: int,
+    ) -> None:
+        """Upsert the latest scan for one topic. Replaces the previous row for
+        this (user, topic) so storage stays bounded to one row per topic and
+        the worker can persist-then-release as it streams through topics."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO monitor_results
+                 (id, user_id, topic_name, payload, papers_found,
+                  papers_relevant, scanned_at)
+               VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s)
+               ON CONFLICT (user_id, topic_name) DO UPDATE SET
+                 payload=EXCLUDED.payload,
+                 papers_found=EXCLUDED.papers_found,
+                 papers_relevant=EXCLUDED.papers_relevant,
+                 scanned_at=EXCLUDED.scanned_at""",
+            (str(uuid.uuid4()), user_id, topic_name, json.dumps(payload),
+             papers_found, papers_relevant,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+
+    def get_monitor_results(self, user_id: str) -> list[dict]:
+        """Return the latest persisted scan results for every topic, newest
+        first. Pure DB read — no external calls, no recompute."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT topic_name, payload, papers_found, papers_relevant, scanned_at
+               FROM monitor_results WHERE user_id = %s
+               ORDER BY scanned_at DESC""",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        out = []
+        for r in rows:
+            payload = r["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            out.append({
+                "topic": r["topic_name"],
+                "scored_papers": payload,
+                "papers_found": r["papers_found"],
+                "papers_relevant": r["papers_relevant"],
+                "scan_time": r["scanned_at"],
+            })
+        return out
+
     def list_users_with_active_topics(self) -> list[User]:
         """Return all users who have at least one active monitor topic.
-        Used by the APScheduler job to know who to scan for."""
+        Used by the monitor worker to know who to scan for."""
         conn = self._get_conn()
         cur = conn.cursor()
         cur.execute(
@@ -1505,4 +1679,40 @@ class Database:
         cur.close()
         self._put_conn(conn)
         return updated
+
+    def set_hypothesis_feedback(self, user_id: str, hyp_id: str, verdict: str | None) -> None:
+        """Upsert a 👍/👎 vote on a hypothesis. verdict=None clears the vote
+        (toggling the same button off)."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        if verdict is None:
+            cur.execute(
+                "DELETE FROM hypothesis_feedback WHERE user_id = %s AND hypothesis_id = %s",
+                (user_id, hyp_id),
+            )
+        else:
+            cur.execute(
+                """INSERT INTO hypothesis_feedback (id, user_id, hypothesis_id, verdict, created_at)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (user_id, hypothesis_id) DO UPDATE SET
+                     verdict = EXCLUDED.verdict, created_at = EXCLUDED.created_at""",
+                (str(uuid.uuid4()), user_id, hyp_id, verdict,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+
+    def get_hypothesis_feedback(self, user_id: str) -> dict[str, str]:
+        """Return {hypothesis_id: verdict} for all of a user's votes."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT hypothesis_id, verdict FROM hypothesis_feedback WHERE user_id = %s",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        return {r["hypothesis_id"]: r["verdict"] for r in rows}
 

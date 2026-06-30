@@ -3,8 +3,10 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
-  LayoutDashboard, Library, Network, Zap, FlaskConical, Radar, Plus, Search, CornerDownLeft,
+  LayoutDashboard, Library, Network, Zap, FlaskConical, Radar, Plus, Search, CornerDownLeft, FileText,
 } from "lucide-react";
+import { api, type Paper } from "@/lib/api";
+import { cache } from "@/lib/cache";
 
 interface Cmd {
   id: string;
@@ -25,17 +27,38 @@ const COMMANDS: Cmd[] = [
   { id: "add", label: "Add Papers", hint: "Upload or import", icon: Plus, action: (r) => r.push("/add-papers"), keywords: "upload import arxiv pdf" },
 ];
 
+type Item =
+  | { kind: "cmd"; cmd: Cmd }
+  | { kind: "paper"; paper: Paper };
+
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
+  const [papers, setPapers] = useState<Paper[]>([]);
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const filtered = COMMANDS.filter((c) => {
-    const q = query.toLowerCase();
-    return !q || c.label.toLowerCase().includes(q) || c.hint.toLowerCase().includes(q) || (c.keywords || "").includes(q);
-  });
+  // Papers power the "Search … papers …" promise in the input placeholder.
+  useEffect(() => {
+    const cached = cache.read<Paper[]>("papers");
+    if (cached?.length) setPapers(cached);
+    api.listPapers(100).then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
+  }, []);
+
+  const q = query.toLowerCase();
+  const filtered = COMMANDS.filter((c) =>
+    !q || c.label.toLowerCase().includes(q) || c.hint.toLowerCase().includes(q) || (c.keywords || "").includes(q)
+  );
+  const paperMatches = q
+    ? papers.filter((p) =>
+        p.title.toLowerCase().includes(q) || (p.authors || []).some((a) => a.toLowerCase().includes(q))
+      ).slice(0, 5)
+    : [];
+  const items: Item[] = [
+    ...filtered.map((c) => ({ kind: "cmd", cmd: c } as Item)),
+    ...paperMatches.map((p) => ({ kind: "paper", paper: p } as Item)),
+  ];
 
   const close = useCallback(() => { setOpen(false); setQuery(""); setSel(0); }, []);
 
@@ -51,12 +74,16 @@ export function CommandPalette() {
   useEffect(() => { if (open) setTimeout(() => inputRef.current?.focus(), 30); }, [open]);
   useEffect(() => { setSel(0); }, [query]);
 
-  const run = (c: Cmd) => { c.action(router); close(); };
+  const run = (item: Item) => {
+    if (item.kind === "cmd") item.cmd.action(router);
+    else router.push(`/paper/${item.paper.id}`);
+    close();
+  };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "ArrowDown") { e.preventDefault(); setSel((s) => Math.min(s + 1, filtered.length - 1)); }
+    if (e.key === "ArrowDown") { e.preventDefault(); setSel((s) => Math.min(s + 1, items.length - 1)); }
     if (e.key === "ArrowUp") { e.preventDefault(); setSel((s) => Math.max(s - 1, 0)); }
-    if (e.key === "Enter" && filtered[sel]) { e.preventDefault(); run(filtered[sel]); }
+    if (e.key === "Enter" && items[sel]) { e.preventDefault(); run(items[sel]); }
   };
 
   if (!open) return null;
@@ -82,26 +109,36 @@ export function CommandPalette() {
           <kbd className="mono text-[10px] px-1.5 py-0.5 rounded bg-[var(--surface-3)] border border-[var(--line-2)] text-[var(--text-3)]">ESC</kbd>
         </div>
         <div className="max-h-[340px] overflow-y-auto p-2">
-          {filtered.length === 0 ? (
+          {items.length === 0 ? (
             <div className="px-3 py-8 text-center text-[13px] text-[var(--text-3)]">No matches</div>
           ) : (
-            filtered.map((c, i) => {
-              const Icon = c.icon;
+            items.map((item, i) => {
               const active = i === sel;
+              // Section divider before the first paper result.
+              const showPapersLabel = item.kind === "paper" && (i === 0 || items[i - 1].kind === "cmd");
+              const Icon = item.kind === "cmd" ? item.cmd.icon : FileText;
+              const label = item.kind === "cmd" ? item.cmd.label : item.paper.title;
+              const hint = item.kind === "cmd"
+                ? item.cmd.hint
+                : [(item.paper.authors || [])[0], item.paper.year].filter(Boolean).join(" · ");
               return (
-                <button
-                  key={c.id}
-                  onMouseEnter={() => setSel(i)}
-                  onClick={() => run(c)}
-                  className={`w-full flex items-center gap-3 px-3 h-11 rounded-[var(--r-md)] text-left t-all ${
-                    active ? "bg-[var(--surface-3)]" : ""
-                  }`}
-                >
-                  <Icon size={16} className={active ? "text-[var(--gen)]" : "text-[var(--text-3)]"} />
-                  <span className="text-[13.5px] text-[var(--text-1)]">{c.label}</span>
-                  <span className="text-[12px] text-[var(--text-4)] ml-auto">{c.hint}</span>
-                  {active && <CornerDownLeft size={13} className="text-[var(--text-3)]" />}
-                </button>
+                <div key={item.kind === "cmd" ? item.cmd.id : item.paper.id}>
+                  {showPapersLabel && (
+                    <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-[var(--text-4)]">Papers</div>
+                  )}
+                  <button
+                    onMouseEnter={() => setSel(i)}
+                    onClick={() => run(item)}
+                    className={`w-full flex items-center gap-3 px-3 h-11 rounded-[var(--r-md)] text-left t-all ${
+                      active ? "bg-[var(--surface-3)]" : ""
+                    }`}
+                  >
+                    <Icon size={16} className={active ? "text-[var(--gen)]" : "text-[var(--text-3)]"} />
+                    <span className="text-[13.5px] text-[var(--text-1)] truncate">{label}</span>
+                    {hint && <span className="text-[12px] text-[var(--text-4)] ml-auto shrink-0 truncate max-w-[40%]">{hint}</span>}
+                    {active && <CornerDownLeft size={13} className="text-[var(--text-3)] shrink-0" />}
+                  </button>
+                </div>
               );
             })
           )}

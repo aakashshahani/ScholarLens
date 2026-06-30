@@ -45,13 +45,25 @@ export default function MonitorPage() {
   const [showConfig, setShowConfig] = useState(true);
   const [savingTopic, setSavingTopic] = useState(false);
 
-  // Load saved topics from API on mount
+  // Load saved topics + persisted results on mount.
+  // Stale-while-revalidate: paint localStorage instantly, then replace with the
+  // DB-persisted results (which survive restarts and are shared across devices).
   useEffect(() => {
     const cachedResults = cache.read<MonitorDigest[]>("monitor_results");
     if (cachedResults && cachedResults.length > 0) {
       setResults(cachedResults);
       setShowConfig(false);
     }
+
+    api.getMonitorResults()
+      .then(({ digests }) => {
+        if (digests && digests.length > 0) {
+          setResults(digests);
+          cache.write("monitor_results", digests);
+          setShowConfig(false);
+        }
+      })
+      .catch(() => {});
 
     api.listMonitorTopics()
       .then((topics) => {
@@ -291,7 +303,7 @@ export default function MonitorPage() {
           <div className="mb-4 px-1 text-[12px] text-[var(--text-3)]">
             Daily digests are sent to the email set in{" "}
             <a href="/settings" className="text-[var(--gen)] hover:underline">Settings</a>.
-            The scheduler runs automatically every day at 06:00 UTC.
+            The scheduler runs automatically every day at 09:00 UTC.
           </div>
 
           <PrimaryButton onClick={runScan} disabled={loading || savedTopics.length === 0}>

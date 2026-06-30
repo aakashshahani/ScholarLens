@@ -53,9 +53,7 @@ export default function HypothesesPage() {
   const [showLineage, setShowLineage] = useState<Record<string, boolean>>({});
   const [showConfig, setShowConfig] = useState(false);
   const [libraryChanged, setLibraryChanged] = useState(false);
-  const [feedbacks, setFeedbacks] = useState<Record<string, "up" | "down">>(() => {
-    try { return JSON.parse(localStorage.getItem("hyp_feedback") || "{}"); } catch { return {}; }
-  });
+  const [feedbacks, setFeedbacks] = useState<Record<string, "up" | "down">>({});
 
   // Build a cache key from sorted paper IDs so switching selections
   // never shows results from a different scope.
@@ -114,6 +112,9 @@ export default function HypothesesPage() {
       const cachedFp = cache.read<string>("hypotheses_fp");
       if (cachedFp && cachedFp !== fingerprint) setLibraryChanged(true);
     }).catch(() => {});
+
+    // Persisted votes (server-side, survive devices) replace the old localStorage.
+    api.getHypothesisFeedback().then(setFeedbacks).catch(() => {});
   }, []);
 
   const maxNoveltyScore = useMemo(
@@ -194,10 +195,14 @@ export default function HypothesesPage() {
   };
 
   const handleFeedback = (id: string, vote: "up" | "down") => {
-    const next = { ...feedbacks, [id]: feedbacks[id] === vote ? undefined as any : vote };
-    if (!next[id]) delete next[id];
+    // Toggle off if clicking the same vote again.
+    const verdict: "up" | "down" | null = feedbacks[id] === vote ? null : vote;
+    const prev = feedbacks;
+    // Optimistic update, then persist; revert if the server rejects it.
+    const next = { ...feedbacks };
+    if (verdict) next[id] = verdict; else delete next[id];
     setFeedbacks(next);
-    try { localStorage.setItem("hyp_feedback", JSON.stringify(next)); } catch { /* ignore */ }
+    api.setHypothesisFeedback(id, verdict).catch(() => setFeedbacks(prev));
   };
 
   const handleExport = () => {

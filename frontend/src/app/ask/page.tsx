@@ -102,13 +102,13 @@ export default function AskPage() {
   const pollAnswer = async (jobId: string, msgId: string) => {
     const interval = setInterval(async () => {
       try {
-        const job = await api.getJob<{ answer: string }>(jobId);
+        const job = await api.getJob<{ answer: string; sources?: Message["sources"] }>(jobId);
         if (job.status === "done" && job.result) {
           clearInterval(interval);
           const answer = job.result.answer || "";
-          // Parse source blocks from the answer text if the backend embeds them
+          const sources = job.result.sources || [];
           setMessages((ms) => ms.map((m) =>
-            m.id === msgId ? { ...m, loading: false, content: answer } : m
+            m.id === msgId ? { ...m, loading: false, content: answer, sources } : m
           ));
           setSubmitting(false);
         } else if (job.status === "error") {
@@ -245,9 +245,21 @@ export default function AskPage() {
                     {m.error}
                   </div>
                 ) : (
-                  <div className="bg-[var(--surface-2)] border border-[var(--line)] px-4 py-3.5 rounded-[var(--r-lg)] rounded-tl-sm">
-                    <InlineMd text={m.content} />
-                  </div>
+                  <>
+                    <div className="bg-[var(--surface-2)] border border-[var(--line)] px-4 py-3.5 rounded-[var(--r-lg)] rounded-tl-sm">
+                      <InlineMd text={m.content} />
+                    </div>
+                    {m.sources && m.sources.length > 0 && (
+                      <div className="mt-2 w-full">
+                        <div className="flex items-center gap-1.5 text-[10.5px] text-[var(--text-4)] uppercase tracking-wider mb-1.5">
+                          <BookOpen size={10} /> Grounded in {m.sources.length} passage{m.sources.length !== 1 ? "s" : ""}
+                        </div>
+                        <div className="space-y-1.5">
+                          {m.sources.map((s, i) => <SourceCard key={i} s={s} />)}
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>

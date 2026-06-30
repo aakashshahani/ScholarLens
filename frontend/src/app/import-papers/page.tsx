@@ -11,38 +11,40 @@ const inputCls =
 export default function ImportPage() {
   const [lookupId, setLookupId] = useState("");
   const [query, setQuery] = useState("");
-  const [sources, setSources] = useState(["arxiv", "semantic_scholar"]);
+  const [sources, setSources] = useState(["semantic_scholar", "openalex", "arxiv"]);
   const [maxResults, setMaxResults] = useState(5);
   const [results, setResults] = useState<ImportResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
+  const [error, setError] = useState("");
   const [importing, setImporting] = useState<Record<number, string>>({});
 
   const handleLookup = async () => {
     if (!lookupId.trim()) return;
-    setLoading(true); setResults([]);
+    setLoading(true); setResults([]); setError("");
     try {
       const r = await api.importLookup(lookupId.trim());
       setResults([r]);
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { setError(e.message || "Lookup failed."); }
     setSearched(true); setLoading(false);
   };
 
   const handleSearch = async () => {
     if (!query.trim()) return;
-    setLoading(true); setResults([]);
+    if (sources.length === 0) { setError("Select at least one source to search."); return; }
+    setLoading(true); setResults([]); setError("");
     try {
       const res = await api.importSearch(query, sources, maxResults);
       setResults(res);
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { setError(e.message || "Search failed."); }
     setSearched(true); setLoading(false);
   };
 
   const handleAdd = async (r: ImportResult, idx: number) => {
     setImporting((p) => ({ ...p, [idx]: "importing" }));
     try {
-      await api.importAdd(r);
-      setImporting((p) => ({ ...p, [idx]: "done" }));
+      const res = await api.importAdd(r);
+      setImporting((p) => ({ ...p, [idx]: res.status === "duplicate" ? "dup" : "done" }));
     } catch (e: any) {
       setImporting((p) => ({ ...p, [idx]: `error: ${e.message}` }));
     }
@@ -55,7 +57,7 @@ export default function ImportPage() {
     <div>
       <PageHeader
         title="Import papers"
-        subtitle="Search arXiv and Semantic Scholar, or paste a DOI or arXiv ID."
+        subtitle="Search Semantic Scholar, OpenAlex, and arXiv, or paste a DOI or arXiv ID."
       />
 
       {/* Quick lookup */}
@@ -99,7 +101,7 @@ export default function ImportPage() {
 
         <div className="flex items-center gap-4">
           <div className="flex gap-1.5">
-            {["arxiv", "semantic_scholar"].map((s) => (
+            {["semantic_scholar", "openalex", "arxiv"].map((s) => (
               <button
                 key={s}
                 onClick={() => toggleSource(s)}
@@ -124,13 +126,19 @@ export default function ImportPage() {
         </div>
       </Card>
 
+      {error && (
+        <div className="bg-[var(--contra-dim)] border border-[var(--contra-line)] rounded-[var(--r-lg)] p-3.5 mb-4 text-[12.5px] text-[var(--contra)]">
+          {error}
+        </div>
+      )}
+
       {loading && <Card><Spinner label="Searching databases…" /></Card>}
 
       {!loading && !searched && (
         <EmptyState
           icon={<Download size={20} />}
           title="Find papers to add"
-          hint="Search arXiv and Semantic Scholar above, or paste an arXiv ID, DOI, or URL for a direct lookup."
+          hint="Search Semantic Scholar, OpenAlex, and arXiv above, or paste an arXiv ID, DOI, or URL for a direct lookup."
         />
       )}
 
@@ -182,6 +190,8 @@ export default function ImportPage() {
                       <span className="flex items-center gap-1 text-[12px] text-[var(--support)]">
                         <CheckCircle2 size={13} /> Added
                       </span>
+                    ) : status === "dup" ? (
+                      <span className="text-[12px] text-[var(--text-3)]">Already in library</span>
                     ) : status === "importing" ? (
                       <Spinner />
                     ) : r.pdf_url ? (

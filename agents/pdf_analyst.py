@@ -427,7 +427,11 @@ class PDFAnalysisAgent:
     def ask(self, question: str, paper_id: str | None = None,
             paper_ids: list[str] | None = None,
             api_key: str | None = None, model: str | None = None,
-            history: list[dict] | None = None) -> str:
+            history: list[dict] | None = None,
+            return_sources: bool = False):
+        """When return_sources is True, returns (answer, sources) where sources
+        is the list of retrieved passages that grounded the answer; otherwise
+        returns just the answer string (backward-compatible)."""
         """
         Answer a question using simple single-pass RAG.
 
@@ -456,13 +460,15 @@ class PDFAnalysisAgent:
                 exclude_sections=["references", "appendix"],
             )
         except Exception as e:
-            return f"Search failed: {e}. Please try again."
+            msg = f"Search failed: {e}. Please try again."
+            return (msg, []) if return_sources else msg
 
         if not results:
-            return (
+            msg = (
                 "No relevant passages found in your library for this question. "
                 "Try rephrasing or check that the papers have been analyzed."
             )
+            return (msg, []) if return_sources else msg
 
         # Step 2: Format retrieved chunks as context
         # Batch-fetch titles in one query instead of one get_paper() per unique paper
@@ -472,6 +478,7 @@ class PDFAnalysisAgent:
         except Exception:
             title_map = {}
         context_parts = []
+        sources: list[dict] = []
         for r in results:
             paper_title = title_map.get(r.paper_id, "Unknown paper")
             section_label = r.section or "general"
@@ -479,6 +486,12 @@ class PDFAnalysisAgent:
             context_parts.append(
                 f"[{paper_title} — {section_label}]\n{chunk_text}"
             )
+            sources.append({
+                "paper_id": r.paper_id,
+                "paper_title": paper_title,
+                "section": r.section,
+                "text": chunk_text,
+            })
         context = "\n\n---\n\n".join(context_parts)
 
         # Step 3: Build messages — prepend history for follow-up awareness
@@ -515,7 +528,8 @@ class PDFAnalysisAgent:
             answer = response.content[0].text if response.content else ""
             # Release the response object immediately
             del response
-            return answer
+            return (answer, sources) if return_sources else answer
         except Exception as e:
-            return f"Could not generate an answer: {e}"
+            msg = f"Could not generate an answer: {e}"
+            return (msg, sources) if return_sources else msg
 

@@ -13,13 +13,14 @@ Built because I was spending weeks manually cross-referencing papers for my own 
 ## Features
 
 - **Parallel paper analysis** — Six structured analyses per paper (summary, methods, findings, limitations, key claims, research gaps) run concurrently via `ThreadPoolExecutor`, ~5× faster than sequential
-- **Two-stage contradiction detection** — BM25 + dense hybrid retrieval pre-filters candidate claim pairs; LLM judge classifies surviving pairs (macro-F1 **0.788**, kappa **0.683** on 30-pair gold set)
+- **Two-stage contradiction detection** — BM25 + dense hybrid retrieval pre-filters candidate claim pairs; LLM judge classifies surviving pairs (macro-F1 **0.788**, kappa **0.683**; gold set now 42 pairs across 3 domains with a train/test split)
+- **Evidence-strength scoring** — each claim is scored on the empirical cues it states (study design, sample size, effect size, p-value, hedging) to compute which side of a contradiction is better supported — a transparent second opinion alongside the LLM's verdict
 - **Conflict-grounded hypothesis generation** — Hypotheses cite specific contradiction IDs from the database; novelty scored via cosine distance against the library (no LLM self-assessment)
 - **Interactive knowledge graph** — Custom JS force simulation (no D3), paper-colored nodes, degree-scaled, hover tooltips, zero LLM calls on re-render
-- **Semantic search** — pgvector cosine search with calibrated relevance tiers; no fake percentage scores
-- **Research monitoring** — Watches arXiv and Semantic Scholar for new papers matching configured topics; scores candidates against library embeddings; sends Gmail digest
+- **Semantic search with reranking** — pgvector cosine retrieval (HNSW-indexed) feeds a Voyage cross-encoder reranker that re-scores `(query, passage)` relevance; calibrated relevance tiers, no fake percentage scores. Reranking is API-based, so it adds no local model weight
+- **Research monitoring** — Watches Semantic Scholar, OpenAlex, and arXiv for new papers matching configured topics; scores candidates against library embeddings; persists results per topic and sends a Gmail digest. Runs as a standalone, memory-bounded cron worker (`jobs.run_monitor`) so the heavy scan stays off the web process
 - **Insight feed** — Pure DB read on every load; zero LLM calls regardless of library size
-- **Multi-user + BYOK** — Per-user library isolation, bcrypt auth, httpOnly session cookies, per-user Anthropic keys encrypted at rest with Fernet
+- **Multi-user + BYOK** — Per-user library isolation, per-user Anthropic keys encrypted at rest with Fernet. Auth is pluggable via `AUTH_PROVIDER`: built-in bcrypt + httpOnly session cookies (default), or Clerk (JWT verification with link-by-identity that preserves an existing library)
 
 ---
 
@@ -172,7 +173,9 @@ The frontend runs a custom JavaScript force simulation with centering, repulsion
 
 ### 8. Semantic search and relevance tiers
 
-Search queries are embedded using **Voyage AI** (`voyage-3.5-lite`, `input_type="query"`). pgvector returns the top-k nearest chunks by **cosine distance** (lower = more similar) using the `<=>` operator. Relevance is reported as a tier rather than a percentage, using thresholds calibrated for voyage-3.5-lite on narrow-domain academic text:
+Search runs in two stages. **Stage 1 (retrieve):** the query is embedded via **Voyage AI** (`voyage-3.5-lite`, `input_type="query"`) and pgvector returns a wide candidate pool by **cosine distance** using the `<=>` operator, accelerated by an **HNSW index** (`vector_cosine_ops`) so lookups stay sub-linear as the corpus grows. **Stage 2 (rerank):** those candidates are re-scored by a **Voyage cross-encoder reranker** (`rerank-2.5-lite`), which reads each `(query, passage)` pair jointly — a far better relevance signal than cosine distance for jargon-dense academic text. The reranker is an API call (no local cross-encoder weights, so it stays within the free-tier memory budget) and degrades gracefully to pure vector ordering if unavailable. A self-contained eval (`eval/rerank_eval.py`, nDCG/MRR over a graded gold set) measures the lift.
+
+Relevance is still reported as a tier rather than a percentage, using thresholds calibrated for voyage-3.5-lite on narrow-domain academic text:
 
 - **Highly relevant** — distance < 0.35
 - **Related** — 0.35 ≤ distance < 0.55
@@ -184,7 +187,7 @@ The previous implementation showed `(1 - cosine_distance) * 100` as a percentage
 
 ### 9. Research monitoring
 
-The monitoring agent searches arXiv and Semantic Scholar for papers matching configured keywords, filters out papers already in the library by title-key deduplication, and scores each candidate by embedding its abstract against the library's existing chunks via pgvector. Candidate abstracts are batch-embedded in one Voyage API call per topic scan. Results are grouped by topic with relevance tiers. Per-source failures are reported honestly (a `SourceUnavailable` exception and a `sources_failed` field surface an arXiv-down banner rather than silently returning empty results), and queries are sanitised before dispatch. When Gmail credentials are configured, the agent sends an HTML digest email via SMTP after each scan, with honest `email_sent`/`email_error` status reporting. Topics and results are cached in localStorage so they survive page reloads.
+The monitoring agent searches Semantic Scholar, OpenAlex, and arXiv (in that priority order) for papers matching configured keywords, filters out papers already in the library by title-key deduplication, and scores each candidate by embedding its abstract against the library's existing chunks via pgvector. Candidate abstracts are batch-embedded in one Voyage API call per topic scan. Results are grouped by topic with relevance tiers. Per-source failures are reported honestly (a `SourceUnavailable` exception and a `sources_failed` field surface an arXiv-down banner rather than silently returning empty results), and queries are sanitised before dispatch. When Gmail credentials are configured, the agent sends an HTML digest email via SMTP after each scan, with honest `email_sent`/`email_error` status reporting. Topics and results are cached in localStorage so they survive page reloads.
 
 ---
 
@@ -237,7 +240,7 @@ ScholarLens is multi-user: every account has its own private library, and the ba
 │  PDFAnalysisAgent   — 6 parallel LLM calls/paper       │
 │  ContradictionAgent — 2-stage pipeline (BM25+dense→LLM)│
 │  HypothesisAgent    — conflict-grounded synthesis      │
-│  PaperImporter      — arXiv + Semantic Scholar         │
+│  PaperImporter      — S2 + OpenAlex + arXiv (priority) │
 │  MonitoringAgent    — topic watch + Gmail digest       │
 └──────────────┬──────────────────────────────────────────┘
                │
@@ -261,10 +264,12 @@ ScholarLens is multi-user: every account has its own private library, and the ba
 | Backend | FastAPI | Async, typed, automatic OpenAPI docs at `/api/docs` |
 | Frontend | Next.js 16 + TypeScript + Tailwind v4 | App Router, server components, Turbopack |
 | Embeddings | Voyage AI voyage-3.5-lite (1024 dims) | API-based, eliminates ~400MB torch RAM overhead on Render free tier, higher retrieval quality than MiniLM or BGE on narrow-domain text |
+| Reranker | Voyage rerank-2.5-lite | Cross-encoder second stage on search; API-based so it adds no local model weight |
+| Vector index | pgvector HNSW (`vector_cosine_ops`) | Sub-linear nearest-neighbour lookups; falls back to exact scan on older pgvector |
 | Lexical retrieval | rank-bm25 | Hybrid Stage-1 pass alongside dense retrieval; recovers vocabulary-distant claim pairs |
 | Vector store | pgvector (Supabase) | Native Postgres extension, `<=>` cosine operator, no separate vector DB process |
 | Database | Postgres via psycopg2 (Supabase) | Persistent, FK cascades, scales beyond SQLite |
-| Auth | bcrypt + httpOnly session cookies | No external dependency; cookie invisible to JS |
+| Auth | bcrypt + httpOnly sessions, or Clerk | Pluggable via `AUTH_PROVIDER`; Clerk adds passkeys / email-passcodes / OAuth and verifies a JWT, linking to the existing user row so libraries are preserved |
 | Key encryption | cryptography (Fernet) | Encrypts per-user Anthropic keys at rest |
 | Rate limiting | slowapi | Per-IP limits on expensive endpoints + login brute-force defense |
 | PDF parsing | PyMuPDF (`fitz`) | Fast, column-aware extraction with dynamic gutter detection |
@@ -327,7 +332,7 @@ scholarlens/
     pdf_analyst.py          Parallel 6-type analysis pipeline + single-pass RAG (ask)
     contradiction_agent.py  Two-stage pipeline (BM25+dense → LLM judge), eval harness support
     hypothesis_agent.py     Conflict-grounded hypothesis synthesis with batch novelty scoring
-    paper_import.py         arXiv + Semantic Scholar import + dedup + retry
+    paper_import.py         Semantic Scholar + OpenAlex + arXiv import + dedup + retry
     monitoring_agent.py     Topic monitoring + Gmail email digest
   utils/
     pdf_parser.py           PyMuPDF extraction, dynamic column detection, section-aware chunking
@@ -394,7 +399,7 @@ Full interactive docs at `/api/docs`.
 
 **Done**
 
-Core pipeline: 6-type parallel analysis, two-stage contradiction detection (macro-F1 0.788, kappa 0.683), evidence-grounded claim extraction, BM25+dense hybrid retrieval, hypothesis generation with batch novelty scoring, research monitor with Gmail digest, semantic search with relevance tiers, insight feed as a pure DB read, read-only knowledge graph with gated compute path, arXiv + Semantic Scholar import with dedup.
+Core pipeline: 6-type parallel analysis, two-stage contradiction detection (macro-F1 0.788, kappa 0.683), evidence-grounded claim extraction, BM25+dense hybrid retrieval, hypothesis generation with batch novelty scoring, research monitor with Gmail digest, semantic search with relevance tiers, insight feed as a pure DB read, read-only knowledge graph with gated compute path, Semantic Scholar + OpenAlex + arXiv import with dedup.
 
 Security and multi-user: email + password auth (bcrypt, httpOnly session cookies), per-user library scoping and IDOR-safe ownership checks, BYOK with Fernet key encryption, model selection with server-side ceiling, upload hardening (magic-byte check, size cap, path-traversal-safe UUID filenames), per-IP rate limiting, parameterized queries throughout.
 

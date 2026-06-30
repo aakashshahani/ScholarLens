@@ -72,6 +72,20 @@ class Settings:
     )
     embedding_model: str = "voyage-3.5-lite"
 
+    # Voyage reranker — a second relevance pass over the candidates that the
+    # vector search returns. A cross-encoder reads (query, passage) jointly and
+    # scores true relevance, which pure cosine distance approximates poorly for
+    # narrow, jargon-dense academic text. This runs as an API call, so it adds
+    # no local model weights — deliberately NOT a torch cross-encoder, which
+    # would reintroduce the RAM overhead the Voyage migration removed.
+    # Disable with SEARCH_RERANK=false; falls back to pure vector ordering.
+    rerank_model: str = field(default_factory=lambda: os.getenv("RERANK_MODEL", "rerank-2.5-lite"))
+    search_rerank_enabled: bool = field(default_factory=lambda: _env_bool("SEARCH_RERANK", True))
+    # How many vector candidates to pull before reranking down to n_results.
+    # A wider pool lets the reranker recover relevant passages the embedding
+    # ranked just out of the top-k; too wide wastes rerank tokens.
+    search_rerank_fetch: int = field(default_factory=lambda: _env_int("SEARCH_RERANK_FETCH", 30))
+
     # Chunking params
     chunk_size: int = 500          # tokens per chunk
     chunk_overlap: int = 50        # overlap tokens
@@ -133,6 +147,7 @@ class Settings:
     rl_test_digest: str = field(default_factory=lambda: os.getenv("RL_TEST_DIGEST", "3/hour"))
     rl_graph: str = field(default_factory=lambda: os.getenv("RL_GRAPH", "30/hour"))
     rl_insights: str = field(default_factory=lambda: os.getenv("RL_INSIGHTS", "60/hour"))
+    rl_feedback: str = field(default_factory=lambda: os.getenv("RL_FEEDBACK", "60/minute"))
     rl_upload_batch: str = field(default_factory=lambda: os.getenv("RL_UPLOAD_BATCH", "3/hour"))
 
     # ── Auth / sessions / BYOK ───────────────────────────────
@@ -141,6 +156,16 @@ class Settings:
     #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     # then set FERNET_KEY in .env.
     fernet_key: str = field(default_factory=lambda: os.getenv("FERNET_KEY", ""))
+
+    # ── Auth provider ────────────────────────────────────────
+    # "password" (built-in bcrypt + sessions, default) or "clerk" (verify a
+    # Clerk session JWT and resolve/link the internal user). Switching to clerk
+    # requires CLERK_JWKS_URL + CLERK_ISSUER; CLERK_SECRET_KEY is optional and
+    # only used to look up an email when the JWT has no email claim.
+    auth_provider: str = field(default_factory=lambda: os.getenv("AUTH_PROVIDER", "password").strip().lower())
+    clerk_jwks_url: str = field(default_factory=lambda: os.getenv("CLERK_JWKS_URL", ""))
+    clerk_issuer: str = field(default_factory=lambda: os.getenv("CLERK_ISSUER", ""))
+    clerk_secret_key: str = field(default_factory=lambda: os.getenv("CLERK_SECRET_KEY", ""))
 
     session_cookie_name: str = "session"
     session_ttl_days: int = field(default_factory=lambda: _env_int("SESSION_TTL_DAYS", 7))

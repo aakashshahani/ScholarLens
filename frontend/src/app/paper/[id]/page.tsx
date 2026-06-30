@@ -153,6 +153,7 @@ export default function PaperDetailPage() {
   // Ask state
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
+  const [answerSources, setAnswerSources] = useState<{ paper_title: string; section: string | null; text: string }[]>([]);
   const [asking, setAsking] = useState(false);
 
   // Reanalyze state
@@ -238,17 +239,18 @@ export default function PaperDetailPage() {
 
   const handleAsk = async () => {
     if (!question.trim()) return;
-    setAsking(true); setAnswer("");
+    setAsking(true); setAnswer(""); setAnswerSources([]);
     try {
       const { job_id } = await api.ask(
         `Regarding "${paper?.title}": ${question}`, paperId
       );
       askPollRef.current = setInterval(async () => {
         try {
-          const job = await api.getJob<{ answer: string }>(job_id);
+          const job = await api.getJob<{ answer: string; sources?: typeof answerSources }>(job_id);
           if (job.status === "done" && job.result) {
             clearInterval(askPollRef.current!);
             setAnswer(job.result.answer);
+            setAnswerSources(job.result.sources || []);
             setAsking(false);
           } else if (job.status === "error") {
             clearInterval(askPollRef.current!);
@@ -443,6 +445,21 @@ export default function PaperDetailPage() {
             {answer && (
               <div className="bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] p-4">
                 <MarkdownContent text={answer} />
+                {answerSources.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-[var(--line)]">
+                    <div className="text-[10px] text-[var(--text-4)] uppercase tracking-wider mb-1.5">
+                      Grounded in {answerSources.length} passage{answerSources.length !== 1 ? "s" : ""}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {answerSources.map((s, i) => (
+                        <span key={i} className="text-[10.5px] px-2 py-0.5 rounded-full bg-[var(--surface-3)] text-[var(--text-3)] capitalize"
+                          title={s.text}>
+                          {s.section || "general"}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

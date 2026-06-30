@@ -48,6 +48,7 @@ from agents import (
     MonitorTopic,
 )
 from agents.paper_import import ImportResult
+from utils.evidence_strength import score_claim, evidence_gap
 
 # â"€â"€ App Setup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -183,10 +184,13 @@ def _run_scheduled_monitor():
             ]
             print(f"[scheduler] Scanning {len(active)} topics for {user.email}")
             try:
-                monitor.run_full_scan(
+                # Memory-bounded + persisted path. Prefer the standalone
+                # `jobs.run_monitor` worker in production (separate container);
+                # this in-process fallback exists for single-dyno deploys.
+                monitor.run_scan_persisted(
                     topics=monitor_topics,
-                    recipient=user.digest_email,
                     user_id=user.id,
+                    recipient=user.digest_email,
                 )
                 for t in active:
                     db.update_topic_scanned_at(t.id)
@@ -196,6 +200,13 @@ def _run_scheduled_monitor():
         print(f"[scheduler] Job failed: {e}")
 
 
+# The in-process scheduler runs the scan inside the web dyno. On the free tier
+# that competes with request handling for 512MB and was a source of OOM kills.
+# Set ENABLE_INPROCESS_MONITOR=false and run `python -m jobs.run_monitor` as a
+# separate Render Cron Job instead — the recommended production setup. Session
+# cleanup is cheap and stays in-process regardless.
+_inprocess_monitor = os.getenv("ENABLE_INPROCESS_MONITOR", "true").strip().lower() in {"1", "true", "yes", "on"}
+
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     _scheduler = BackgroundScheduler(timezone="UTC")
@@ -204,9 +215,10 @@ try:
     # Set MONITOR_HOUR=6 in Render env to revert to original behavior.
     _monitor_hour = int(os.getenv("MONITOR_HOUR", "9"))
     _monitor_minute = int(os.getenv("MONITOR_MINUTE", "0"))
-    _scheduler.add_job(_run_scheduled_monitor, "cron",
-                       hour=_monitor_hour, minute=_monitor_minute,
-                       id="daily_monitor", replace_existing=True)
+    if _inprocess_monitor:
+        _scheduler.add_job(_run_scheduled_monitor, "cron",
+                           hour=_monitor_hour, minute=_monitor_minute,
+                           id="daily_monitor", replace_existing=True)
     def _cleanup_sessions():
         """Delete expired sessions + stale jobs nightly."""
         # Purge jobs older than 2 hours from the in-memory store
@@ -240,7 +252,10 @@ try:
     _scheduler.add_job(_cleanup_sessions, "cron", hour=3, minute=0,
                        id="session_cleanup", replace_existing=True)
     _scheduler.start()
-    print(f"[scheduler] Daily monitor job scheduled ({_monitor_hour:02d}:{_monitor_minute:02d} UTC)")
+    if _inprocess_monitor:
+        print(f"[scheduler] In-process daily monitor scheduled ({_monitor_hour:02d}:{_monitor_minute:02d} UTC)")
+    else:
+        print("[scheduler] In-process monitor disabled — expecting `jobs.run_monitor` cron worker")
     print("[scheduler] Nightly session cleanup scheduled (03:00 UTC)")
 except ImportError:
     print("[scheduler] apscheduler not installed — scheduled monitoring disabled")
@@ -417,6 +432,18 @@ class SettingsUpdateRequest(BaseModel):
     digest_email: Optional[str] = Field(None, max_length=320)
     library_name: Optional[str] = Field(None, max_length=120)
     api_key: Optional[str] = Field(None, max_length=200)
+
+    @field_validator("digest_email")
+    @classmethod
+    def _valid_digest_email(cls, v):
+        # Allow None / "" (clears the digest); otherwise require a valid shape.
+        # Server-side check so a crafted request can't store garbage the daily
+        # job would then try to send to.
+        if v is None or v.strip() == "":
+            return v
+        if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", v.strip()):
+            raise ValueError("Invalid email address")
+        return v
 
 
 class TestKeyRequest(BaseModel):
@@ -925,18 +952,18 @@ def search_papers(request: Request, req: SearchRequest,
     Semantic search across the paper library.
 
     Relevance fields returned per result:
-      relevance_tier  â€" "highly_relevant" | "related" | "tangential"
+      relevance_tier  - "highly_relevant" | "related" | "tangential"
                         Defined thresholds on cosine distance, calibrated for
-                        MiniLM on narrow-domain academic text. Honest and
-                        explainable; replaces the previous fake-precise percentage.
-      relevance_score â€" raw cosine distance in [0, 1] (lower = more similar).
+                        voyage-3.5-lite on narrow-domain academic text. Honest
+                        and explainable; replaces the old fake-precise percentage.
+      relevance_score - raw cosine distance in [0, 1] (lower = more similar).
                         Exposed so the frontend can sort or filter if needed,
                         but not intended for display to end users.
 
     Thresholds (from settings):
-      < 0.20  â†' highly_relevant
-      < 0.40  â†' related
-      >= 0.40 â†' tangential
+      < 0.35  -> highly_relevant
+      < 0.55  -> related
+      >= 0.55 -> tangential
     """
     owned_ids = db.list_paper_ids_for_user(user.id)
     if not owned_ids:
@@ -974,6 +1001,9 @@ def search_papers(request: Request, req: SearchRequest,
             "text": r.text[:800],
             "relevance_tier": settings.relevance_tier(r.score),
             "relevance_score": round(r.score, 4),
+            # Cross-encoder relevance when the reranker ran; null on fallback.
+            # Results are already ordered by this when present.
+            "rerank_score": round(r.rerank_score, 4) if r.rerank_score is not None else None,
         })
     return response
 
@@ -981,6 +1011,20 @@ def search_papers(request: Request, req: SearchRequest,
 import hashlib as _hashlib
 _ask_cache: dict[str, dict] = {}
 _ASK_CACHE_TTL = 3600  # 1 hour
+_ASK_CACHE_MAX = 500   # hard cap so the cache can't grow without bound
+
+
+def _prune_ask_cache() -> None:
+    """Evict expired entries, then cap total size (oldest first). Without this
+    the in-memory ask cache grows by one entry per unique question for the life
+    of the process — a slow leak on the 512MB tier."""
+    now = _time.time()
+    for k in [k for k, v in _ask_cache.items() if now - v.get("ts", 0) > _ASK_CACHE_TTL]:
+        _ask_cache.pop(k, None)
+    if len(_ask_cache) > _ASK_CACHE_MAX:
+        oldest = sorted(_ask_cache, key=lambda k: _ask_cache[k].get("ts", 0))
+        for k in oldest[: len(_ask_cache) - _ASK_CACHE_MAX]:
+            _ask_cache.pop(k, None)
 
 # ── Background job store ──────────────────────────────────────────────────
 # In-memory only — resets on Render restart. Acceptable for the free tier
@@ -1041,16 +1085,18 @@ def _ask_bg(job_id: str, question: str, paper_id: str | None,
              cache_key: str, history: list[dict] | None = None):
     """Background task for Ask — simple single-pass RAG, low memory footprint."""
     try:
-        answer = agent.ask(
+        answer, sources = agent.ask(
             question,
             paper_id=paper_id,
             paper_ids=paper_ids,
             api_key=api_key,
             model=model,
             history=history,
+            return_sources=True,
         )
-        _ask_cache[cache_key] = {"answer": answer, "ts": _time.time()}
-        _finish_job(job_id, {"answer": answer, "cached": False})
+        _ask_cache[cache_key] = {"answer": answer, "sources": sources, "ts": _time.time()}
+        _prune_ask_cache()
+        _finish_job(job_id, {"answer": answer, "sources": sources, "cached": False})
     except Exception as e:
         _fail_job(job_id, str(e))
 
@@ -1069,7 +1115,7 @@ def ask_question(request: Request, req: AskRequest,
         entry = _ask_cache[_cache_key]
         if _now - entry["ts"] < _ASK_CACHE_TTL:
             job_id = _new_job(user.id, "ask")
-            _finish_job(job_id, {"answer": entry["answer"], "cached": True})
+            _finish_job(job_id, {"answer": entry["answer"], "sources": entry.get("sources", []), "cached": True})
             return {"job_id": job_id, "status": "done", "cached": True}
     existing = _get_or_reuse_job(user.id, "ask")
     if existing:
@@ -1154,6 +1200,10 @@ def list_contradictions(user: User = Depends(authlib.get_current_user)):
         b = claim_by_id.get(r.claim_hi)
         if not a or not b:
             continue  # claim was deleted; skip orphaned relationship
+        es_a = score_claim(a.text, evidence=getattr(a, "evidence", None),
+                           conditions=getattr(a, "conditions", None))
+        es_b = score_claim(b.text, evidence=getattr(b, "evidence", None),
+                           conditions=getattr(b, "conditions", None))
         out.append({
             "id": r.id,
             "relationship": r.relationship,
@@ -1161,18 +1211,23 @@ def list_contradictions(user: User = Depends(authlib.get_current_user)):
             "explanation": r.explanation,
             "resolution": r.resolution,
             "stronger_evidence": r.stronger_evidence,
+            # Computed second opinion on which side is better supported, derived
+            # from the claims' own stated cues — independent of the LLM verdict.
+            "evidence_gap": evidence_gap(es_a, es_b),
             "similarity": round(r.similarity, 3),
             "claim_a": {
                 "paper_id": a.paper_id,
                 "paper_title": claim_paper_title.get(a.id, "Unknown paper"),
                 "text": a.text,
                 "confidence": a.confidence,
+                "evidence_strength": es_a.as_dict(),
             },
             "claim_b": {
                 "paper_id": b.paper_id,
                 "paper_title": claim_paper_title.get(b.id, "Unknown paper"),
                 "text": b.text,
                 "confidence": b.confidence,
+                "evidence_strength": es_b.as_dict(),
             },
             "created_at": r.created_at,
         })
@@ -1211,18 +1266,23 @@ def _contradiction_bg(job_id: str, scope: list[str], similarity_threshold: float
                 "explanation": r.explanation,
                 "resolution": r.resolution,
                 "stronger_evidence": r.stronger_evidence,
+                "evidence_gap": evidence_gap(
+                    score_claim(r.claim_a.text), score_claim(r.claim_b.text)
+                ),
                 "similarity": round(r.similarity, 3),
                 "claim_a": {
                     "paper_id": r.claim_a.paper_id,
                     "paper_title": r.claim_a.paper_title,
                     "text": r.claim_a.text,
                     "confidence": r.claim_a.confidence,
+                    "evidence_strength": score_claim(r.claim_a.text).as_dict(),
                 },
                 "claim_b": {
                     "paper_id": r.claim_b.paper_id,
                     "paper_title": r.claim_b.paper_title,
                     "text": r.claim_b.text,
                     "confidence": r.claim_b.confidence,
+                    "evidence_strength": score_claim(r.claim_b.text).as_dict(),
                 },
                 "created_at": r.created_at,
             }
@@ -1505,44 +1565,41 @@ def import_add(
 
 # â"€â"€ Monitor â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
+def _persisted_digests(user_id: str, topic_names: set[str]) -> list[dict]:
+    """Read the persisted monitor_results rows for the given topics and shape
+    them into the MonitorDigest payload the frontend expects. Pure DB read."""
+    digests = []
+    for r in db.get_monitor_results(user_id):
+        if r["topic"] not in topic_names:
+            continue
+        digests.append({
+            "topic": r["topic"],
+            "papers_found": r["papers_found"],
+            "papers_relevant": r["papers_relevant"],
+            "scan_time": r["scan_time"],
+            "papers": r["scored_papers"],  # already title/authors/url/score/reason
+        })
+    return digests
+
+
 def _monitor_scan_bg(job_id: str, topics: list, recipient: str | None,
                       max_per_source: int, relevance_threshold: float,
                       user_id: str, api_key: str | None, model: str):
     try:
-        results, email_sent, email_error, sources_failed = monitor.run_full_scan(
+        # Memory-bounded path: persists each topic as it goes, so the scan never
+        # holds every topic's results at once. We then read the persisted rows
+        # back (a cheap DB read) to build the UI payload — this shows results
+        # whether or not an email digest was requested.
+        _kept, email_sent, email_error, sources_failed = monitor.run_scan_persisted(
             topics=topics,
+            user_id=user_id,
             recipient=recipient,
             max_per_source=max_per_source,
             relevance_threshold=relevance_threshold,
-            user_id=user_id,
             api_key=api_key,
             model=model,
         )
-        digests = [
-            {
-                "topic": r.topic,
-                "papers_found": r.papers_found,
-                "papers_relevant": r.papers_relevant,
-                "scan_time": r.scan_time,
-                "papers": [
-                    {
-                        "title": sp.paper.title,
-                        "authors": sp.paper.authors,
-                        "year": sp.paper.year,
-                        "source": sp.paper.source,
-                        "abstract": sp.paper.abstract or "",
-                        "url": sp.paper.url,
-                        "pdf_url": sp.paper.pdf_url,
-                        "relevance_score": sp.relevance_score,
-                        "relevance_tier": settings.relevance_tier(sp.relevance_score)
-                                           if hasattr(settings, "relevance_tier") else None,
-                        "relevance_reason": sp.relevance_reason,
-                    }
-                    for sp in r.scored_papers
-                ],
-            }
-            for r in results
-        ]
+        digests = _persisted_digests(user_id, {t.name for t in topics})
         _finish_job(job_id, {
             "digests": digests,
             "email_requested": bool(recipient),
@@ -1579,6 +1636,26 @@ def monitor_scan(request: Request, req: MonitorRequest,
         user.id, authlib.resolve_user_api_key(user), _resolve_model_and_meter(user),
     )
     return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/api/monitor/results")
+def get_monitor_results(user: User = Depends(authlib.get_current_user)):
+    """Latest persisted scan results across all topics — a pure DB read, zero
+    external calls. Lets the monitor page render instantly on load and survive
+    restarts, instead of re-running a scan every visit."""
+    rows = db.get_monitor_results(user.id)
+    return {
+        "digests": [
+            {
+                "topic": r["topic"],
+                "papers_found": r["papers_found"],
+                "papers_relevant": r["papers_relevant"],
+                "scan_time": r["scan_time"],
+                "papers": r["scored_papers"],
+            }
+            for r in rows
+        ]
+    }
 
 
 @app.get("/api/monitor/topics")
@@ -2427,14 +2504,39 @@ class FeedbackRequest(BaseModel):
 
 
 @app.post("/api/contradictions/{rel_id}/feedback")
+@limiter.limit(settings.rl_feedback)
 def contradiction_feedback(
-    rel_id: str, req: FeedbackRequest,
+    request: Request, rel_id: str, req: FeedbackRequest,
     user: User = Depends(authlib.get_current_user),
 ):
     updated = db.set_relationship_feedback(rel_id, user.id, req.verdict)
     if not updated:
         raise HTTPException(status_code=404, detail="Relationship not found.")
     return {"id": rel_id, "verdict": req.verdict}
+
+
+# ── Hypothesis feedback ───────────────────────────────────────────────────────
+
+class HypFeedbackRequest(BaseModel):
+    # None clears the vote (toggle off); otherwise up/down.
+    verdict: str | None = Field(None, pattern="^(up|down)$")
+
+
+@app.get("/api/hypotheses/feedback")
+def list_hypothesis_feedback(user: User = Depends(authlib.get_current_user)):
+    """Return the user's 👍/👎 votes as {hypothesis_id: verdict}. Pure DB read."""
+    return db.get_hypothesis_feedback(user.id)
+
+
+@app.post("/api/hypotheses/{hyp_id}/feedback")
+@limiter.limit(settings.rl_feedback)
+def hypothesis_feedback(
+    request: Request, hyp_id: str, req: HypFeedbackRequest,
+    user: User = Depends(authlib.get_current_user),
+):
+    """Persist (or clear) a vote on a hypothesis, server-side per user."""
+    db.set_hypothesis_feedback(user.id, hyp_id, req.verdict)
+    return {"id": hyp_id, "verdict": req.verdict}
 
 
 # ── Export reports ────────────────────────────────────────────────────────────

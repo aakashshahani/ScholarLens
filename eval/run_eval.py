@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import sys
 import uuid
@@ -42,10 +43,21 @@ DEFAULT_GOLD = EVAL_DIR / "gold_claims.json"
 
 # ── Load gold data ───────────────────────────────────────────
 
+def _hash_split(entry_id: str, test_frac: float = 0.3) -> str:
+    """Deterministic train/test assignment from the id. A given pair always
+    lands in the same split without storing it, so legacy entries that predate
+    the explicit `split` field stay reproducible. ~test_frac of ids -> 'test'."""
+    h = int(hashlib.md5(entry_id.encode()).hexdigest(), 16)
+    return "test" if (h % 100) < int(test_frac * 100) else "train"
+
+
 def load_gold(path: Path) -> list[dict]:
     with open(path, encoding="utf-8-sig") as f:
         data = json.load(f)
-    # Validate
+    # Validate + backfill cross-domain/split metadata. The original 30 pairs are
+    # all one domain and carry no split; default them to 'negotiation_ai' and a
+    # deterministic hash split so newer cross-domain pairs (which DO carry these
+    # fields) can be filtered alongside them.
     for i, entry in enumerate(data):
         assert "claim_a" in entry and "claim_b" in entry, f"Entry {i} missing claim_a or claim_b"
         assert "label" in entry, f"Entry {i} missing label"
@@ -53,6 +65,8 @@ def load_gold(path: Path) -> list[dict]:
             f"Entry {i} has invalid label '{entry['label']}'. "
             f"Must be one of {RELATIONSHIP_LABELS}"
         )
+        entry.setdefault("domain", "negotiation_ai")
+        entry.setdefault("split", _hash_split(entry["id"]))
     return data
 
 
@@ -126,6 +140,21 @@ def compute_metrics(
         "total": len(gold_labels),
         "correct": correct,
     }
+
+
+def per_domain_breakdown(predictions: list[dict]) -> dict:
+    """Macro-F1 and accuracy per domain, so cross-domain generalization is
+    visible rather than hidden inside one pooled number. A model that aces the
+    negotiation set but collapses on retrieval pairs should show it here."""
+    by_domain: dict[str, dict] = defaultdict(lambda: {"gold": [], "pred": []})
+    for p in predictions:
+        by_domain[p.get("domain", "unknown")]["gold"].append(p["gold_label"])
+        by_domain[p.get("domain", "unknown")]["pred"].append(p["pred_label"])
+    out = {}
+    for dom, d in by_domain.items():
+        m = compute_metrics(d["gold"], d["pred"])
+        out[dom] = {"accuracy": m["accuracy"], "macro_f1": m["macro_f1"], "n": m["total"]}
+    return out
 
 
 def compute_category_accuracy(
@@ -247,6 +276,8 @@ def run_eval(gold: list[dict]) -> dict:
 
         prediction_record = {
             "id": entry["id"],
+            "domain": entry.get("domain", "unknown"),
+            "split": entry.get("split", "unknown"),
             "gold_label": gold_label,
             "pred_label": pred_label,
             "gold_category": gold_cat,
@@ -274,12 +305,14 @@ def run_eval(gold: list[dict]) -> dict:
     cat_accuracy = compute_category_accuracy(gold_categories, pred_categories)
     kappa = compute_cohens_kappa(gold_labels, pred_labels)
     binary = compute_binary_tension(gold_labels, pred_labels)
+    per_domain = per_domain_breakdown(all_predictions)
 
     return {
         "metrics": metrics,
         "category_accuracy": cat_accuracy,
         "cohens_kappa": kappa,
         "binary_tension": binary,
+        "per_domain": per_domain,
         "disagreements": disagreements,
         "predictions": all_predictions,
         "run_time": datetime.now(timezone.utc).isoformat(),
@@ -355,6 +388,19 @@ def main():
         default=str(DEFAULT_GOLD),
         help="Path to gold claims JSON file",
     )
+    parser.add_argument(
+        "--split",
+        choices=["all", "train", "test"],
+        default="all",
+        help="Evaluate only one split (default: all). Tune prompts on train, "
+             "report on the held-out test split to avoid overfitting the prompt.",
+    )
+    parser.add_argument(
+        "--domain",
+        type=str,
+        default=None,
+        help="Filter to a single domain (e.g. negotiation_ai, information_retrieval).",
+    )
     args = parser.parse_args()
 
     gold_path = Path(args.gold)
@@ -363,6 +409,15 @@ def main():
         sys.exit(1)
 
     gold = load_gold(gold_path)
+
+    if args.split != "all":
+        gold = [g for g in gold if g["split"] == args.split]
+    if args.domain:
+        gold = [g for g in gold if g["domain"] == args.domain]
+    if not gold:
+        print(f"No pairs match split={args.split} domain={args.domain}.")
+        sys.exit(1)
+    print(f"Evaluating {len(gold)} pairs (split={args.split}, domain={args.domain or 'all'})")
 
     if args.dry_run:
         dry_run(gold)
@@ -394,6 +449,15 @@ def main():
 
     print_per_class(results["metrics"]["per_class"])
     print_category_accuracy(results["category_accuracy"])
+
+    # Per-domain breakdown — shows whether the engine generalizes beyond the
+    # domain the prompt was tuned on, or just memorized its quirks.
+    if len(results["per_domain"]) > 1:
+        print("Per-domain (generalization):")
+        for dom, m in sorted(results["per_domain"].items()):
+            print(f"  {dom:>22}: macro-F1 {m['macro_f1']:.3f}  "
+                  f"acc {m['accuracy']:.1%}  (n={m['n']})")
+        print()
 
     # Disagreements
     n_disagree = len(results["disagreements"])

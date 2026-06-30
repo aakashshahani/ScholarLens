@@ -44,6 +44,7 @@ export default function SettingsPage() {
 
   const [digestEmail, setDigestEmail] = useState("");
   const [digestSaved, setDigestSaved] = useState(false);
+  const [digestError, setDigestError] = useState("");
   const [testDigestState, setTestDigestState] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [testDigestMsg, setTestDigestMsg] = useState("");
 
@@ -118,6 +119,12 @@ export default function SettingsPage() {
 
   async function saveDigestEmail() {
     const val = digestEmail.trim() || null;
+    // Validate before saving so a malformed address can't silently disable digests.
+    if (val && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)) {
+      setDigestError("Enter a valid email address.");
+      return;
+    }
+    setDigestError("");
     await api.updateSettings({ digestEmail: val });
     setDigestSaved(true); setTimeout(() => setDigestSaved(false), 1500);
     await refresh(); await load();
@@ -153,10 +160,14 @@ export default function SettingsPage() {
       {/* ── API key (BYOK) ── */}
       <Card className="mb-5">
         <SectionLabel>Anthropic API key</SectionLabel>
-        <p className="text-[13px] text-[var(--text-2)] mb-4 leading-[1.5]">
+        <p className="text-[13px] text-[var(--text-2)] mb-2 leading-[1.5]">
           Bring your own key to run any model, uncapped — billed to your Anthropic account.
           It&apos;s stored encrypted and never shown back. Without a key you&apos;re on the free tier below.
         </p>
+        <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer"
+          className="inline-block mb-4 text-[12.5px] text-[var(--gen)] hover:underline">
+          Get an API key from the Anthropic console →
+        </a>
 
         {hasKey && (
           <div className="flex items-center gap-3 mb-3">
@@ -279,6 +290,9 @@ export default function SettingsPage() {
             </button>
           )}
         </div>
+        {digestError && (
+          <div className="mt-2 text-[12.5px] text-[var(--contra)]">{digestError}</div>
+        )}
         {testDigestMsg && (
           <div className="mt-2 text-[12.5px]" style={{
             color: testDigestState === "sent" ? "var(--support)" : "var(--contra)"

@@ -17,9 +17,10 @@ export default function AddPapersPage() {
   const [dragging, setDragging] = useState(false);
   const [lookupId, setLookupId] = useState("");
   const [query, setQuery] = useState("");
-  const [sources, setSources] = useState(["arxiv", "semantic_scholar"]);
+  const [sources, setSources] = useState(["semantic_scholar", "openalex", "arxiv"]);
   const [results, setResults] = useState<ImportResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [importError, setImportError] = useState("");
   const [importing, setImporting] = useState<Record<number, string>>({});
 
   const handleUpload = async () => {
@@ -37,13 +38,13 @@ export default function AddPapersPage() {
       setTimeout(() => { clearInterval(poll); setUploading(false); }, 120000);
     } catch (e: any) { setUploadStatus((s) => [...s, `Error — ${e.message}`]); setUploading(false); }
   };
-  const handleLookup = async () => { if (!lookupId.trim()) return; setSearchLoading(true); try { setResults([await api.importLookup(lookupId.trim())]); } catch (e: any) { alert(e.message); } setSearchLoading(false); };
-  const handleSearch = async () => { if (!query.trim()) return; setSearchLoading(true); try { setResults(await api.importSearch(query, sources, 5)); } catch (e: any) { alert(e.message); } setSearchLoading(false); };
+  const handleLookup = async () => { if (!lookupId.trim()) return; setSearchLoading(true); setImportError(""); try { setResults([await api.importLookup(lookupId.trim())]); } catch (e: any) { setImportError(e.message || "Lookup failed."); } setSearchLoading(false); };
+  const handleSearch = async () => { if (!query.trim()) return; if (sources.length === 0) { setImportError("Select at least one source."); return; } setSearchLoading(true); setImportError(""); try { setResults(await api.importSearch(query, sources, 5)); } catch (e: any) { setImportError(e.message || "Search failed."); } setSearchLoading(false); };
   const handleAdd = async (r: ImportResult, idx: number) => { setImporting((p) => ({ ...p, [idx]: "importing" })); try { const res = await api.importAdd(r); setImporting((p) => ({ ...p, [idx]: (res as any).status === "duplicate" ? "duplicate" : "done" })); } catch (e: any) { setImporting((p) => ({ ...p, [idx]: `error` })); } };
 
   return (
     <div>
-      <PageHeader title="Add papers" subtitle="Upload a PDF or import from arXiv and Semantic Scholar." />
+      <PageHeader title="Add papers" subtitle="Upload a PDF or import from Semantic Scholar, OpenAlex, and arXiv." />
       <div className="inline-flex gap-1 mb-6 bg-[var(--surface-1)] border border-[var(--line)] p-1 rounded-[var(--r-md)]">
         {(["upload", "import"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`flex items-center gap-1.5 px-4 py-1.5 rounded-[var(--r-sm)] text-[13px] t-all ${tab === t ? "bg-[var(--surface-3)] text-[var(--text-1)] font-medium" : "text-[var(--text-3)] hover:text-[var(--text-1)]"}`}>
@@ -84,8 +85,9 @@ export default function AddPapersPage() {
               <div className="relative flex-1"><Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-3)]" /><input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSearch()} placeholder="e.g., LLM negotiation coaching feedback" className="w-full bg-[var(--surface-1)] border border-[var(--line)] rounded-[var(--r-md)] pl-10 pr-4 py-2.5 text-[13.5px] text-[var(--text-1)]" /></div>
               <PrimaryButton onClick={handleSearch} full={false}><Search size={14} /> Search</PrimaryButton>
             </div>
-            <div className="flex gap-1.5">{["arxiv", "semantic_scholar"].map((s) => <SelectChip key={s} label={s.replace("_", " ")} active={sources.includes(s)} onClick={() => setSources((p) => p.includes(s) ? p.filter((x) => x !== s) : [...p, s])} />)}</div>
+            <div className="flex gap-1.5">{["semantic_scholar", "openalex", "arxiv"].map((s) => <SelectChip key={s} label={s.replace("_", " ")} active={sources.includes(s)} onClick={() => setSources((p) => p.includes(s) ? p.filter((x) => x !== s) : [...p, s])} />)}</div>
           </Card>
+          {importError && <div className="bg-[var(--contra-dim)] border border-[var(--contra-line)] rounded-[var(--r-lg)] p-3.5 mb-3 text-[12.5px] text-[var(--contra)]">{importError}</div>}
           {searchLoading && <Spinner label="Searching databases…" />}
           {results.length > 0 && (
             <div className="space-y-2.5 fade-up">
