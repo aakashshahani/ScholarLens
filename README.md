@@ -17,8 +17,8 @@ Built because I was spending weeks manually cross-referencing papers for my own 
 - **Evidence-strength scoring** — each claim is scored on the empirical cues it states (study design, sample size, effect size, p-value, hedging) to compute which side of a contradiction is better supported — a transparent second opinion alongside the LLM's verdict
 - **Conflict-grounded hypothesis generation** — Hypotheses cite specific contradiction IDs from the database; novelty scored via cosine distance against the library (no LLM self-assessment)
 - **Interactive knowledge graph** — Custom JS force simulation (no D3), paper-colored nodes, degree-scaled, hover tooltips, zero LLM calls on re-render
-- **Semantic search with reranking** — pgvector cosine retrieval (HNSW-indexed) feeds a Voyage cross-encoder reranker that re-scores `(query, passage)` relevance; calibrated relevance tiers, no fake percentage scores. Reranking is API-based, so it adds no local model weight
-- **Research monitoring** — Watches Semantic Scholar, OpenAlex, and arXiv for new papers matching configured topics; scores candidates against library embeddings; persists results per topic and sends a Gmail digest. Runs as a standalone, memory-bounded cron worker (`jobs.run_monitor`) so the heavy scan stays off the web process
+- **Search + answer in one surface** — pgvector cosine retrieval (HNSW-indexed) feeds a Voyage cross-encoder reranker that re-scores `(query, passage)` relevance; calibrated relevance tiers, no fake percentage scores. Returns passages instantly, with an optional synthesized answer grounded in those same passages (scope to the whole library or one paper). Reranking is API-based, so it adds no local model weight
+- **Research monitoring** — Watches Semantic Scholar, OpenAlex, and arXiv for new papers matching configured topics (per-topic cadence: daily/weekly/paused); scores candidates against library embeddings; persists results per topic and sends a Gmail digest, as a standalone memory-bounded cron worker. Beyond keyword topics it surfaces **citation alerts** (new papers citing your library) and **author-follow** (new papers by authors you track) via the Semantic Scholar graph — alerts a corpus-wide search engine structurally can't give, because they're native to *your* collection
 - **Insight feed** — Pure DB read on every load; zero LLM calls regardless of library size
 - **Multi-user + BYOK** — Per-user library isolation, per-user Anthropic keys encrypted at rest with Fernet. Auth is pluggable via `AUTH_PROVIDER`: built-in bcrypt + httpOnly session cookies (default), or Clerk (JWT verification with link-by-identity that preserves an existing library)
 
@@ -186,13 +186,17 @@ Relevance is still reported as a tier rather than a percentage, using thresholds
 
 The previous implementation showed `(1 - cosine_distance) * 100` as a percentage. This implied calibrated precision that doesn't exist — tiers are honest about what the model actually knows. The raw distance is still returned (`relevance_score`) so the frontend can sort or filter, but it isn't shown as a headline number.
 
+**One surface, two depths.** A query first returns ranked passages (fast, no LLM); an *Answer this* action then synthesizes a short answer over those passages via the single-pass RAG endpoint, with the sources shown as grounding. A scope selector restricts both retrieval and the answer to the whole library or a single paper. (Search and the former separate Ask tab are now one surface — a researcher has a question, not a mode to pick.)
+
 ---
 
 ### 9. Research monitoring
 
 The monitoring agent searches Semantic Scholar, OpenAlex, and arXiv (in that priority order) for papers matching configured keywords, filters out papers already in the library by title-key deduplication, and scores each candidate by embedding its abstract against the library's existing chunks via pgvector. Candidate abstracts are batch-embedded in one Voyage API call per topic scan. Results are grouped by topic with relevance tiers. Per-source failures are reported honestly (a `SourceUnavailable` exception and a `sources_failed` field surface an arXiv-down banner rather than silently returning empty results), and queries are sanitised before dispatch. When Gmail credentials are configured, the agent sends an HTML digest email via SMTP after each scan, with honest `email_sent`/`email_error` status reporting.
 
-**Bounded, off-process execution.** The scan streams through topics one at a time, persisting each topic's results to a `monitor_results` table before moving on — so peak memory never holds every topic's results at once, and the page loads instantly from the DB (`GET /api/monitor/results`) rather than re-scanning. The whole scan runs as a standalone, memory-bounded cron worker (`python -m jobs.run_monitor`) so the heavy work stays off the web process — the source of the original OOM kills on Render's free tier. An in-process APScheduler fallback exists for single-dyno deploys, gated by `ENABLE_INPROCESS_MONITOR`.
+**Bounded, off-process execution.** The scan streams through topics one at a time, persisting each topic's results to a `monitor_results` table before moving on — so peak memory never holds every topic's results at once, and the page loads instantly from the DB (`GET /api/monitor/results`) rather than re-scanning. The whole scan runs as a standalone, memory-bounded cron worker (`python -m jobs.run_monitor`) so the heavy work stays off the web process — the source of the original OOM kills on Render's free tier. An in-process APScheduler fallback exists for single-dyno deploys, gated by `ENABLE_INPROCESS_MONITOR`. Each saved topic carries a **cadence** (daily / weekly / paused) that the worker honors, so high-traffic topics don't flood the digest.
+
+**Citation alerts & author-follow.** Beyond keyword topics, the monitor surfaces two alerts that are native to a *personal* library and have no equivalent in a corpus-wide search tool: papers that newly **cite** the user's library (each library paper with a DOI or arXiv id is resolved on the Semantic Scholar citation graph, then its citers are pulled and deduped against the library) and new papers by **followed authors** (resolved by name via S2 author search). Both run as background jobs and feed the same one-click "add to library" path.
 
 ---
 
@@ -418,6 +422,10 @@ All endpoints except `/api/health` and the `/api/auth/{register,login,logout}` r
 | POST | `/api/monitor/scan` | Run monitoring scan (background job) with optional email digest |
 | GET | `/api/monitor/results` | Latest persisted scan results — pure DB read |
 | GET/POST/DELETE | `/api/monitor/topics` | List, create, or delete saved monitor topics |
+| PATCH | `/api/monitor/topics/{id}` | Update a topic's cadence (daily/weekly/paused) or active state |
+| GET/POST/DELETE | `/api/monitor/authors` | List, follow, or unfollow authors |
+| POST | `/api/monitor/citations` | Find recent papers citing your library *(background job)* |
+| POST | `/api/monitor/author-scan` | Find new papers by followed authors *(background job)* |
 | POST | `/api/monitor/test-digest` | Trigger an immediate scan + send a test digest |
 | POST | `/api/admin/fix-abstracts` | Re-fetch truncated abstracts *(admin — token-gated)* |
 
@@ -429,7 +437,7 @@ Full interactive docs at `/api/docs`.
 
 **Done**
 
-Core pipeline: 6-type parallel analysis, two-stage contradiction detection (macro-F1 0.788, kappa 0.683 on the negotiation-AI set; gold set expanded to 42 pairs across 3 domains with a train/test split), computed evidence-strength scoring, evidence-grounded claim extraction, BM25+dense hybrid retrieval, hypothesis generation with batch novelty scoring and persisted feedback, research monitor with Gmail digest, semantic search with HNSW-indexed retrieval + cross-encoder reranking and relevance tiers, insight feed as a pure DB read, read-only knowledge graph with gated compute path, Semantic Scholar + OpenAlex + arXiv import with dedup.
+Core pipeline: 6-type parallel analysis, two-stage contradiction detection (macro-F1 0.788, kappa 0.683 on the negotiation-AI set; gold set expanded to 42 pairs across 3 domains with a train/test split), computed evidence-strength scoring, evidence-grounded claim extraction, BM25+dense hybrid retrieval, hypothesis generation with batch novelty scoring and persisted feedback, research monitor (keyword topics + citation alerts + author-follow, per-topic cadence) with Gmail digest, unified search-and-answer with HNSW-indexed retrieval + cross-encoder reranking and on-demand synthesis, insight feed as a pure DB read, read-only knowledge graph with debate clusters and gated compute path, Semantic Scholar + OpenAlex + arXiv import with dedup.
 
 Security and multi-user: pluggable auth — email + password (bcrypt, httpOnly session cookies) or Clerk JWT verification with verified-email linking — per-user library scoping and IDOR-safe ownership checks, BYOK with Fernet key encryption, model selection with server-side ceiling, upload hardening (magic-byte check, size cap, path-traversal-safe UUID filenames), per-IP rate limiting, parameterized queries throughout.
 
@@ -439,7 +447,7 @@ Infrastructure: migrated from SQLite + ChromaDB to Supabase Postgres + pgvector 
 
 **Later**
 - Apply the cross-encoder reranker to the contradiction Stage-1 candidate pairs (search reranking is already shipped)
-- Merge Search + Ask into one surface; monitor citation-alerts + author-follow
+- Inline PDF viewer with passage highlighting; "lit-review export" composing conflicts + evidence-strength + hypotheses
 - Demo video
 
 ---
