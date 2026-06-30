@@ -1011,6 +1011,20 @@ def search_papers(request: Request, req: SearchRequest,
 import hashlib as _hashlib
 _ask_cache: dict[str, dict] = {}
 _ASK_CACHE_TTL = 3600  # 1 hour
+_ASK_CACHE_MAX = 500   # hard cap so the cache can't grow without bound
+
+
+def _prune_ask_cache() -> None:
+    """Evict expired entries, then cap total size (oldest first). Without this
+    the in-memory ask cache grows by one entry per unique question for the life
+    of the process — a slow leak on the 512MB tier."""
+    now = _time.time()
+    for k in [k for k, v in _ask_cache.items() if now - v.get("ts", 0) > _ASK_CACHE_TTL]:
+        _ask_cache.pop(k, None)
+    if len(_ask_cache) > _ASK_CACHE_MAX:
+        oldest = sorted(_ask_cache, key=lambda k: _ask_cache[k].get("ts", 0))
+        for k in oldest[: len(_ask_cache) - _ASK_CACHE_MAX]:
+            _ask_cache.pop(k, None)
 
 # ── Background job store ──────────────────────────────────────────────────
 # In-memory only — resets on Render restart. Acceptable for the free tier
@@ -1081,6 +1095,7 @@ def _ask_bg(job_id: str, question: str, paper_id: str | None,
             return_sources=True,
         )
         _ask_cache[cache_key] = {"answer": answer, "sources": sources, "ts": _time.time()}
+        _prune_ask_cache()
         _finish_job(job_id, {"answer": answer, "sources": sources, "cached": False})
     except Exception as e:
         _fail_job(job_id, str(e))

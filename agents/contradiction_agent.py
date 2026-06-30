@@ -275,6 +275,15 @@ class ContradictionAgent:
         if len(all_claims) < 2:
             return []
 
+        # Bound the working set so the O(n²) similarity matrix can't blow memory
+        # on a pathologically large library. 3000 claims → a ~36MB float32 matrix;
+        # far above any realistic free-tier corpus (~250+ papers). At that scale
+        # the user should scope the scan to specific papers anyway.
+        MAX_CLAIMS = 3000
+        if len(all_claims) > MAX_CLAIMS:
+            print(f"[contradiction] capping Stage-1 from {len(all_claims)} to {MAX_CLAIMS} claims")
+            all_claims = all_claims[:MAX_CLAIMS]
+
         texts = [c.text for c in all_claims]
 
         # ── Dense pass ────────────────────────────────────────

@@ -516,6 +516,10 @@ class PaperImporter:
 
         if not failed:
             with _cache_lock:
+                # Cap the in-memory search cache so it can't grow without bound
+                # over the life of the process (one entry per unique query).
+                if len(_cache) >= 256:
+                    _cache.clear()
                 _cache[cache_key] = deduped
         return deduped, failed
 
