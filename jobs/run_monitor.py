@@ -26,6 +26,7 @@ Env:
 import os
 import sys
 import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # Allow `python jobs/run_monitor.py` as well as `python -m jobs.run_monitor`.
@@ -33,6 +34,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db import Database
 from agents.monitoring_agent import MonitoringAgent, MonitorTopic
+
+
+def _is_due(topic) -> bool:
+    """Whether a topic should scan on this run, given its cadence.
+    paused -> never; weekly -> only if not scanned in the last 7 days; daily -> always."""
+    cadence = getattr(topic, "cadence", "daily")
+    if cadence == "paused":
+        return False
+    if cadence == "weekly":
+        last = getattr(topic, "last_scanned_at", None)
+        if not last:
+            return True
+        try:
+            return datetime.fromisoformat(last) < datetime.now(timezone.utc) - timedelta(days=7)
+        except ValueError:
+            return True
+    return True
 
 
 def run() -> int:
@@ -48,7 +66,7 @@ def run() -> int:
 
     scanned = 0
     for user in users:
-        active = [t for t in db.list_monitor_topics(user.id) if t.is_active]
+        active = [t for t in db.list_monitor_topics(user.id) if t.is_active and _is_due(t)]
         if not active:
             continue
         topics = [

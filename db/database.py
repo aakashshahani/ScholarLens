@@ -225,6 +225,7 @@ class MonitorTopicRow:
     is_active: bool
     last_scanned_at: str | None
     created_at: str
+    cadence: str = "daily"
 
     @staticmethod
     def new_id() -> str:
@@ -449,9 +450,23 @@ class Database:
                 UNIQUE(user_id, hypothesis_id)
             )
         """)
+        # Authors the user follows — the monitor surfaces their new papers.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS followed_authors (
+                id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name        TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                UNIQUE(user_id, name)
+            )
+        """)
         # Migrations: add columns to existing tables
         cur.execute(
             "ALTER TABLE relationships ADD COLUMN IF NOT EXISTS user_feedback TEXT"
+        )
+        # Per-topic scan cadence (daily / weekly / paused), honored by the worker.
+        cur.execute(
+            "ALTER TABLE monitor_topics ADD COLUMN IF NOT EXISTS cadence TEXT NOT NULL DEFAULT 'daily'"
         )
         # External identity link for Clerk auth. Nullable so password-auth rows
         # are untouched; partial unique index lets many NULLs coexist while
@@ -468,7 +483,7 @@ class Database:
             "users", "papers", "chunks", "analysis_results", "claims",
             "relationships", "hypothesis_cache", "sessions",
             "monitor_topics", "paper_tags", "monitor_results",
-            "hypothesis_feedback",
+            "hypothesis_feedback", "followed_authors",
         ]:
             cur.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
         # Indexes
@@ -1426,6 +1441,7 @@ class Database:
             is_active=r["is_active"],
             last_scanned_at=r.get("last_scanned_at"),
             created_at=r["created_at"],
+            cadence=r.get("cadence", "daily"),
         )
 
     def create_monitor_topic(
@@ -1434,6 +1450,7 @@ class Database:
         name: str,
         keywords: list[str],
         sources: list[str],
+        cadence: str = "daily",
     ) -> MonitorTopicRow:
         topic_id = MonitorTopicRow.new_id()
         now = datetime.now(timezone.utc).isoformat()
@@ -1441,11 +1458,11 @@ class Database:
         cur = conn.cursor()
         cur.execute(
             """INSERT INTO monitor_topics
-               (id, user_id, name, keywords, sources, is_active, created_at)
-               VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, true, %s)
+               (id, user_id, name, keywords, sources, is_active, created_at, cadence)
+               VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, true, %s, %s)
                RETURNING *""",
             (topic_id, user_id, name,
-             json.dumps(keywords), json.dumps(sources), now),
+             json.dumps(keywords), json.dumps(sources), now, cadence),
         )
         row = cur.fetchone()
         conn.commit()
@@ -1472,6 +1489,86 @@ class Database:
         cur.execute(
             "DELETE FROM monitor_topics WHERE id = %s AND user_id = %s RETURNING id",
             (topic_id, user_id),
+        )
+        deleted = cur.fetchone() is not None
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+        return deleted
+
+    def update_monitor_topic(self, topic_id: str, user_id: str,
+                             cadence: str | None = None, is_active: bool | None = None) -> bool:
+        """Update a topic's cadence and/or active state. Ownership-checked."""
+        sets, params = [], []
+        if cadence is not None:
+            sets.append("cadence = %s"); params.append(cadence)
+        if is_active is not None:
+            sets.append("is_active = %s"); params.append(is_active)
+        if not sets:
+            return False
+        params += [topic_id, user_id]
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE monitor_topics SET {', '.join(sets)} WHERE id = %s AND user_id = %s RETURNING id",
+            params,
+        )
+        ok = cur.fetchone() is not None
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+        return ok
+
+    # ── Citation-trackable papers + followed authors ──────────────────────────
+
+    def papers_with_external_refs(self, user_id: str) -> list[dict]:
+        """Library papers that carry a DOI or arXiv id — the ones the citation
+        monitor can resolve on Semantic Scholar."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, title, doi, arxiv_id FROM papers "
+            "WHERE user_id = %s AND (doi IS NOT NULL OR arxiv_id IS NOT NULL)",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        return [{"id": r["id"], "title": r["title"], "doi": r["doi"], "arxiv_id": r["arxiv_id"]} for r in rows]
+
+    def add_followed_author(self, user_id: str, name: str) -> bool:
+        name = name.strip()[:120]
+        if not name:
+            return False
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO followed_authors (id, user_id, name, created_at)
+               VALUES (%s, %s, %s, %s) ON CONFLICT (user_id, name) DO NOTHING
+               RETURNING id""",
+            (str(uuid.uuid4()), user_id, name, datetime.now(timezone.utc).isoformat()),
+        )
+        created = cur.fetchone() is not None
+        conn.commit()
+        cur.close()
+        self._put_conn(conn)
+        return created
+
+    def list_followed_authors(self, user_id: str) -> list[str]:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM followed_authors WHERE user_id = %s ORDER BY name ASC", (user_id,))
+        rows = cur.fetchall()
+        cur.close()
+        self._put_conn(conn)
+        return [r["name"] for r in rows]
+
+    def remove_followed_author(self, user_id: str, name: str) -> bool:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM followed_authors WHERE user_id = %s AND name = %s RETURNING id",
+            (user_id, name),
         )
         deleted = cur.fetchone() is not None
         conn.commit()

@@ -148,9 +148,24 @@ export interface MonitorTopic {
   keywords: string[];
   sources: string[];
   is_active: boolean;
+  cadence: "daily" | "weekly" | "paused";
   last_scanned_at: string | null;
   created_at: string;
 }
+
+// A new paper surfaced by the citation/author monitor.
+export interface AlertPaper {
+  title: string;
+  authors: string[];
+  year: number | null;
+  abstract: string;
+  url: string;
+  pdf_url: string | null;
+  source: string;
+  citation_count: number | null;
+}
+export interface CitationGroup { cited_paper_id: string; cited_title: string; citers: AlertPaper[]; }
+export interface AuthorGroup { author: string; papers: AlertPaper[]; }
 
 export interface MonitorDigest {
   topic: string;
@@ -552,20 +567,47 @@ export const api = {
   listMonitorTopics: () =>
     apiFetch<MonitorTopic[]>("/api/monitor/topics"),
 
-  createMonitorTopic: (topic: { name: string; keywords: string[]; sources?: string[] }) =>
+  createMonitorTopic: (topic: { name: string; keywords: string[]; sources?: string[]; cadence?: string }) =>
     apiFetch<MonitorTopic>("/api/monitor/topics", {
       method: "POST",
       body: JSON.stringify({
         name: topic.name,
         keywords: topic.keywords,
         sources: topic.sources ?? ["semantic_scholar", "openalex", "arxiv"],
+        cadence: topic.cadence ?? "daily",
       }),
+    }),
+
+  updateMonitorTopic: (topicId: string, patch: { cadence?: string; is_active?: boolean }) =>
+    apiFetch<{ status: string; id: string }>(`/api/monitor/topics/${topicId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
     }),
 
   deleteMonitorTopic: (topicId: string) =>
     apiFetch<{ status: string; id: string }>(`/api/monitor/topics/${topicId}`, {
       method: "DELETE",
     }),
+
+  // ── Followed authors + citation / author alerts ──────────
+  listFollowedAuthors: () =>
+    apiFetch<{ authors: string[] }>("/api/monitor/authors"),
+
+  followAuthor: (name: string) =>
+    apiFetch<{ name: string; created: boolean }>("/api/monitor/authors", {
+      method: "POST", body: JSON.stringify({ name }),
+    }),
+
+  unfollowAuthor: (name: string) =>
+    apiFetch<{ status: string; name: string }>(`/api/monitor/authors/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+
+  scanCitations: () =>
+    apiFetch<{ job_id: string; status: string }>("/api/monitor/citations", { method: "POST" }),
+
+  scanAuthors: () =>
+    apiFetch<{ job_id: string; status: string }>("/api/monitor/author-scan", { method: "POST" }),
 
   testDigest: () =>
     apiFetch<{

@@ -390,6 +390,62 @@ class SemanticScholarSource:
 
         return [self._to_result(p) for p in data.get("data", []) if p.get("title")]
 
+    def citing_papers(self, paper_ref: str, max_results: int = 10) -> list[ImportResult]:
+        """Papers that cite the given paper. `paper_ref` is any S2-resolvable id:
+        'DOI:10.x/y', 'ARXIV:1234.5678', or a raw S2 paperId. Newest first."""
+        _wait("s2", 1.5)
+        try:
+            resp = _session.get(
+                f"{self.BASE}/paper/{paper_ref}/citations",
+                params={"fields": self.FIELDS, "limit": max_results},
+                headers=self._headers(),
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"S2 citations lookup failed for {paper_ref}: {e}")
+            raise SourceUnavailable(str(e)) from e
+        out = []
+        for item in data.get("data", []):
+            citing = item.get("citingPaper") or {}
+            if citing.get("title"):
+                out.append(self._to_result(citing))
+        # Newest first so recent citers surface.
+        out.sort(key=lambda r: r.year or 0, reverse=True)
+        return out
+
+    def author_recent_papers(self, name: str, max_results: int = 10) -> list[ImportResult]:
+        """Recent papers by an author, resolved by name via S2 author search."""
+        _wait("s2", 1.5)
+        try:
+            sr = _session.get(
+                f"{self.BASE}/author/search",
+                params={"query": name, "fields": "authorId,name", "limit": 1},
+                headers=self._headers(), timeout=15,
+            )
+            sr.raise_for_status()
+            authors = sr.json().get("data", [])
+        except Exception as e:
+            raise SourceUnavailable(str(e)) from e
+        if not authors or not authors[0].get("authorId"):
+            return []
+        author_id = authors[0]["authorId"]
+        _wait("s2", 1.5)
+        try:
+            pr = _session.get(
+                f"{self.BASE}/author/{author_id}/papers",
+                params={"fields": self.FIELDS, "limit": max_results},
+                headers=self._headers(), timeout=15,
+            )
+            pr.raise_for_status()
+            papers = pr.json().get("data", [])
+        except Exception as e:
+            raise SourceUnavailable(str(e)) from e
+        results = [self._to_result(p) for p in papers if p.get("title")]
+        results.sort(key=lambda r: r.year or 0, reverse=True)
+        return results
+
     def fetch_by_doi(self, doi: str) -> ImportResult | None:
         _wait("s2", 1.5)
         try:

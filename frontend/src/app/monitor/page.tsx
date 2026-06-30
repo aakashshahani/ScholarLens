@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, MonitorDigest, MonitorTopic } from "@/lib/api";
+import { api, MonitorDigest, MonitorTopic, CitationGroup, AuthorGroup, AlertPaper } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, SectionLabel } from "@/components/ui";
-import { Radar, Plus, X, ExternalLink, AlertCircle, CheckCircle2, Clock, BookPlus, Loader2 } from "lucide-react";
+import { Radar, Plus, X, ExternalLink, AlertCircle, CheckCircle2, Clock, BookPlus, Loader2, Quote, Users } from "lucide-react";
 import { cache } from "@/lib/cache";
 
 // Local draft type — what the user is building before saving
@@ -26,6 +26,40 @@ function formatLastScanned(iso: string | null): string {
   return `${diffD}d ago`;
 }
 
+function AlertCard({ p, addingIds, onAdd }: {
+  p: AlertPaper;
+  addingIds: Record<string, "loading" | "done" | "error" | "dup">;
+  onAdd: (p: any) => void;
+}) {
+  const status = addingIds[p.title];
+  return (
+    <div className="flex items-start justify-between gap-3 p-3 rounded-[var(--r-md)] bg-[var(--surface-1)] border border-[var(--line)]">
+      <div className="flex-1 min-w-0">
+        <div className="text-[13px] font-medium text-[var(--text-1)] leading-snug">{p.title}</div>
+        <div className="text-[11px] text-[var(--text-3)] mt-0.5">
+          {(p.authors || []).slice(0, 3).join(", ")}{(p.authors?.length || 0) > 3 ? ` +${p.authors.length - 3}` : ""}
+          {p.year ? ` · ${p.year}` : ""}{p.citation_count != null ? ` · ${p.citation_count} cited` : ""}
+        </div>
+      </div>
+      <div className="flex items-center gap-1.5 shrink-0">
+        {status === "done" ? (
+          <span className="text-[11px] text-[var(--support)] flex items-center gap-1"><CheckCircle2 size={12} /> Added</span>
+        ) : status === "dup" ? (
+          <span className="text-[11px] text-[var(--text-3)]">In library</span>
+        ) : status === "error" ? (
+          <span className="text-[11px] text-[var(--contra)]">Failed</span>
+        ) : (
+          <button onClick={() => onAdd(p)} disabled={status === "loading"}
+            className="flex items-center gap-1 px-2 py-1 rounded-[var(--r-sm)] border border-[var(--line)] text-[11px] text-[var(--text-2)] t-all hover:border-[var(--gen-line)] hover:text-[var(--gen)] disabled:opacity-40">
+            {status === "loading" ? <Loader2 size={11} className="animate-spin" /> : <BookPlus size={11} />} Add
+          </button>
+        )}
+        {p.url && <a href={p.url} target="_blank" rel="noopener noreferrer" className="p-1 text-[var(--text-3)] hover:text-[var(--gen)] t-all"><ExternalLink size={13} /></a>}
+      </div>
+    </div>
+  );
+}
+
 export default function MonitorPage() {
   // Saved topics (from DB)
   const [savedTopics, setSavedTopics] = useState<MonitorTopic[]>([]);
@@ -44,6 +78,14 @@ export default function MonitorPage() {
   const [error, setError] = useState("");
   const [showConfig, setShowConfig] = useState(true);
   const [savingTopic, setSavingTopic] = useState(false);
+
+  // Alerts: followed authors + citation/author scans
+  const [followed, setFollowed] = useState<string[]>([]);
+  const [authorInput, setAuthorInput] = useState("");
+  const [citeGroups, setCiteGroups] = useState<CitationGroup[] | null>(null);
+  const [authorGroups, setAuthorGroups] = useState<AuthorGroup[] | null>(null);
+  const [citeLoading, setCiteLoading] = useState(false);
+  const [authorLoading, setAuthorLoading] = useState(false);
 
   // Load saved topics + persisted results on mount.
   // Stale-while-revalidate: paint localStorage instantly, then replace with the
@@ -71,6 +113,8 @@ export default function MonitorPage() {
         setLoadingTopics(false);
       })
       .catch(() => setLoadingTopics(false));
+
+    api.listFollowedAuthors().then(({ authors }) => setFollowed(authors)).catch(() => {});
   }, []);
 
   const addTopic = async () => {
@@ -99,6 +143,54 @@ export default function MonitorPage() {
     } catch (e: any) {
       setError(e.message);
     }
+  };
+
+  const setCadence = async (topicId: string, cadence: "daily" | "weekly" | "paused") => {
+    setSavedTopics((prev) => prev.map((t) => t.id === topicId ? { ...t, cadence } : t));
+    try { await api.updateMonitorTopic(topicId, { cadence }); }
+    catch (e: any) { setError(e.message); }
+  };
+
+  const addAuthor = async () => {
+    const name = authorInput.trim();
+    if (!name) return;
+    setFollowed((prev) => prev.includes(name) ? prev : [...prev, name].sort());
+    setAuthorInput("");
+    try { await api.followAuthor(name); } catch (e: any) { setError(e.message); }
+  };
+
+  const removeAuthor = async (name: string) => {
+    setFollowed((prev) => prev.filter((a) => a !== name));
+    try { await api.unfollowAuthor(name); } catch { /* ignore */ }
+  };
+
+  const runCitationScan = async () => {
+    setCiteLoading(true); setError(""); setCiteGroups(null);
+    try {
+      const { job_id } = await api.scanCitations();
+      const poll = setInterval(async () => {
+        try {
+          const job = await api.getJob<{ groups: CitationGroup[] }>(job_id);
+          if (job.status === "done" && job.result) { clearInterval(poll); setCiteGroups(job.result.groups); setCiteLoading(false); }
+          else if (job.status === "error") { clearInterval(poll); setError(job.error || "Citation scan failed."); setCiteLoading(false); }
+        } catch (e: any) { clearInterval(poll); setError(e.message); setCiteLoading(false); }
+      }, 2500);
+    } catch (e: any) { setError(e.message); setCiteLoading(false); }
+  };
+
+  const runAuthorScan = async () => {
+    if (followed.length === 0) { setError("Follow an author first."); return; }
+    setAuthorLoading(true); setError(""); setAuthorGroups(null);
+    try {
+      const { job_id } = await api.scanAuthors();
+      const poll = setInterval(async () => {
+        try {
+          const job = await api.getJob<{ groups: AuthorGroup[] }>(job_id);
+          if (job.status === "done" && job.result) { clearInterval(poll); setAuthorGroups(job.result.groups); setAuthorLoading(false); }
+          else if (job.status === "error") { clearInterval(poll); setError(job.error || "Author scan failed."); setAuthorLoading(false); }
+        } catch (e: any) { clearInterval(poll); setError(e.message); setAuthorLoading(false); }
+      }, 2500);
+    } catch (e: any) { setError(e.message); setAuthorLoading(false); }
   };
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -266,8 +358,8 @@ export default function MonitorPage() {
               </button>
             </div>
             <div className="text-[11px] text-[var(--text-3)] mt-1.5">
-              Topics are saved permanently and scanned daily by the scheduler.
-              Sources: Semantic Scholar, OpenAlex (250M+ works), and arXiv.
+              Topics are saved permanently and scanned on each topic's cadence
+              (daily, weekly, or paused). Sources: Semantic Scholar, OpenAlex (250M+ works), and arXiv.
             </div>
           </Card>
 
@@ -290,8 +382,15 @@ export default function MonitorPage() {
                         </div>
                       )}
                     </div>
+                    <select value={t.cadence} onChange={(e) => setCadence(t.id, e.target.value as "daily" | "weekly" | "paused")}
+                      title="Scan cadence"
+                      className="text-[11px] bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-sm)] px-2 py-1 text-[var(--text-2)] focus:outline-none focus:border-[var(--gen-line)] shrink-0">
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="paused">Paused</option>
+                    </select>
                     <button onClick={() => removeTopic(t.id)}
-                      className="p-1.5 rounded text-[var(--text-3)] hover:text-[var(--contra)] hover:bg-[var(--surface-3)] t-all">
+                      className="p-1.5 rounded text-[var(--text-3)] hover:text-[var(--contra)] hover:bg-[var(--surface-3)] t-all shrink-0">
                       <X size={14} />
                     </button>
                   </div>
@@ -328,6 +427,77 @@ export default function MonitorPage() {
           </div>
         </div>
       )}
+
+      {/* ── Citation & author alerts ── */}
+      <Card className="mb-6">
+        <SectionLabel>Citation &amp; author alerts</SectionLabel>
+        <p className="text-[12px] text-[var(--text-3)] mb-3 leading-relaxed">
+          Find new papers <span className="text-[var(--text-1)]">citing your library</span> or written by authors you follow — alerts a global search engine can&apos;t give you, because they&apos;re native to <em>your</em> collection.
+        </p>
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <button onClick={runCitationScan} disabled={citeLoading}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--gen-line)] bg-[var(--gen-dim)] text-[var(--gen)] text-[12.5px] font-medium t-all hover:opacity-90 disabled:opacity-50">
+            {citeLoading ? <Loader2 size={14} className="animate-spin" /> : <Quote size={14} />}
+            {citeLoading ? "Scanning citations…" : "Find papers citing my library"}
+          </button>
+          <button onClick={runAuthorScan} disabled={authorLoading || followed.length === 0}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--r-md)] border border-[var(--line)] bg-[var(--surface-2)] text-[12.5px] text-[var(--text-2)] t-all hover:border-[var(--line-2)] hover:text-[var(--text-1)] disabled:opacity-40">
+            {authorLoading ? <Loader2 size={14} className="animate-spin" /> : <Users size={14} />}
+            {authorLoading ? "Scanning authors…" : "New papers by followed authors"}
+          </button>
+        </div>
+
+        {/* Follow authors */}
+        <div className="text-[11px] text-[var(--text-4)] uppercase tracking-wider mb-1.5">Following</div>
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {followed.length === 0 && <span className="text-[12px] text-[var(--text-4)]">No authors followed yet.</span>}
+          {followed.map((a) => (
+            <span key={a} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11.5px] bg-[var(--surface-3)] text-[var(--text-2)]">
+              {a}
+              <button onClick={() => removeAuthor(a)} className="hover:text-[var(--contra)] ml-0.5 t-all"><X size={10} /></button>
+            </span>
+          ))}
+        </div>
+        <form onSubmit={(e) => { e.preventDefault(); addAuthor(); }} className="flex gap-1.5 max-w-[380px]">
+          <input value={authorInput} onChange={(e) => setAuthorInput(e.target.value)}
+            placeholder="Follow an author by name…"
+            className="flex-1 px-2.5 py-1.5 text-[12.5px] bg-[var(--surface-1)] border border-[var(--line)] rounded-[var(--r-sm)] text-[var(--text-1)] placeholder-[var(--text-4)] focus:outline-none focus:border-[var(--gen-line)]" />
+          <button type="submit" disabled={!authorInput.trim()}
+            className="flex items-center px-2.5 py-1.5 rounded-[var(--r-sm)] bg-[var(--gen-dim)] border border-[var(--gen-line)] text-[var(--gen)] text-[12px] font-medium disabled:opacity-40"><Plus size={13} /></button>
+        </form>
+
+        {/* Citation results */}
+        {citeGroups && (
+          <div className="mt-4 space-y-3">
+            {citeGroups.length === 0 ? (
+              <div className="text-[12.5px] text-[var(--text-3)]">No new papers citing your library right now.</div>
+            ) : citeGroups.map((g) => (
+              <div key={g.cited_paper_id}>
+                <div className="text-[11.5px] text-[var(--text-3)] mb-1.5 clamp-1">
+                  <span className="text-[var(--gen)] font-medium">Cited by</span> · {g.cited_title}
+                </div>
+                <div className="space-y-2">{g.citers.map((p, i) => <AlertCard key={i} p={p} addingIds={addingIds} onAdd={addToLibrary} />)}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Author results */}
+        {authorGroups && (
+          <div className="mt-4 space-y-3">
+            {authorGroups.length === 0 ? (
+              <div className="text-[12.5px] text-[var(--text-3)]">No new papers from followed authors.</div>
+            ) : authorGroups.map((g) => (
+              <div key={g.author}>
+                <div className="text-[11.5px] text-[var(--text-3)] mb-1.5">
+                  <span className="text-[var(--gen)] font-medium">New from</span> · {g.author}
+                </div>
+                <div className="space-y-2">{g.papers.map((p, i) => <AlertCard key={i} p={p} addingIds={addingIds} onAdd={addToLibrary} />)}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
 
       {results.length > 0 && (
         <div className="fade-up space-y-6">

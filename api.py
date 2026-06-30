@@ -392,6 +392,7 @@ class MonitorTopicRequest(BaseModel):
         default=["semantic_scholar", "openalex", "arxiv"],
         max_length=3,
     )
+    cadence: str = Field("daily", pattern="^(daily|weekly|paused)$")
 
     @field_validator("sources", mode="before")
     @classmethod
@@ -1669,6 +1670,7 @@ def list_monitor_topics(user: User = Depends(authlib.get_current_user)):
             "keywords": t.keywords,
             "sources": t.sources,
             "is_active": t.is_active,
+            "cadence": t.cadence,
             "last_scanned_at": t.last_scanned_at,
             "created_at": t.created_at,
         }
@@ -1689,11 +1691,13 @@ def create_monitor_topic(
     keywords = [k.strip() for k in req.keywords if k.strip()]
     if not keywords:
         raise HTTPException(status_code=400, detail="At least one keyword is required.")
+    cadence = req.cadence if req.cadence in ("daily", "weekly", "paused") else "daily"
     topic = db.create_monitor_topic(
         user_id=user.id,
         name=req.name.strip(),
         keywords=keywords,
         sources=sources,
+        cadence=cadence,
     )
     return {
         "id": topic.id,
@@ -1701,9 +1705,27 @@ def create_monitor_topic(
         "keywords": topic.keywords,
         "sources": topic.sources,
         "is_active": topic.is_active,
+        "cadence": topic.cadence,
         "last_scanned_at": topic.last_scanned_at,
         "created_at": topic.created_at,
     }
+
+
+class TopicUpdateRequest(BaseModel):
+    cadence: Optional[str] = Field(None, pattern="^(daily|weekly|paused)$")
+    is_active: Optional[bool] = None
+
+
+@app.patch("/api/monitor/topics/{topic_id}")
+def update_monitor_topic(
+    topic_id: str, req: TopicUpdateRequest,
+    user: User = Depends(authlib.get_current_user),
+):
+    """Update a topic's scan cadence (daily/weekly/paused) and/or active state."""
+    ok = db.update_monitor_topic(topic_id, user.id, cadence=req.cadence, is_active=req.is_active)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Topic not found.")
+    return {"status": "updated", "id": topic_id}
 
 
 @app.delete("/api/monitor/topics/{topic_id}")
@@ -1716,6 +1738,73 @@ def delete_monitor_topic(
     if not deleted:
         raise HTTPException(status_code=404, detail="Topic not found.")
     return {"status": "deleted", "id": topic_id}
+
+
+# ── Followed authors + citation/author alerts ─────────────────────────────────
+
+class FollowAuthorRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+
+
+@app.get("/api/monitor/authors")
+def list_followed_authors(user: User = Depends(authlib.get_current_user)):
+    return {"authors": db.list_followed_authors(user.id)}
+
+
+@app.post("/api/monitor/authors")
+def follow_author(req: FollowAuthorRequest, user: User = Depends(authlib.get_current_user)):
+    created = db.add_followed_author(user.id, req.name)
+    return {"name": req.name.strip(), "created": created}
+
+
+@app.delete("/api/monitor/authors/{name}")
+def unfollow_author(name: str, user: User = Depends(authlib.get_current_user)):
+    deleted = db.remove_followed_author(user.id, name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Author not followed.")
+    return {"status": "removed", "name": name}
+
+
+def _citations_bg(job_id: str, user_id: str):
+    try:
+        groups = monitor.scan_citations(user_id)
+        _finish_job(job_id, {"groups": groups})
+    except Exception as e:  # noqa: BLE001
+        _fail_job(job_id, str(e))
+
+
+@app.post("/api/monitor/citations")
+@limiter.limit(settings.rl_monitor)
+def scan_citations(request: Request, background_tasks: BackgroundTasks,
+                   user: User = Depends(authlib.get_current_user)):
+    """Find recent papers citing the user's library — background job."""
+    existing = _get_or_reuse_job(user.id, "citations")
+    if existing:
+        return {"job_id": existing, "status": "running"}
+    job_id = _new_job(user.id, "citations")
+    background_tasks.add_task(_citations_bg, job_id, user.id)
+    return {"job_id": job_id, "status": "running"}
+
+
+def _author_scan_bg(job_id: str, user_id: str):
+    try:
+        groups = monitor.scan_authors(user_id)
+        _finish_job(job_id, {"groups": groups})
+    except Exception as e:  # noqa: BLE001
+        _fail_job(job_id, str(e))
+
+
+@app.post("/api/monitor/author-scan")
+@limiter.limit(settings.rl_monitor)
+def scan_authors(request: Request, background_tasks: BackgroundTasks,
+                 user: User = Depends(authlib.get_current_user)):
+    """Find new papers by followed authors — background job."""
+    existing = _get_or_reuse_job(user.id, "author_scan")
+    if existing:
+        return {"job_id": existing, "status": "running"}
+    job_id = _new_job(user.id, "author_scan")
+    background_tasks.add_task(_author_scan_bg, job_id, user.id)
+    return {"job_id": job_id, "status": "running"}
 
 
 @app.post("/api/monitor/test-digest")
