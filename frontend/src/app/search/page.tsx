@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { api, type SearchResult, type Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { Card } from "@/components/ui";
-import { Trash2, ChevronDown, ChevronUp, ArrowUp } from "lucide-react";
+import { Trash2, ChevronDown, ChevronUp, ArrowUp, Sparkles } from "lucide-react";
 import { LogoMark } from "@/components/logo";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -15,12 +15,44 @@ interface Exchange {
   question: string;
   answer: string | null;
   sources: SearchResult[];
-  answerLoading: boolean;
+  answerLoading: boolean;       // retrieval (passages) loading
   answerError: string | null;
+  scopeId: string | null;       // paper scope at the time of the query
+  // Optional synthesized answer ("Answer this") — grounded in the passages below.
+  synthAnswer?: string | null;
+  synthLoading?: boolean;
+  synthError?: string | null;
 }
 
 const CACHE_KEY = "search_conversation";
 const POLL_INTERVAL = 2500;
+
+// Tiny inline-markdown renderer for the synthesized answer (bold, bullets).
+const escHtml = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+function AnswerMd({ text }: { text: string }) {
+  const md = (raw: string) =>
+    escHtml(raw)
+      .replace(/\*\*(.+?)\*\*/g, '<strong class="text-[var(--text-1)] font-semibold">$1</strong>')
+      .replace(/`(.+?)`/g, '<code class="mono text-[11px] bg-[var(--surface-3)] px-1 py-0.5 rounded text-[var(--gen)]">$1</code>');
+  return (
+    <div className="text-[13.5px] text-[var(--text-1)] leading-[1.7] space-y-1.5">
+      {text.split("\n").map((line, i) => {
+        if (!line.trim()) return <div key={i} className="h-1.5" />;
+        if (/^[-*]\s/.test(line)) {
+          return (
+            <div key={i} className="flex items-start gap-2">
+              <span className="mt-[8px] w-[3px] h-[3px] rounded-full bg-[var(--gen)] shrink-0" />
+              <span dangerouslySetInnerHTML={{ __html: md(line.slice(2)) }} />
+            </div>
+          );
+        }
+        return <p key={i} dangerouslySetInnerHTML={{ __html: md(line) }} />;
+      })}
+    </div>
+  );
+}
 
 // Domain-agnostic starters that work for any library. A library-specific
 // prompt is appended at runtime from the user's actual papers.
@@ -140,7 +172,10 @@ function PaperResult({ title, passages, query, topMatch = false }: { title: stri
 
 // ── Exchange ──────────────────────────────────────────────────────────────────
 
-function ExchangeCard({ exchange }: { exchange: Exchange }) {
+function ExchangeCard({ exchange, onSynthesize }: {
+  exchange: Exchange;
+  onSynthesize: (id: string, question: string, scope: string | null) => void;
+}) {
   const [paperFilter, setPaperFilter] = useState<string | null>(null);
 
   // Group sources by paper
@@ -167,6 +202,33 @@ function ExchangeCard({ exchange }: { exchange: Exchange }) {
           {exchange.question}
         </div>
       </div>
+
+      {/* Synthesized answer — optional, grounded in the passages below */}
+      {!exchange.answerLoading && !exchange.answerError && exchange.sources.length > 0 && (
+        <div className="mb-4">
+          {exchange.synthAnswer ? (
+            <div className="rounded-[var(--r-lg)] border border-[var(--gen-line)] bg-[var(--gen-dim)] p-4">
+              <div className="flex items-center gap-1.5 text-[10.5px] text-[var(--gen)] uppercase tracking-wider mb-2 font-medium">
+                <Sparkles size={11} /> Answer
+              </div>
+              <AnswerMd text={exchange.synthAnswer} />
+              <div className="text-[10.5px] text-[var(--text-4)] mt-2.5">Grounded in the passages below.</div>
+            </div>
+          ) : exchange.synthLoading ? (
+            <div className="flex items-center gap-2.5 text-[13px] text-[var(--text-3)] py-1 pl-1">
+              <span className="w-3.5 h-3.5 border-2 border-[var(--surface-3)] border-t-[var(--gen)] rounded-full animate-spin" />
+              Synthesizing an answer…
+            </div>
+          ) : exchange.synthError ? (
+            <div className="text-[12.5px] text-[var(--contra)] pl-1">{exchange.synthError}</div>
+          ) : (
+            <button onClick={() => onSynthesize(exchange.id, exchange.question, exchange.scopeId)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] border border-[var(--gen-line)] bg-[var(--gen-dim)] text-[var(--gen)] text-[12.5px] font-medium t-all hover:opacity-90">
+              <Sparkles size={13} /> Answer this from the passages
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Results */}
       {exchange.answerLoading ? (
@@ -286,13 +348,44 @@ function InputBar({
 export default function SearchPage() {
   const [exchanges, setExchanges] = useState<Exchange[]>([]);
   const [papers, setPapers] = useState<Paper[]>([]);
+  const [scopeId, setScopeId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const heroInputRef = useRef<HTMLInputElement>(null);
   const autoSubmittedRef = useRef(false);
+  const synthRefs = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const searchParams = useSearchParams();
+
+  // Clear any in-flight synthesis polls on unmount.
+  useEffect(() => () => { Object.values(synthRefs.current).forEach(clearInterval); }, []);
+
+  // "Answer this": synthesize an answer over the retrieved passages via /api/ask.
+  async function synthesize(exchangeId: string, question: string, scope: string | null) {
+    setExchanges((prev) => prev.map((e) => e.id === exchangeId ? { ...e, synthLoading: true, synthError: null } : e));
+    try {
+      const res = await api.ask(question, scope || undefined);
+      const poll = setInterval(async () => {
+        try {
+          const job = await api.getJob<{ answer: string }>(res.job_id);
+          if (job.status === "done" && job.result) {
+            clearInterval(poll); delete synthRefs.current[exchangeId];
+            setExchanges((prev) => prev.map((e) => e.id === exchangeId ? { ...e, synthLoading: false, synthAnswer: job.result!.answer || "" } : e));
+          } else if (job.status === "error") {
+            clearInterval(poll); delete synthRefs.current[exchangeId];
+            setExchanges((prev) => prev.map((e) => e.id === exchangeId ? { ...e, synthLoading: false, synthError: job.error || "Could not synthesize an answer." } : e));
+          }
+        } catch (err: any) {
+          clearInterval(poll); delete synthRefs.current[exchangeId];
+          setExchanges((prev) => prev.map((e) => e.id === exchangeId ? { ...e, synthLoading: false, synthError: err.message } : e));
+        }
+      }, POLL_INTERVAL);
+      synthRefs.current[exchangeId] = poll;
+    } catch (err: any) {
+      setExchanges((prev) => prev.map((e) => e.id === exchangeId ? { ...e, synthLoading: false, synthError: err.message } : e));
+    }
+  }
 
   useEffect(() => {
     const saved = cache.read<Exchange[]>(CACHE_KEY);
@@ -337,12 +430,13 @@ export default function SearchPage() {
       sources: [],
       answerLoading: true,
       answerError: null,
+      scopeId,
     }]);
     setInput("");
     setSubmitting(true);
 
     try {
-      const sources = await api.search(q, 8);
+      const sources = await api.search(q, 8, scopeId || undefined);
       setExchanges((prev) => prev.map((e) =>
         e.id === exchangeId
           ? { ...e, sources, answerLoading: false, answer: "" }
@@ -383,8 +477,9 @@ export default function SearchPage() {
               Search your library
             </h1>
             <p className="text-[14px] text-[var(--text-3)] max-w-[360px] leading-relaxed">
-              Find relevant passages across all your papers.
-              Retrieved by meaning, reranked for relevance, and grouped by paper.
+              Find relevant passages across all your papers — then synthesize an
+              answer from them when you want one. Retrieved by meaning, reranked
+              for relevance, grounded in your sources.
             </p>
           </div>
         </div>
@@ -442,17 +537,30 @@ export default function SearchPage() {
             {exchanges.length} exchange{exchanges.length !== 1 ? "s" : ""}
           </span>
         </div>
-        <button
-          onClick={clear}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12px] text-[var(--text-3)] border border-[var(--line)] t-all hover:text-[var(--contra)] hover:border-[var(--contra-line)]"
-        >
-          <Trash2 size={12} /> Clear
-        </button>
+        <div className="flex items-center gap-2">
+          <select
+            value={scopeId || ""}
+            onChange={(e) => setScopeId(e.target.value || null)}
+            title="Scope of search and answers"
+            className="text-[12px] bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-md)] px-2.5 py-1.5 text-[var(--text-1)] focus:outline-none focus:border-[var(--gen-line)] t-all max-w-[170px]"
+          >
+            <option value="">Whole library</option>
+            {papers.map((p) => (
+              <option key={p.id} value={p.id}>{p.title.slice(0, 42)}{p.title.length > 42 ? "…" : ""}</option>
+            ))}
+          </select>
+          <button
+            onClick={clear}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12px] text-[var(--text-3)] border border-[var(--line)] t-all hover:text-[var(--contra)] hover:border-[var(--contra-line)]"
+          >
+            <Trash2 size={12} /> Clear
+          </button>
+        </div>
       </div>
 
       {/* Conversation */}
       <div className="flex-1 overflow-y-auto py-4 px-1">
-        {exchanges.map((ex) => <ExchangeCard key={ex.id} exchange={ex} />)}
+        {exchanges.map((ex) => <ExchangeCard key={ex.id} exchange={ex} onSynthesize={synthesize} />)}
         <div ref={bottomRef} />
       </div>
 
