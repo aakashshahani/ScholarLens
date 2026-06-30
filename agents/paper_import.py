@@ -393,6 +393,12 @@ class SemanticScholarSource:
     def citing_papers(self, paper_ref: str, max_results: int = 10) -> list[ImportResult]:
         """Papers that cite the given paper. `paper_ref` is any S2-resolvable id:
         'DOI:10.x/y', 'ARXIV:1234.5678', or a raw S2 paperId. Newest first."""
+        # S2's citation graph 404s on a version-suffixed arXiv id (e.g.
+        # 'ARXIV:2509.09071v4'); the version is irrelevant to the citation graph,
+        # so strip it — otherwise every versioned library paper silently yields
+        # zero citers.
+        if paper_ref.upper().startswith("ARXIV:"):
+            paper_ref = re.sub(r"v\d+$", "", paper_ref)
         _wait("s2", 1.5)
         try:
             resp = _session.get(
