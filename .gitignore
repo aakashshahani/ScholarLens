@@ -26,3 +26,6 @@ __pycache__/
 
 # Design handoff — local design reference, not part of the app build
 design_handoff_scholarlens/
+
+# Working docs — local reference (audit notes, setup guides), not app code
+docs/
