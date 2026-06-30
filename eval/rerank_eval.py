@@ -37,7 +37,30 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.vector_store import VectorStore  # noqa: E402
+from config import settings  # noqa: E402  (loads .env; no DB connection)
+
+
+class _VoyageEval:
+    """Minimal Voyage client for the eval — embed + rerank only, no database.
+
+    The production VectorStore connects to Postgres on init, which this eval has
+    no need for; talking to Voyage directly keeps the harness runnable with just
+    VOYAGE_API_KEY set (no DATABASE_URL, no psycopg2)."""
+
+    def __init__(self):
+        import voyageai
+        self.client = voyageai.Client(api_key=settings.voyage_api_key)
+
+    def embed_query(self, query: str) -> list[float]:
+        return self.client.embed([query], model=settings.embedding_model, input_type="query").embeddings[0]
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return self.client.embed(texts, model=settings.embedding_model, input_type="document").embeddings
+
+    def rerank(self, query: str, documents: list[str], top_k: int | None = None):
+        res = self.client.rerank(query=query, documents=documents, model=settings.rerank_model, top_k=top_k)
+        return [(r.index, r.relevance_score) for r in res.results]
+
 
 EVAL_DIR = Path(__file__).resolve().parent
 DEFAULT_GOLD = EVAL_DIR / "gold_search.json"
@@ -69,7 +92,7 @@ def mrr(ranked_relevances: list[int]) -> float:
 
 # ── Rankers ──────────────────────────────────────────────────
 
-def vector_order(vs: VectorStore, query: str, passages: list[str]) -> list[int]:
+def vector_order(vs: "_VoyageEval", query: str, passages: list[str]) -> list[int]:
     """Indices of `passages` ordered by ascending cosine distance to query."""
     q = vs.embed_query(query)
     docs = vs.embed_texts(passages)
@@ -85,7 +108,7 @@ def vector_order(vs: VectorStore, query: str, passages: list[str]) -> list[int]:
     return [i for i, _ in dists]
 
 
-def rerank_order(vs: VectorStore, query: str, passages: list[str]) -> list[int]:
+def rerank_order(vs: "_VoyageEval", query: str, passages: list[str]) -> list[int]:
     """Indices of `passages` ordered best-first by the Voyage reranker."""
     return [idx for idx, _score in vs.rerank(query, passages)]
 
@@ -93,7 +116,7 @@ def rerank_order(vs: VectorStore, query: str, passages: list[str]) -> list[int]:
 # ── Eval loop ────────────────────────────────────────────────
 
 def evaluate(gold: list[dict], k: int) -> dict:
-    vs = VectorStore()
+    vs = _VoyageEval()
     rows = []
     for q in gold:
         query = q["query"]
