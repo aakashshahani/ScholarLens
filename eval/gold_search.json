@@ -1,15 +1,15 @@
 [
   {
     "id": "s1",
-    "query": "Does giving an LLM a structured negotiation script improve a human's bargaining outcomes?",
+    "query": "Does giving an LLM a structured negotiation script improve a human's bargaining outcomes (deal value)?",
     "passages": [
       {"relevance": 3, "text": "In a randomized study of 240 participants, users coached by an LLM that followed a structured BATNA-anchoring script reached agreements with 12% higher joint surplus than an unscripted-chatbot control, and the effect held after controlling for prior negotiation experience."},
-      {"relevance": 3, "text": "Pairing novice negotiators with a turn-by-turn LLM advisor that prompted them to state their reservation value before conceding raised their individual payoff by 0.4 standard deviations relative to negotiating alone."},
-      {"relevance": 2, "text": "Participants reported higher confidence when an AI assistant suggested concession sequences, though the paper notes subjective confidence did not always track objective deal quality."},
-      {"relevance": 2, "text": "A simulation of automated agent-to-agent bargaining showed that explicit scripts reduced impasse rates, but the agents were not human and no human-outcome measure was reported."},
-      {"relevance": 1, "text": "Large language models can be prompted to role-play distinct negotiation personas, which is useful for generating training dialogues."},
-      {"relevance": 0, "text": "Transformer attention complexity grows quadratically with sequence length, motivating sparse-attention variants for long documents."},
-      {"relevance": 0, "text": "Retrieval-augmented generation grounds model outputs in an external corpus to reduce hallucination on factual queries."}
+      {"relevance": 3, "text": "Pairing novice negotiators with a turn-by-turn LLM advisor that prompted them to state their reservation value before conceding raised their captured deal value by 0.4 standard deviations relative to negotiating alone."},
+      {"relevance": 1, "text": "An LLM negotiation advisor significantly improved users' self-reported satisfaction with the negotiation experience, even though it did not change the final deal terms they reached."},
+      {"relevance": 1, "text": "Negotiators using a scripted LLM advisor reduced the average time to reach agreement by roughly 20% compared with the unaided control."},
+      {"relevance": 0, "text": "Participants who used an LLM negotiation script reported lower anxiety in the minutes before the negotiation began."},
+      {"relevance": 0, "text": "Large language models can be prompted to role-play distinct negotiation personas, which is useful for generating training dialogues."},
+      {"relevance": 0, "text": "Transformer attention complexity grows quadratically with sequence length, motivating sparse-attention variants for long documents."}
     ]
   },
   {
@@ -17,12 +17,12 @@
     "query": "What sample sizes are typical in studies measuring AI coaching effects on negotiation skill?",
     "passages": [
       {"relevance": 3, "text": "Across eight published trials of AI negotiation coaching, sample sizes ranged from 48 to 612 participants, with a median of 180; only three were powered to detect effects smaller than 0.3 standard deviations."},
-      {"relevance": 3, "text": "The authors recruited 312 undergraduates and assigned them to AI-coached, human-coached, or no-coaching arms, reporting that the AI arm needed roughly 100 participants per cell to detect the observed effect at 80% power."},
-      {"relevance": 2, "text": "A meta-analysis of computer-assisted negotiation training emphasized that underpowered samples (n < 60) dominated early work and likely inflated reported effect sizes."},
-      {"relevance": 1, "text": "Effect sizes in behavioral negotiation research are commonly reported as Cohen's d, which complicates pooling when studies differ in outcome scaling."},
-      {"relevance": 1, "text": "Recruiting professional negotiators is expensive, so most studies rely on student convenience samples."},
-      {"relevance": 0, "text": "Voyage embeddings produce 1024-dimensional vectors suitable for cosine-similarity retrieval over academic text."},
-      {"relevance": 0, "text": "BM25 is a lexical ranking function that scores documents by term frequency and inverse document frequency."}
+      {"relevance": 3, "text": "The authors recruited 374 undergraduates and assigned them to AI-coached, human-coached, or no-coaching arms, noting that roughly 100 participants per cell were needed to detect the observed effect at 80% power."},
+      {"relevance": 1, "text": "The AI coaching intervention produced a medium effect size (Cohen's d=0.42) on objective deal outcomes relative to the no-coaching control."},
+      {"relevance": 0, "text": "Two raters coded the negotiation transcripts with high inter-rater reliability (Cohen's kappa = 0.81) before the analysis."},
+      {"relevance": 0, "text": "Each AI coaching session lasted on average 22 minutes per participant across the three conditions."},
+      {"relevance": 1, "text": "Recruiting professional negotiators is expensive, so most negotiation-coaching studies rely on student convenience samples."},
+      {"relevance": 0, "text": "An HNSW index gives sub-linear nearest-neighbour lookups over a vector column."}
     ]
   },
   {
@@ -30,38 +30,276 @@
     "query": "Do LLM negotiation agents concede too quickly compared to humans?",
     "passages": [
       {"relevance": 3, "text": "When pitted against human counterparts, GPT-class negotiation agents conceded on price an average of 1.8 rounds earlier than humans and captured 9% less of the surplus, a gap the authors attribute to the model's bias toward agreeableness."},
-      {"relevance": 3, "text": "Ablating the politeness-tuned reward made the agent hold firm longer and improved its captured value, directly linking premature concession to alignment tuning."},
-      {"relevance": 2, "text": "Human negotiators in the same protocol anchored aggressively and rarely made the first concession, whereas the baseline model frequently opened with a near-final offer."},
-      {"relevance": 1, "text": "The study used an ultimatum-game variant with monetary stakes paid as a bonus."},
-      {"relevance": 1, "text": "Concession behavior was coded from transcripts by two raters with substantial inter-rater agreement."},
-      {"relevance": 0, "text": "Fine-tuning on domain text generally improves retrieval relevance for specialized corpora."},
+      {"relevance": 3, "text": "Ablating the politeness-tuned reward made the agent hold firm for more rounds before conceding and improved its captured value, directly linking premature concession to alignment tuning."},
+      {"relevance": 2, "text": "Human negotiators in the same protocol anchored aggressively and rarely made the first concession, whereas the baseline model frequently opened near its final offer."},
+      {"relevance": 1, "text": "LLM negotiation agents produced noticeably more polite and rapport-building messages than the human negotiators they were matched against."},
+      {"relevance": 0, "text": "Human negotiators took several seconds longer than the LLM agent to type each counter-offer in the chat interface."},
       {"relevance": 0, "text": "pgvector adds an approximate nearest-neighbor index to Postgres via the HNSW method."}
     ]
   },
   {
     "id": "s4",
-    "query": "How is the quality of an AI-generated research hypothesis evaluated for novelty?",
+    "query": "How is the novelty of an AI-generated research hypothesis evaluated?",
     "passages": [
       {"relevance": 3, "text": "The authors operationalized novelty as the cosine distance between a generated hypothesis embedding and its nearest neighbor in an existing literature corpus, avoiding the unreliability of asking the model to rate its own originality."},
-      {"relevance": 3, "text": "Hypotheses were scored by expert reviewers on novelty and plausibility, and the embedding-distance proxy correlated r=0.61 with reviewer novelty judgments."},
+      {"relevance": 3, "text": "Hypotheses were scored by expert reviewers on novelty, and the embedding-distance proxy correlated r=0.61 with the reviewers' novelty judgments."},
       {"relevance": 2, "text": "Self-assessed novelty from the language model was systematically inflated, rating nearly every hypothesis as highly original regardless of overlap with prior work."},
-      {"relevance": 2, "text": "Grounding each hypothesis in cited contradictions from the source set made its provenance auditable against the underlying papers."},
-      {"relevance": 1, "text": "Generated hypotheses were de-duplicated before scoring to avoid rewarding repetition."},
-      {"relevance": 0, "text": "SMTP over TLS on port 587 is the standard submission path for outbound email."},
-      {"relevance": 0, "text": "Cohen's kappa corrects observed agreement for the agreement expected by chance."}
+      {"relevance": 1, "text": "The model was also asked to rate the feasibility of each hypothesis on a five-point scale before any human review."},
+      {"relevance": 0, "text": "Generated hypotheses were scored for grammatical fluency by an automated language-quality metric."},
+      {"relevance": 0, "text": "SMTP over TLS on port 587 is the standard submission path for outbound email."}
     ]
   },
   {
     "id": "s5",
-    "query": "Does hybrid lexical-plus-dense retrieval beat dense-only retrieval for finding contradicting scientific claims?",
+    "query": "Does hybrid lexical-plus-dense retrieval improve recall of contradicting scientific claims?",
     "passages": [
       {"relevance": 3, "text": "Adding a BM25 pass to dense retrieval raised recall of genuinely contradicting claim pairs from 0.71 to 0.88, because lexically overlapping but semantically reframed claims fell below the dense similarity threshold."},
       {"relevance": 3, "text": "The union of dense and lexical candidate pairs surfaced contradictions that shared rare tokens such as dataset and metric names which the embedding model mapped far apart in vector space."},
       {"relevance": 2, "text": "Dense-only retrieval favored paraphrase similarity and missed pairs that disagreed using different terminology for the same construct."},
-      {"relevance": 1, "text": "Each candidate pair was tagged with the retriever that surfaced it so per-retriever coverage could be measured."},
-      {"relevance": 1, "text": "Reranking the merged candidate list further trimmed false positives before the expensive judgment stage."},
-      {"relevance": 0, "text": "Fernet provides symmetric authenticated encryption built on AES-128 in CBC mode with an HMAC."},
+      {"relevance": 1, "text": "Adding the BM25 pass alongside dense retrieval increased per-query latency by about 40 milliseconds."},
+      {"relevance": 0, "text": "Dense retrieval alone achieved the highest precision on a clean paraphrase-detection benchmark with no distractors."},
+      {"relevance": 0, "text": "Fernet provides symmetric authenticated encryption built on AES-128 in CBC mode with an HMAC."}
+    ]
+  },
+  {
+    "id": "s6",
+    "query": "Does chain-of-thought prompting improve accuracy on multi-step arithmetic?",
+    "passages": [
+      {"relevance": 3, "text": "Chain-of-thought prompting improved accuracy on multi-step arithmetic word problems by a large margin over direct-answer prompting on GSM8K."},
+      {"relevance": 3, "text": "Eliciting an explicit scratchpad of intermediate arithmetic steps roughly doubled exact-match accuracy on multi-digit addition and multiplication."},
+      {"relevance": 1, "text": "Chain-of-thought prompting also raised scores on commonsense reasoning benchmarks that involve no arithmetic at all."},
+      {"relevance": 1, "text": "On single-step arithmetic, chain-of-thought gave essentially no benefit and occasionally introduced spurious steps."},
+      {"relevance": 0, "text": "Chain-of-thought prompting increased the average generated output length by roughly three times."},
+      {"relevance": 0, "text": "RealDictCursor returns each database row as a Python dictionary keyed by column name."}
+    ]
+  },
+  {
+    "id": "s7",
+    "query": "Does self-consistency (sampling multiple chains and majority-voting) raise reasoning accuracy?",
+    "passages": [
+      {"relevance": 3, "text": "Sampling multiple reasoning chains and taking the majority-vote answer (self-consistency) improved benchmark accuracy substantially over greedy single-chain decoding."},
+      {"relevance": 3, "text": "Majority voting over independently sampled reasoning paths raised accuracy on both arithmetic and commonsense benchmarks relative to a single greedy decode."},
+      {"relevance": 2, "text": "The accuracy gain from self-consistency grew with the diversity of the sampled reasoning paths."},
+      {"relevance": 1, "text": "Raising the sampling temperature degraded single-sample accuracy when no voting was applied."},
+      {"relevance": 0, "text": "Self-consistency increases inference cost roughly linearly with the number of samples drawn."},
+      {"relevance": 0, "text": "OpenAlex returns abstracts as an inverted index mapping each word to its positions."}
+    ]
+  },
+  {
+    "id": "s8",
+    "query": "Does retrieval-augmented generation reduce factual hallucination?",
+    "passages": [
+      {"relevance": 3, "text": "Retrieval-augmented generation reduced factual hallucination on knowledge-intensive questions by grounding each answer in the retrieved passages rather than the model's parametric memory."},
+      {"relevance": 3, "text": "Augmenting the generator with retrieved evidence cut the rate of hallucinated entities on open-domain QA compared with a closed-book baseline."},
+      {"relevance": 2, "text": "When the retrieved context was irrelevant, retrieval augmentation introduced new errors as the model deferred to misleading passages."},
+      {"relevance": 1, "text": "Adding the retrieval step increased end-to-end answer latency because of the extra search round trip."},
+      {"relevance": 0, "text": "A RAG system needs a vector database to store and search the passage embeddings at query time."},
+      {"relevance": 0, "text": "bcrypt silently truncates passwords to 72 bytes, so hashing and verification must truncate consistently."}
+    ]
+  },
+  {
+    "id": "s9",
+    "query": "How does embedding dimensionality affect retrieval accuracy?",
+    "passages": [
+      {"relevance": 3, "text": "Retrieval accuracy plateaued beyond 768 dimensions and degraded at very high dimensions as the added components captured noise rather than signal."},
+      {"relevance": 3, "text": "Across the tested corpora, increasing embedding dimensionality kept improving retrieval accuracy up to the largest model, with the 1536-dimension variant best."},
+      {"relevance": 1, "text": "Higher embedding dimensions increased the on-disk index storage size roughly linearly."},
+      {"relevance": 0, "text": "Quantizing the embeddings to int8 cut memory use sharply with only a small accuracy loss."},
       {"relevance": 0, "text": "React escapes interpolated text by default, mitigating a class of cross-site scripting bugs."}
+    ]
+  },
+  {
+    "id": "s10",
+    "query": "Do cross-encoder rerankers produce more relevant rankings than bi-encoders?",
+    "passages": [
+      {"relevance": 3, "text": "Cross-encoders outperformed bi-encoders on relevance because joint query-document attention captures term interactions a bi-encoder's independent embeddings cannot."},
+      {"relevance": 3, "text": "In-domain fine-tuned bi-encoders matched cross-encoder relevance on the target collection while retrieving an order of magnitude faster."},
+      {"relevance": 1, "text": "Cross-encoders are slower than bi-encoders at query time because they cannot precompute document representations offline."},
+      {"relevance": 0, "text": "Bi-encoders enable approximate nearest-neighbor search over precomputed document vectors."},
+      {"relevance": 0, "text": "The monitoring digest is delivered over Gmail SMTP using an app password."}
+    ]
+  },
+  {
+    "id": "s11",
+    "query": "Does practicing with a simulated AI conflict partner transfer to real unaided conflict performance?",
+    "passages": [
+      {"relevance": 3, "text": "Participants who trained with the simulated conflict partner improved their measured conflict-resolution performance in a subsequent real, unaided conflict with a human confederate."},
+      {"relevance": 3, "text": "After simulated practice, trainees reduced their use of competitive strategies by 67% and doubled cooperative strategies in the real post-training conflict."},
+      {"relevance": 2, "text": "Simulated practice improved application of strategies in real interactions but did not improve strategy recognition or recall on a written test."},
+      {"relevance": 1, "text": "Participants rated the AI conflict simulation as realistic and engaging on a post-session survey."},
+      {"relevance": 0, "text": "The simulation's prompting pipeline classifies each utterance using an eight-strategy Interests-Rights-Power taxonomy."},
+      {"relevance": 0, "text": "psycopg2's ThreadedConnectionPool is safe to share across a thread pool."}
+    ]
+  },
+  {
+    "id": "s12",
+    "query": "Did the static handbook outperform the interactive AI coach on usability and empowerment?",
+    "passages": [
+      {"relevance": 3, "text": "The static negotiation handbook significantly outperformed both AI conditions on usability (UMUX) and on psychological empowerment, with a medium effect size versus the interactive AI coach."},
+      {"relevance": 3, "text": "Participants preferred the static handbook over the interactive AI coach and rated it higher on perceived usefulness."},
+      {"relevance": 2, "text": "The interactive AI coach did win on one dimension, producing the largest reduction in negotiation-related fear among all conditions."},
+      {"relevance": 1, "text": "The interactive AI coach had a higher daily active-usage rate than the handbook during the study window."},
+      {"relevance": 0, "text": "The handbook was twelve pages long and took participants about fifteen minutes to read."},
+      {"relevance": 0, "text": "The Voyage rerank-2.5-lite model scores each query-passage pair jointly."}
+    ]
+  },
+  {
+    "id": "s13",
+    "query": "How did experienced humanitarian negotiators react to occasional LLM hallucinations?",
+    "passages": [
+      {"relevance": 3, "text": "Experienced frontline humanitarian negotiators expressed tolerance for occasional LLM hallucinations, viewing AI errors as manageable given their own expertise to verify and triangulate."},
+      {"relevance": 3, "text": "Under time pressure, expert negotiators treated the model's occasional fabrications as a manageable cost, cross-checking AI output against their field knowledge."},
+      {"relevance": 2, "text": "Novice negotiators, by contrast, were at greater risk from the same hallucinations because they lacked the domain expertise to catch and correct AI errors."},
+      {"relevance": 1, "text": "The same negotiators preferred process-oriented AI tools that surfaced options and risks over tools that gave direct strategy recommendations."},
+      {"relevance": 0, "text": "The study interviewed eighteen humanitarian negotiators across six organizations."},
+      {"relevance": 0, "text": "APScheduler runs the daily monitor job in-process unless the standalone worker is used."}
+    ]
+  },
+  {
+    "id": "s14",
+    "query": "Does query expansion improve recall for short, underspecified queries?",
+    "passages": [
+      {"relevance": 3, "text": "Query expansion with generated paraphrases improved Recall@20 for short, underspecified queries by six points over the unexpanded baseline."},
+      {"relevance": 3, "text": "Pseudo-relevance feedback raised recall most on short queries that lacked enough terms to match relevant documents directly."},
+      {"relevance": 1, "text": "Query expansion increased the average number of tokens sent to the retriever per request."},
+      {"relevance": 1, "text": "Long, detailed queries already achieved high recall and saw little additional benefit from expansion."},
+      {"relevance": 0, "text": "The corpus was deduplicated with MinHash LSH at a Jaccard threshold of 0.8 before indexing."}
+    ]
+  },
+  {
+    "id": "s15",
+    "query": "Is structured feedback necessary for people to improve at negotiation?",
+    "passages": [
+      {"relevance": 3, "text": "People do not reliably learn negotiation tactics from the experience of bargaining alone; the study found structured feedback was necessary for measurable improvement."},
+      {"relevance": 3, "text": "Without explicit instruction, repeated negotiation practice produced no significant skill gain, whereas adding structured post-round feedback did."},
+      {"relevance": 2, "text": "A separate line of work reports that practice against autonomous agents improved negotiation ability even when no feedback was provided to the learner."},
+      {"relevance": 1, "text": "Participants rated the post-negotiation feedback as the most enjoyable part of the training program."},
+      {"relevance": 0, "text": "The feedback text in the system was generated by GPT-4o, chosen for its speed."},
+      {"relevance": 0, "text": "slowapi enforces per-IP rate limits on the expensive endpoints."}
+    ]
+  },
+  {
+    "id": "s16",
+    "query": "Does an SGLT2 inhibitor reduce all-cause mortality in heart failure?",
+    "passages": [
+      {"relevance": 3, "text": "In a randomized trial of 3,730 heart-failure patients, the SGLT2 inhibitor reduced all-cause mortality by 17% (HR 0.83, 95% CI 0.71-0.97) over a median 18-month follow-up."},
+      {"relevance": 3, "text": "Pooled across two large trials, SGLT2 inhibition lowered the risk of death from any cause in patients with reduced ejection fraction."},
+      {"relevance": 2, "text": "The drug reduced cardiovascular death, a prespecified component of the primary composite endpoint."},
+      {"relevance": 1, "text": "The SGLT2 inhibitor significantly reduced heart-failure hospitalizations compared with placebo."},
+      {"relevance": 1, "text": "Treatment improved patients' Kansas City Cardiomyopathy Questionnaire quality-of-life scores at eight months."},
+      {"relevance": 0, "text": "In the diabetic subgroup the SGLT2 inhibitor lowered HbA1c by about 0.6 percentage points."},
+      {"relevance": 0, "text": "An HNSW index gives sub-linear nearest-neighbour lookups over a vector column."}
+    ]
+  },
+  {
+    "id": "s17",
+    "query": "Does mindfulness-based stress reduction lower clinical anxiety?",
+    "passages": [
+      {"relevance": 3, "text": "An eight-week mindfulness-based stress reduction program reduced clinician-rated anxiety on the Hamilton scale versus a waitlist control, with a moderate effect size (d=0.55)."},
+      {"relevance": 3, "text": "MBSR produced a clinically meaningful reduction in generalized-anxiety symptoms that was sustained at six-month follow-up."},
+      {"relevance": 2, "text": "Self-reported anxiety also fell after MBSR, though by less than the clinician-rated measure."},
+      {"relevance": 1, "text": "MBSR participants showed improved sustained attention on a continuous-performance task after the program."},
+      {"relevance": 1, "text": "Mindfulness training increased participants' self-reported life satisfaction."},
+      {"relevance": 0, "text": "Adherence to the daily home mindfulness practice averaged 4.2 of 7 days per week."},
+      {"relevance": 0, "text": "Fernet provides symmetric authenticated encryption built on AES-128-CBC with an HMAC."}
+    ]
+  },
+  {
+    "id": "s18",
+    "query": "Does large-scale reforestation provide durable long-term carbon sequestration?",
+    "passages": [
+      {"relevance": 3, "text": "Across a 30-year chronosequence, reforested plots accumulated and retained both soil and biomass carbon, indicating durable long-term sequestration."},
+      {"relevance": 3, "text": "Process modeling showed the carbon stock of reforested stands remained stable for decades in the absence of major disturbance."},
+      {"relevance": 2, "text": "Wildfire can release much of the stored carbon from reforested stands within a single season, qualifying the durability of the sink."},
+      {"relevance": 1, "text": "Newly planted forests sequestered carbon most rapidly in their first five years before the rate slowed."},
+      {"relevance": 1, "text": "Reforestation sharply increased local biodiversity, including bird and pollinator species richness."},
+      {"relevance": 0, "text": "Reforestation on steep slopes reduced soil erosion and downstream sedimentation."},
+      {"relevance": 0, "text": "The pgvector <=> operator computes cosine distance between stored vectors."}
+    ]
+  },
+  {
+    "id": "s19",
+    "query": "How frequent are CRISPR-Cas9 off-target edits in human cells?",
+    "passages": [
+      {"relevance": 3, "text": "Genome-wide sequencing detected off-target Cas9 edits at a median frequency of about 0.2% across twelve computationally predicted sites in human cells."},
+      {"relevance": 3, "text": "High-fidelity Cas9 variants lowered off-target editing to undetectable levels at most sites while preserving on-target activity."},
+      {"relevance": 1, "text": "On-target editing efficiency reached 85% at the intended locus in the same cell line."},
+      {"relevance": 1, "text": "Delivering Cas9 via lipid nanoparticles improved post-editing cell viability."},
+      {"relevance": 0, "text": "The guide RNA was designed with a standard 20-nucleotide spacer sequence."},
+      {"relevance": 0, "text": "React escapes interpolated text by default, mitigating cross-site scripting."}
+    ]
+  },
+  {
+    "id": "s20",
+    "query": "Does raising the minimum wage reduce employment?",
+    "passages": [
+      {"relevance": 3, "text": "A difference-in-differences analysis across bordering counties found that minimum-wage increases had no statistically significant effect on employment in the affected sectors."},
+      {"relevance": 3, "text": "Other work reports small negative employment effects concentrated among the youngest and least-experienced workers."},
+      {"relevance": 1, "text": "The minimum-wage increase raised average earnings for low-wage workers by about 8%."},
+      {"relevance": 1, "text": "Higher minimum wages were associated with reduced employee turnover at affected firms."},
+      {"relevance": 0, "text": "Pass-through of the increase to consumer prices was modest, around 0.4% in full-service restaurants."},
+      {"relevance": 0, "text": "slowapi enforces per-IP rate limits on the expensive endpoints."}
+    ]
+  },
+  {
+    "id": "s21",
+    "query": "Does sleep after learning improve memory consolidation?",
+    "passages": [
+      {"relevance": 3, "text": "Participants who slept after learning recalled significantly more word pairs than those who stayed awake for an equivalent interval, supporting sleep-dependent consolidation."},
+      {"relevance": 3, "text": "Slow-wave sleep duration predicted the overnight improvement on a declarative memory task."},
+      {"relevance": 2, "text": "Cueing recently learned material during slow-wave sleep (targeted memory reactivation) further boosted later retention."},
+      {"relevance": 1, "text": "Sleep deprivation impaired sustained attention and reaction time the following day."},
+      {"relevance": 1, "text": "A short daytime nap improved subjective alertness, though the study measured no memory outcome."},
+      {"relevance": 0, "text": "The proportion of REM sleep increased after participants withdrew from caffeine."},
+      {"relevance": 0, "text": "The Voyage rerank model scores each query-passage pair jointly."}
+    ]
+  },
+  {
+    "id": "s22",
+    "query": "Does spaced repetition improve long-term retention compared with massed practice?",
+    "passages": [
+      {"relevance": 3, "text": "Items studied with spaced repetition were retained far better on a one-month delayed test than items studied through massed practice, a robust spacing effect."},
+      {"relevance": 3, "text": "Gradually expanding the inter-study interval produced higher delayed-test retention than fixed short intervals."},
+      {"relevance": 1, "text": "Students reported that massed cramming felt more effective, a metacognitive illusion not borne out by their test scores."},
+      {"relevance": 1, "text": "Spaced practice spread the same total study time across more, shorter sessions."},
+      {"relevance": 0, "text": "Flashcard apps that use spaced schedules reported higher daily active-user counts."},
+      {"relevance": 0, "text": "OpenAlex returns abstracts as an inverted index of word positions."}
+    ]
+  },
+  {
+    "id": "s23",
+    "query": "Have perovskite solar cells achieved long-term operational stability?",
+    "passages": [
+      {"relevance": 3, "text": "Encapsulated perovskite cells retained 95% of their initial efficiency after 1,000 hours of continuous illumination, a marked stability improvement."},
+      {"relevance": 3, "text": "Compositional engineering extended the T80 operational lifetime to over 1,500 hours under damp-heat testing."},
+      {"relevance": 1, "text": "The perovskite cell reached a certified record power-conversion efficiency of 25.7%."},
+      {"relevance": 1, "text": "The perovskite absorber layer was deposited by a low-cost solution-processing route."},
+      {"relevance": 0, "text": "Perovskite absorbers show a broader absorption spectrum than crystalline silicon."},
+      {"relevance": 0, "text": "psycopg2's ThreadedConnectionPool is safe to share across a thread pool."}
+    ]
+  },
+  {
+    "id": "s24",
+    "query": "Does high dietary fiber intake reduce colorectal cancer risk?",
+    "passages": [
+      {"relevance": 3, "text": "In a prospective cohort of 480,000 adults, the highest fiber-intake quintile had a 16% lower colorectal cancer incidence than the lowest."},
+      {"relevance": 3, "text": "A meta-analysis of cohort studies found each 10 g/day increase in fiber was associated with a 10% reduction in colorectal cancer risk."},
+      {"relevance": 1, "text": "In the same cohort, high fiber intake was associated with lower cardiovascular mortality."},
+      {"relevance": 1, "text": "Higher fiber intake correlated with better overall diet-quality scores."},
+      {"relevance": 0, "text": "Soluble fiber slowed gastric emptying in a small crossover trial."},
+      {"relevance": 0, "text": "The monitoring digest is delivered over Gmail SMTP with an app password."}
+    ]
+  },
+  {
+    "id": "s25",
+    "query": "Do larger touch targets reduce error rates on mobile interfaces?",
+    "passages": [
+      {"relevance": 3, "text": "Increasing button size from 7mm to 10mm reduced the tap-error rate from 9% to 3% in a controlled mobile study."},
+      {"relevance": 3, "text": "Error rates fell monotonically with target size up to about 9mm, consistent with Fitts's law predictions."},
+      {"relevance": 1, "text": "Larger touch targets slightly increased task-completion time because of the longer finger travel distance."},
+      {"relevance": 1, "text": "Users rated the larger-button layout as more aesthetically pleasing."},
+      {"relevance": 0, "text": "The study recruited 40 participants who used their own personal smartphones."},
+      {"relevance": 0, "text": "RealDictCursor returns each database row as a Python dictionary."}
     ]
   }
 ]
