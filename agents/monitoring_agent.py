@@ -57,6 +57,16 @@ class DigestResult:
     scan_time: str
 
 
+# Cross-encoder relevance calibration. Candidates are re-scored against the
+# topic query with the Voyage reranker; these cuts are on its score scale, NOT
+# cosine distance. On the negotiation library, on-topic papers land ~0.6-0.85
+# and clearly off-topic ones (song generation, cardiology) sit ~0.30-0.45 — so
+# 0.45 cleanly drops the junk that cosine-to-library similarity let through.
+RERANK_KEEP = 0.45          # below this: off-topic, dropped
+RERANK_TIER_HIGH = 0.65     # at/above this: "highly relevant"
+MAX_RELEVANT_PER_TOPIC = 10  # cap kept papers so the digest stays readable
+
+
 class MonitoringAgent:
     def __init__(self):
         self.client = Anthropic()
@@ -94,11 +104,13 @@ class MonitoringAgent:
         # returning a thinner set.
         all_results = []
         for kw in topic.keywords:
-            # Sanitise: collapse whitespace, strip chars that break API
-            # query strings. Keeps alphanumerics, spaces, hyphens.
-            # Catches sloppy-typing failure mode, no spell library needed.
-            kw = " ".join(
-                ch if (ch.isalnum() or ch in "-_") else " "
+            # Sanitise: replace chars that break API query strings with a
+            # space, keeping alphanumerics, spaces, and hyphens. Join with ""
+            # (NOT " ") so words stay intact — joining with a space exploded
+            # every character into its own token ("LLM negotiation" became
+            # "L L M n e g o t i a t i o n"), which mangled every query.
+            kw = "".join(
+                ch if (ch.isalnum() or ch in "-_ ") else " "
                 for ch in kw
             )
             kw = " ".join(kw.split())  # collapse whitespace
@@ -134,8 +146,11 @@ class MonitoringAgent:
                 scan_time=datetime.now(timezone.utc).isoformat(),
             )
 
-        # Score relevance against library
-        scored = self._score_relevance(new_papers, relevance_threshold, lib_ids=lib_ids)
+        # Score relevance with the cross-encoder reranker, querying against the
+        # topic itself (name + keywords). relevance_threshold is the legacy
+        # cosine knob and no longer gates here — the rerank calibration does.
+        topic_query = " ".join([topic.name, *topic.keywords]).strip() or topic.name
+        scored = self._score_relevance(new_papers, topic_query, lib_ids=lib_ids)
 
         return DigestResult(
             topic=topic.name,
@@ -148,50 +163,100 @@ class MonitoringAgent:
     def _score_relevance(
         self,
         papers: list[ImportResult],
-        threshold: float,
+        query: str,
         lib_ids: list[str] | None = None,
     ) -> list[ScoredPaper]:
+        """Rank discovered papers by relevance to the topic with the Voyage
+        cross-encoder, dropping the off-topic ones.
+
+        Cosine similarity to the library used to do this, but Voyage embeddings
+        compress every academic abstract into a narrow ~0.5-0.9 band, so a
+        cardiology paper scored as high as a negotiation one and the threshold
+        couldn't separate them. The reranker reads (topic, abstract) jointly and
+        produces a real on/off-topic gradient. Returns papers sorted best-first,
+        already filtered to the relevant ones.
         """
-        Score each paper's relevance to the existing library.
-        Uses embedding similarity between paper abstracts and library content.
-        """
-        # If the user's library is empty, all papers are relevant
+        candidates = [p for p in papers if (p.abstract or p.title)]
+        if not candidates:
+            return []
+
+        docs = [(p.abstract or p.title)[:1500] for p in candidates]
+        try:
+            order = self.vector_store.rerank(query, docs)  # [(idx, score)] best-first
+        except Exception as e:  # noqa: BLE001 — degrade to cosine if reranker is down
+            print(f"[monitor] rerank unavailable, falling back to cosine: {e}")
+            return self._score_relevance_cosine(candidates, lib_ids)
+
+        kept = [(i, s) for i, s in order if s >= RERANK_KEEP][:MAX_RELEVANT_PER_TOPIC]
+        if not kept:
+            return []
+
+        # 'Related to: <your paper>' flavor — embed only the kept abstracts (few)
+        # and name each one's nearest library paper. Best-effort; the rerank
+        # score is what actually gates relevance.
+        reasons = self._library_reasons([docs[i] for i, _ in kept], lib_ids)
+        return [
+            ScoredPaper(paper=candidates[i], relevance_score=round(float(s), 3),
+                        relevance_reason=reason)
+            for (i, s), reason in zip(kept, reasons)
+        ]
+
+    def _library_reasons(self, abstracts: list[str],
+                         lib_ids: list[str] | None) -> list[str]:
+        """For each abstract, the title of its nearest library paper — display
+        flavor only. Falls back to a topic-based reason if there's no library or
+        the lookup fails."""
+        default = "Matches your monitored topic"
+        if not abstracts or (lib_ids is not None and len(lib_ids) == 0):
+            return [default] * len(abstracts)
+        try:
+            embeddings = self.vector_store.embed_texts(abstracts)
+        except Exception as e:  # noqa: BLE001
+            print(f"[monitor] reason embed failed: {e}")
+            return [default] * len(abstracts)
+        out = []
+        for emb in embeddings:
+            try:
+                hits = self.vector_store.search_by_embedding(
+                    embedding=emb, n_results=1, paper_ids=lib_ids)
+                top = self.db.get_paper(hits[0].paper_id) if hits else None
+                out.append(f"Related to: {top.title}" if top else default)
+            except Exception:  # noqa: BLE001
+                out.append(default)
+        return out
+
+    def _score_relevance_cosine(
+        self,
+        papers: list[ImportResult],
+        lib_ids: list[str] | None = None,
+        threshold: float = 0.5,
+    ) -> list[ScoredPaper]:
+        """Fallback used only when the reranker is unavailable: cosine similarity
+        of each abstract to the nearest library chunks. The threshold is held
+        higher than the old 0.3 so this degraded path is at least less noisy."""
         empty_library = (
             (lib_ids is not None and len(lib_ids) == 0)
             or (lib_ids is None and self.vector_store.count() == 0)
         )
         if empty_library:
             return [
-                ScoredPaper(paper=p, relevance_score=0.5, relevance_reason="No library to compare against")
+                ScoredPaper(paper=p, relevance_score=0.5,
+                            relevance_reason="No library to compare against")
                 for p in papers
             ]
 
-        # Cap at 5 papers — reduced from 8 to further lower peak memory.
-        # Batch embed all abstracts in one Voyage API call instead of one
-        # call per paper — eliminates N sequential HTTP round trips and
-        # reduces memory by releasing all embedding arrays together after
-        # the batch rather than holding each in memory during a loop.
-        papers = [p for p in papers[:5] if p.abstract]
+        papers = [p for p in papers[:MAX_RELEVANT_PER_TOPIC] if p.abstract]
         if not papers:
             return []
 
-        scored = []
+        scored: list[ScoredPaper] = []
         try:
-            # One Voyage call for all abstracts — batch is more memory-efficient
-            # than N sequential calls because the HTTP response is parsed once
-            # and the embedding list is released as a unit after use.
             abstracts = [p.abstract[:400] for p in papers]
             embeddings = self.vector_store.embed_texts(abstracts)
-
             for paper, embedding in zip(papers, embeddings):
                 try:
-                    # Use the pre-computed embedding directly for pgvector search
-                    # instead of re-embedding inside vector_store.search()
                     results = self.vector_store.search_by_embedding(
-                        embedding=embedding,
-                        n_results=3,
-                        paper_ids=lib_ids,
-                    )
+                        embedding=embedding, n_results=3, paper_ids=lib_ids)
                     if results:
                         avg_sim = 1 - (sum(r.score for r in results) / len(results))
                         avg_sim = max(0, min(1, avg_sim))
@@ -211,12 +276,10 @@ class MonitoringAgent:
                     continue
         except Exception as e:
             print(f"[monitor] batch embed failed: {e}")
-            # Fallback: skip scoring, return all papers as mildly relevant
             return [ScoredPaper(paper=p, relevance_score=0.4,
                                relevance_reason="Relevance scoring unavailable")
                     for p in papers]
 
-        # Sort by relevance (highest first)
         scored.sort(key=lambda s: s.relevance_score, reverse=True)
         return scored
 
@@ -352,15 +415,14 @@ class MonitoringAgent:
 
 
     @staticmethod
-    def _tier_from_similarity(sim: float) -> str:
-        """Map a library-similarity score (0..1, HIGHER = more relevant) to the
-        same tier vocabulary the search UI uses. Note this is the inverse of
-        settings.relevance_tier, which takes a cosine *distance* (lower = better)
-        — passing this similarity there would invert the labels, which is the bug
-        that made every monitored paper read as 'Broader field'."""
-        if sim >= 0.55:
+    def _tier_from_similarity(score: float) -> str:
+        """Map a relevance score (0..1, HIGHER = more relevant) to the tier
+        vocabulary the search UI uses. The score is now the cross-encoder rerank
+        relevance, so the cuts are calibrated for that scale (on-topic ~0.6-0.85,
+        off-topic ~0.30-0.45) rather than for cosine distance."""
+        if score >= RERANK_TIER_HIGH:
             return "highly_relevant"
-        if sim >= 0.42:
+        if score >= RERANK_KEEP:
             return "related"
         return "tangential"
 
