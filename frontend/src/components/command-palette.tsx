@@ -20,7 +20,8 @@ interface Cmd {
 const COMMANDS: Cmd[] = [
   { id: "dash", label: "Go to Dashboard", hint: "Situation room", icon: LayoutDashboard, action: (r) => r.push("/") },
   { id: "lib", label: "Go to Library", hint: "The corpus", icon: Library, action: (r) => r.push("/library") },
-  { id: "graph", label: "Open Knowledge Graph", hint: "Claim field", icon: Network, action: (r) => r.push("/graph"), keywords: "map network nodes" },
+  { id: "search", label: "Search your library", hint: "Search & answer", icon: Search, action: (r) => r.push("/search"), keywords: "ask question find passage answer rag" },
+  { id: "graph", label: "Open Knowledge Graph", hint: "Claim field", icon: Network, action: (r) => r.push("/graph"), keywords: "map network nodes clusters" },
   { id: "contra", label: "Run Contradiction Scan", hint: "Conflict map", icon: Zap, action: (r) => r.push("/contradictions"), keywords: "conflict tension" },
   { id: "hypo", label: "Generate Hypotheses", hint: "Generative bench", icon: FlaskConical, action: (r) => r.push("/hypotheses"), keywords: "ideas research questions" },
   { id: "monitor", label: "Open Research Monitor", hint: "Watch the literature", icon: Radar, action: (r) => r.push("/monitor"), keywords: "arxiv alerts new papers" },

@@ -383,6 +383,64 @@ class MonitoringAgent:
             "relevance_reason": sp.relevance_reason,
         }
 
+    @staticmethod
+    def _serialize_import(p: ImportResult) -> dict:
+        return {
+            "title": p.title,
+            "authors": p.authors[:5],
+            "year": p.year,
+            "abstract": (p.abstract or "")[:500],
+            "url": p.url,
+            "pdf_url": p.pdf_url,
+            "source": p.source,
+            "citation_count": p.citation_count,
+        }
+
+    def scan_citations(self, user_id: str, max_per_paper: int = 5) -> list[dict]:
+        """Find recent papers that cite the user's library papers — the alert a
+        researcher actually wants and a global search engine structurally can't
+        give (it has no notion of *your* library). Only papers carrying a DOI or
+        arXiv id are resolvable on Semantic Scholar."""
+        lib = self.db.papers_with_external_refs(user_id)
+        lib_titles = {t.lower().strip()[:60] for t in self.db.paper_title_map(user_id=user_id).values()}
+        groups: list[dict] = []
+        for paper in lib:
+            ref = (f"DOI:{paper['doi']}" if paper.get("doi")
+                   else f"ARXIV:{paper['arxiv_id']}" if paper.get("arxiv_id") else None)
+            if not ref:
+                continue
+            try:
+                citers = self.importer.s2.citing_papers(ref, max_results=max_per_paper * 2)
+            except Exception as e:  # noqa: BLE001
+                print(f"[monitor] citations failed for {paper['title'][:40]}: {e}")
+                continue
+            new = [c for c in citers if c.title.lower().strip()[:60] not in lib_titles][:max_per_paper]
+            if new:
+                groups.append({
+                    "cited_paper_id": paper["id"],
+                    "cited_title": paper["title"],
+                    "citers": [self._serialize_import(c) for c in new],
+                })
+            time.sleep(0.4)
+        return groups
+
+    def scan_authors(self, user_id: str, max_per_author: int = 5) -> list[dict]:
+        """New papers by the authors the user follows, deduped against the library."""
+        authors = self.db.list_followed_authors(user_id)
+        lib_titles = {t.lower().strip()[:60] for t in self.db.paper_title_map(user_id=user_id).values()}
+        out: list[dict] = []
+        for name in authors:
+            try:
+                papers = self.importer.s2.author_recent_papers(name, max_results=max_per_author * 2)
+            except Exception as e:  # noqa: BLE001
+                print(f"[monitor] author scan failed for {name}: {e}")
+                continue
+            new = [p for p in papers if p.title.lower().strip()[:60] not in lib_titles][:max_per_author]
+            if new:
+                out.append({"author": name, "papers": [self._serialize_import(p) for p in new]})
+            time.sleep(0.4)
+        return out
+
     def run_scan_persisted(
         self,
         topics: list[MonitorTopic],
