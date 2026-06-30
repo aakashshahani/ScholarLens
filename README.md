@@ -113,6 +113,8 @@ For each pair the model also produces:
 - `stronger_evidence`: which claim has more robust support, or "neither"
 - `resolution`: one sentence on how future research could resolve the conflict
 
+**Computed evidence strength.** Alongside the model's `stronger_evidence` verdict, a deterministic score is computed for each claim from the empirical cues it states — study design (RCT > cohort > case study), sample size, effect size, p-value, confidence intervals, and hedging language. It yields a 0–1 strength plus the named signals that produced it, and an `evidence_gap` indicating which side is better supported. This is a transparent second opinion (no model call), surfaced as chips in the Conflict Map; see `utils/evidence_strength.py`.
+
 **Prompt engineering:** The contradiction judge went through four iterations tracked against a formal eval set (see Evaluation section). The current prompt uses a decision tree structure that first distinguishes proxy vs. orthogonal measurements before asking for the contradiction classification, and includes six few-shot examples targeting the nuance/contradiction boundary — the hardest case for the model.
 
 **Cache behavior:** Judged relationships are persisted to a `relationships` table keyed on the sorted pair of claim IDs (`claim_lo`, `claim_hi`). Re-running a scan on the same papers costs zero judgment calls for pairs already seen. The upsert is idempotent — running the scan twice produces one row, not two.
@@ -123,13 +125,14 @@ For each pair the model also produces:
 
 The contradiction engine has a formal eval harness that runs independently of the production database.
 
-**Gold set:** 30 hand-labeled claim pairs drawn from real papers in the negotiation-AI literature, balanced across all four classes. The set deliberately oversamples nuance cases (the hardest class) and includes boundary pairs that a careless model would misclassify. A class-balanced set matters here: on an earlier imbalanced 20-pair set, a single miss could swing a class F1 by 0.3+.
+**Gold set:** 42 hand-labeled claim pairs across three domains — the original 30 from the negotiation-AI literature plus 12 cross-domain pairs (information-retrieval and LLM-reasoning). The negotiation set is balanced across all four classes and deliberately oversamples nuance (the hardest class); the cross-domain pairs exist to test generalization beyond the domain the prompt was tuned on. A deterministic hash-based train/test split lets you tune prompts on `train` and report on a held-out `test` split, and `run_eval.py` takes `--split` and `--domain` flags, printing per-domain macro-F1 so generalization is visible rather than hidden in one pooled number.
 
-**Two harnesses:**
+**Harnesses:**
 - `eval/run_eval.py` scores **Stage 2** (the LLM judge) by feeding gold pairs straight to `judge_pair(pair, use_cache=False)`, bypassing both the in-memory cache and the DB read/write path. Eval runs never contaminate production data and always hit the LLM fresh.
 - `eval/stage1_separation.py` scores **Stage 1 retrieval separation** independently. This split exists because the Stage 2 harness feeds gold pairs directly to the judge, so any retrieval-threshold sweep measured against Stage 2 macro-F1 would produce a flat line — retrieval has to be measured on its own.
+- `eval/rerank_eval.py` scores the **search reranker** (nDCG/MRR over a separate graded gold set) — see the Semantic search section.
 
-**Metrics:** 4-way macro-F1 (treats all classes equally regardless of frequency), Cohen's kappa (agreement corrected for chance), and binary tension F1 collapsing {contradiction, nuance} vs. {support, unrelated}.
+**Metrics:** 4-way macro-F1 (treats all classes equally regardless of frequency), Cohen's kappa (agreement corrected for chance), and binary tension F1 collapsing {contradiction, nuance} vs. {support, unrelated}. The table below was measured on the negotiation-AI set (the cross-domain pairs were added afterward to test generalization, not to move these numbers).
 
 | Version | Macro-F1 | Kappa | Binary Tension F1 |
 |---------|----------|-------|-------------------|
@@ -187,7 +190,9 @@ The previous implementation showed `(1 - cosine_distance) * 100` as a percentage
 
 ### 9. Research monitoring
 
-The monitoring agent searches Semantic Scholar, OpenAlex, and arXiv (in that priority order) for papers matching configured keywords, filters out papers already in the library by title-key deduplication, and scores each candidate by embedding its abstract against the library's existing chunks via pgvector. Candidate abstracts are batch-embedded in one Voyage API call per topic scan. Results are grouped by topic with relevance tiers. Per-source failures are reported honestly (a `SourceUnavailable` exception and a `sources_failed` field surface an arXiv-down banner rather than silently returning empty results), and queries are sanitised before dispatch. When Gmail credentials are configured, the agent sends an HTML digest email via SMTP after each scan, with honest `email_sent`/`email_error` status reporting. Topics and results are cached in localStorage so they survive page reloads.
+The monitoring agent searches Semantic Scholar, OpenAlex, and arXiv (in that priority order) for papers matching configured keywords, filters out papers already in the library by title-key deduplication, and scores each candidate by embedding its abstract against the library's existing chunks via pgvector. Candidate abstracts are batch-embedded in one Voyage API call per topic scan. Results are grouped by topic with relevance tiers. Per-source failures are reported honestly (a `SourceUnavailable` exception and a `sources_failed` field surface an arXiv-down banner rather than silently returning empty results), and queries are sanitised before dispatch. When Gmail credentials are configured, the agent sends an HTML digest email via SMTP after each scan, with honest `email_sent`/`email_error` status reporting.
+
+**Bounded, off-process execution.** The scan streams through topics one at a time, persisting each topic's results to a `monitor_results` table before moving on — so peak memory never holds every topic's results at once, and the page loads instantly from the DB (`GET /api/monitor/results`) rather than re-scanning. The whole scan runs as a standalone, memory-bounded cron worker (`python -m jobs.run_monitor`) so the heavy work stays off the web process — the source of the original OOM kills on Render's free tier. An in-process APScheduler fallback exists for single-dyno deploys, gated by `ENABLE_INPROCESS_MONITOR`.
 
 ---
 
@@ -211,7 +216,7 @@ The frontend mirrors this with localStorage caching (24-hour TTL, version-based 
 
 ScholarLens is multi-user: every account has its own private library, and the backend is hardened against the common web-app attack classes.
 
-**Authentication.** Email + password, with passwords hashed using **bcrypt** (never stored in plaintext). On login the server issues an opaque 256-bit session token stored in an **httpOnly + Secure + SameSite** cookie — httpOnly so JavaScript can't read it (defangs token theft via XSS), Secure so it's only sent over HTTPS, SameSite configurable via env var (`none` in production for cross-origin Vercel→Render requests). Sessions live server-side in a `sessions` table and rotate on each login. A FastAPI dependency (`get_current_user`) gates every protected endpoint.
+**Authentication.** Pluggable via `AUTH_PROVIDER`. The default is **email + password**: passwords hashed with **bcrypt** (never plaintext); on login the server issues an opaque 256-bit session token in an **httpOnly + Secure + SameSite** cookie — httpOnly so JavaScript can't read it (defangs token theft via XSS), Secure so it's only sent over HTTPS, SameSite configurable via env var (`none` in production for cross-origin Vercel→Render requests). Sessions live server-side in a `sessions` table and rotate on each login. Setting `AUTH_PROVIDER=clerk` instead verifies a **Clerk** session JWT (RS256 via the JWKS endpoint, issuer-checked) and resolves it to the internal user — linking by clerk-id first, then **verified** email, so an existing library is preserved across the switch and an unverified address can never inherit another user's data. Either way a single FastAPI dependency (`get_current_user`) gates every protected endpoint, and the internal `user_id` stays the durable key for all data, so the provider can change without re-keying anything.
 
 **Per-user data isolation.** Every paper carries a `user_id`; claims and relationships inherit ownership through their paper. Direct-object endpoints (`GET`/`DELETE /api/papers/{id}`) verify ownership and return `404` (not `403`) for another user's resource, so the API never reveals that an id exists. Aggregate features — search, contradictions, hypotheses, graph, insights, monitor — are scoped to the caller's paper IDs, closing the IDOR (insecure direct object reference) bug class.
 
@@ -241,7 +246,7 @@ ScholarLens is multi-user: every account has its own private library, and the ba
 │  ContradictionAgent — 2-stage pipeline (BM25+dense→LLM)│
 │  HypothesisAgent    — conflict-grounded synthesis      │
 │  PaperImporter      — S2 + OpenAlex + arXiv (priority) │
-│  MonitoringAgent    — topic watch + Gmail digest       │
+│  MonitoringAgent    — topic watch + cron digest worker │
 └──────────────┬──────────────────────────────────────────┘
                │
 ┌──────────────┴──────────────────────────────────────────┐
@@ -298,8 +303,13 @@ pip install -r requirements.txt
 # FERNET_KEY=<generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
 # VOYAGE_API_KEY=pa-...          (required — get from voyageai.com)
 # SEMANTIC_SCHOLAR_KEY=...       (optional — higher rate limits)
+# CONTACT_EMAIL=you@example.com  (optional — OpenAlex "polite pool" for faster imports)
 # GMAIL_USER=...                 (optional — for email digests)
 # GMAIL_APP_PASSWORD=...         (optional — Gmail app password)
+# AUTH_PROVIDER=password         (optional — "password" default, or "clerk")
+# CLERK_ISSUER=...               (only if AUTH_PROVIDER=clerk — see docs/CLERK_SETUP.md)
+# CLERK_JWKS_URL=...             (only if AUTH_PROVIDER=clerk)
+# ENABLE_INPROCESS_MONITOR=true  (optional — false to use the standalone cron worker)
 
 uvicorn api:app --reload --port 8000
 ```
@@ -324,6 +334,7 @@ App at `http://localhost:3000`.
 scholarlens/
   api.py                    FastAPI — all REST endpoints (auth-gated, per-user scoped)
   auth.py                   Auth: bcrypt passwords, sessions, Fernet key encryption, get_current_user
+  clerk_auth.py             Clerk JWT verification + identity linking (used when AUTH_PROVIDER=clerk)
   config/
     settings.py             Config, env vars, relevance tiers, security / auth / rate-limit settings
   db/
@@ -334,14 +345,20 @@ scholarlens/
     hypothesis_agent.py     Conflict-grounded hypothesis synthesis with batch novelty scoring
     paper_import.py         Semantic Scholar + OpenAlex + arXiv import + dedup + retry
     monitoring_agent.py     Topic monitoring + Gmail email digest
+  jobs/
+    run_monitor.py          Standalone monitor worker (Render Cron Job — off the web process)
+    link_account.py         One-shot helper to link a pre-Clerk account without losing papers
   utils/
     pdf_parser.py           PyMuPDF extraction, dynamic column detection, section-aware chunking
-    vector_store.py         pgvector wrapper — embed_query / embed_texts, cosine search via <=> operator
+    vector_store.py         pgvector wrapper — embed/search/rerank, HNSW index, cosine via <=>
     bm25_index.py           Lexical retrieval index for the hybrid Stage-1 pass
+    evidence_strength.py    Computed evidence-strength scoring from a claim's stated cues
   eval/
-    gold_claims.json        30 hand-labeled claim pairs, 4 balanced classes
-    run_eval.py             Stage 2 scoring (macro-F1, kappa, binary tension F1)
+    gold_claims.json        42 claim pairs across 3 domains, train/test split (contradiction judge)
+    run_eval.py             Stage 2 scoring (macro-F1, kappa, binary tension); --split / --domain
     stage1_separation.py    Stage 1 retrieval-separation harness
+    gold_search.json        25-query graded set with hard negatives (search reranker)
+    rerank_eval.py          Search reranking eval (nDCG / MRR), standalone (no DB)
   frontend/
     src/
       app/                  Next.js pages
@@ -376,19 +393,32 @@ All endpoints except `/api/health` and the `/api/auth/{register,login,logout}` r
 | DELETE | `/api/papers/{id}` | Delete paper, cascade claims + relationships |
 | POST | `/api/papers/{id}/reanalyze` | Re-run analyses, invalidate claim/relationship cache |
 | GET | `/api/papers/{id}/status` | Analysis completion status for polling |
-| POST | `/api/search` | Semantic search via pgvector, returns relevance tiers |
-| POST | `/api/ask` | RAG Q&A grounded in retrieved passages |
+| GET | `/api/papers/{id}/export` | Export a citation (BibTeX / RIS / APA / Chicago / MLA) |
+| GET | `/api/tags` | List the user's paper tags |
+| POST/DELETE | `/api/papers/{id}/tags` | Add or remove a tag on a paper |
+| GET | `/api/jobs/{id}` | Poll a background job (scan / hypotheses / monitor / ask) |
+| POST | `/api/search` | Semantic search — pgvector retrieve + cross-encoder rerank, relevance tiers |
+| POST | `/api/ask` | RAG Q&A grounded in retrieved passages (returns the sources) |
 | GET | `/api/contradictions/count` | Cached relationship counts — zero LLM calls |
-| GET | `/api/contradictions` | List persisted contradiction results — zero LLM calls |
+| GET | `/api/contradictions` | List persisted contradiction results (with evidence-strength) — zero LLM calls |
 | POST | `/api/contradictions` | Run two-stage contradiction scan |
+| POST | `/api/contradictions/{id}/feedback` | Record agree / disagree / flag on a relationship |
+| GET | `/api/contradictions/export` | Export contradiction report (markdown / json) |
 | GET | `/api/hypotheses` | Return most recent cached hypotheses — zero LLM calls |
 | POST | `/api/hypotheses` | Generate conflict-grounded hypotheses |
+| GET | `/api/hypotheses/runs` | List past generation runs (and `/runs/{id}` for one) |
+| GET/POST | `/api/hypotheses/feedback` | Read / persist 👍👎 votes per hypothesis |
+| GET | `/api/hypotheses/export` | Export hypotheses (markdown / json) |
 | POST | `/api/graph` | Build claim knowledge graph (`compute=false` read-only by default) |
+| GET/POST | `/api/graph/clusters` | List or detect debate clusters |
 | POST | `/api/insights` | Synthesized insight feed — pure DB read |
-| POST | `/api/import/search` | Search arXiv / Semantic Scholar |
+| POST | `/api/import/search` | Search Semantic Scholar / OpenAlex / arXiv |
 | POST | `/api/import/lookup` | Lookup by arXiv ID, DOI, or URL |
 | POST | `/api/import/add` | Import paper — dedup check before PDF download |
-| POST | `/api/monitor/scan` | Run monitoring scan with optional email digest |
+| POST | `/api/monitor/scan` | Run monitoring scan (background job) with optional email digest |
+| GET | `/api/monitor/results` | Latest persisted scan results — pure DB read |
+| GET/POST/DELETE | `/api/monitor/topics` | List, create, or delete saved monitor topics |
+| POST | `/api/monitor/test-digest` | Trigger an immediate scan + send a test digest |
 | POST | `/api/admin/fix-abstracts` | Re-fetch truncated abstracts *(admin — token-gated)* |
 
 Full interactive docs at `/api/docs`.
@@ -399,16 +429,17 @@ Full interactive docs at `/api/docs`.
 
 **Done**
 
-Core pipeline: 6-type parallel analysis, two-stage contradiction detection (macro-F1 0.788, kappa 0.683), evidence-grounded claim extraction, BM25+dense hybrid retrieval, hypothesis generation with batch novelty scoring, research monitor with Gmail digest, semantic search with relevance tiers, insight feed as a pure DB read, read-only knowledge graph with gated compute path, Semantic Scholar + OpenAlex + arXiv import with dedup.
+Core pipeline: 6-type parallel analysis, two-stage contradiction detection (macro-F1 0.788, kappa 0.683 on the negotiation-AI set; gold set expanded to 42 pairs across 3 domains with a train/test split), computed evidence-strength scoring, evidence-grounded claim extraction, BM25+dense hybrid retrieval, hypothesis generation with batch novelty scoring and persisted feedback, research monitor with Gmail digest, semantic search with HNSW-indexed retrieval + cross-encoder reranking and relevance tiers, insight feed as a pure DB read, read-only knowledge graph with gated compute path, Semantic Scholar + OpenAlex + arXiv import with dedup.
 
-Security and multi-user: email + password auth (bcrypt, httpOnly session cookies), per-user library scoping and IDOR-safe ownership checks, BYOK with Fernet key encryption, model selection with server-side ceiling, upload hardening (magic-byte check, size cap, path-traversal-safe UUID filenames), per-IP rate limiting, parameterized queries throughout.
+Security and multi-user: pluggable auth — email + password (bcrypt, httpOnly session cookies) or Clerk JWT verification with verified-email linking — per-user library scoping and IDOR-safe ownership checks, BYOK with Fernet key encryption, model selection with server-side ceiling, upload hardening (magic-byte check, size cap, path-traversal-safe UUID filenames), per-IP rate limiting, parameterized queries throughout.
 
 Frontend: dashboard with parallel API loading, login/register gate, settings panel (BYOK key management, model picker), per-user localStorage cache namespacing, stale-while-revalidate across all tabs.
 
-Infrastructure: migrated from SQLite + ChromaDB to Supabase Postgres + pgvector. Deployed on Render (backend) + Vercel (frontend). Daily monitor scheduling via APScheduler BackgroundScheduler (9am UTC, per-user topics, Gmail digest).
+Infrastructure: migrated from SQLite + ChromaDB to Supabase Postgres + pgvector (HNSW index, self-healing connection pool). Deployed on Render (backend) + Vercel (frontend). Daily monitor as a standalone, memory-bounded cron worker (9am UTC, per-user topics, Gmail digest), with an in-process APScheduler fallback.
 
 **Later**
-- Cross-encoder reranking on the Stage-1 retrieval pass
+- Apply the cross-encoder reranker to the contradiction Stage-1 candidate pairs (search reranking is already shipped)
+- Merge Search + Ask into one surface; monitor citation-alerts + author-follow
 - Demo video
 
 ---
