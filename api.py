@@ -1625,9 +1625,9 @@ def monitor_scan(request: Request, req: MonitorRequest,
 
     topics = [
         MonitorTopic(
-            name=t["name"],
-            keywords=t["keywords"],
-            sources=t.get("sources", ["semantic_scholar", "openalex", "arxiv"]),
+            name=t.name,
+            keywords=[str(k) for k in t.keywords],
+            sources=t.sources,
         )
         for t in req.topics
     ]
