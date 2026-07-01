@@ -334,6 +334,7 @@ pip install -r requirements.txt
 # VOYAGE_API_KEY=pa-...          (required — get from voyageai.com)
 # SEMANTIC_SCHOLAR_KEY=...       (optional — higher rate limits)
 # CONTACT_EMAIL=you@example.com  (optional — OpenAlex "polite pool" for faster imports)
+# OPENALEX_API_KEY=...           (optional — free key; exempts search from OpenAlex's anonymous rate limit)
 # GMAIL_USER=...                 (optional — for email digests)
 # GMAIL_APP_PASSWORD=...         (optional — Gmail app password)
 # AUTH_PROVIDER=password         (optional — "password" default, or "clerk")

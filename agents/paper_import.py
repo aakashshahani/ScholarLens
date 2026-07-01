@@ -257,6 +257,13 @@ class OpenAlexSource:
         email = self._mailto()
         if email:
             params["mailto"] = email
+        # A free OpenAlex API key exempts search from the anonymous rate limit
+        # (their `search=` endpoint 503s "Anonymous search is temporarily
+        # rate-limited due to heavy load" without one). Optional — falls back to
+        # the anonymous/polite pool when unset. Get one at openalex.org/rest-api.
+        api_key = os.getenv("OPENALEX_API_KEY", "")
+        if api_key:
+            params["api_key"] = api_key
         return params
 
     @staticmethod
