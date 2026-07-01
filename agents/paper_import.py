@@ -143,11 +143,16 @@ class ArxivSource:
         try:
             # Separate connect timeout (10s) from read timeout (45s).
             # arXiv's API is slow to respond but usually delivers if given time.
+            # Sort by relevance, not date. submittedDate returned the *newest*
+            # papers that loosely matched any term — so "LLM negotiation" surfaced
+            # song-generation and astronomy preprints. Quoting multi-word queries
+            # (all:"a b") keeps the terms together; the reranker filters after.
+            term = f'"{query}"' if " " in query else query
             resp = _session.get(self.BASE, params={
-                "search_query": f"all:{query}",
+                "search_query": f"all:{term}",
                 "start": 0,
                 "max_results": max_results,
-                "sortBy": "submittedDate",
+                "sortBy": "relevance",
                 "sortOrder": "descending",
             }, timeout=(10, 45))
             resp.raise_for_status()
