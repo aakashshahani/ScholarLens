@@ -474,10 +474,6 @@ Frontend: dashboard with parallel API loading, login/register gate, settings pan
 
 Infrastructure: migrated from SQLite + ChromaDB to Supabase Postgres + pgvector (HNSW index, self-healing connection pool). Deployed on Render (backend) + Vercel (frontend). Daily monitor as a standalone, memory-bounded cron worker (9am UTC, per-user topics, Gmail digest), with an in-process APScheduler fallback.
 
-**Later**
-- Apply the cross-encoder reranker to the contradiction Stage-1 candidate pairs (search reranking is already shipped)
-- Inline PDF viewer with passage highlighting; "lit-review export" composing conflicts + evidence-strength + hypotheses
-- Demo video
 
 ---
 
