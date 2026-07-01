@@ -592,9 +592,10 @@ def auth_me(user: User = Depends(authlib.get_current_user)):
 @app.get("/api/settings")
 def get_settings(user: User = Depends(authlib.get_current_user)):
     data = _public_user(user)
-    # Show only a masked placeholder when a key is stored â€" never decrypt for
-    # display, so the plaintext key is never sent back to the client.
-    data["api_key_masked"] = "â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢" if user.api_key_encrypted else None
+    # Show only a masked placeholder when a key is stored — never decrypt for
+    # display, so the plaintext key is never sent back to the client. Use a
+    # Unicode escape for the bullet so an editor can't mangle it into mojibake.
+    data["api_key_masked"] = "•" * 12 if user.api_key_encrypted else None
     data["allowed_models"] = [
         {"id": mid, "label": info["label"], "tier": info["tier"]}
         for mid, info in settings.ALLOWED_MODELS.items()
