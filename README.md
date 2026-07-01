@@ -8,6 +8,8 @@ Most tools that let you "chat with your PDFs" treat the **paper** as the unit of
 
 Built because I was spending weeks manually cross-referencing papers for my own lab research and got tired of it.
 
+![ScholarLens demo](frontend/public/screenshots/demo.gif)
+
 ---
 
 ## Features
