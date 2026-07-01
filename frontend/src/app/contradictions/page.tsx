@@ -491,12 +491,30 @@ function Adjudication({ r, feedback, onFeedback }: {
           <div className="text-[12.5px] text-[var(--text-1)] leading-[1.65]">{r.resolution}</div>
         </div>
       )}
-      {stronger && (
-        <div className="mb-4 pb-4 border-b border-[var(--line)]">
-          <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-1.5">Stronger evidence</div>
-          <div className="text-[12.5px] text-[var(--support)] font-medium">{stronger}</div>
-        </div>
-      )}
+      {stronger && (() => {
+        // Compare the LLM's call against the deterministic computed gap so the
+        // two evidence sections read as "model's opinion + whether the stated
+        // cues back it up", not two redundant "stronger evidence" lines.
+        const llmSide = r.stronger_evidence === "paper_a" ? "claim_a"
+          : r.stronger_evidence === "paper_b" ? "claim_b" : null;
+        const computed = r.evidence_gap?.stronger;
+        const agree = llmSide && computed && computed !== "neither"
+          ? (llmSide === computed ? "agree" : "differ") : null;
+        return (
+          <div className="mb-4 pb-4 border-b border-[var(--line)]">
+            <div className="text-[11px] font-medium text-[var(--text-3)] uppercase tracking-wider mb-1.5">LLM verdict · stronger evidence</div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[12.5px] text-[var(--support)] font-medium">{stronger}</span>
+              {agree === "agree" && (
+                <span className="text-[9.5px] px-1.5 py-0.5 rounded-full bg-[var(--support-dim)] text-[var(--support)] border border-[var(--support-line)] uppercase tracking-wider">stated cues agree</span>
+              )}
+              {agree === "differ" && (
+                <span className="text-[9.5px] px-1.5 py-0.5 rounded-full bg-[var(--nuance-dim)] text-[var(--nuance)] border border-[var(--nuance-line)] uppercase tracking-wider">stated cues differ</span>
+              )}
+            </div>
+          </div>
+        );
+      })()}
       {/* Computed evidence strength — independent of the LLM's stronger_evidence
           verdict above. Derived from the cues each claim states. */}
       {(r.claim_a.evidence_strength || r.claim_b.evidence_strength) && (
