@@ -8,7 +8,7 @@ Most tools that let you "chat with your PDFs" treat the **paper** as the unit of
 
 Built because I was spending weeks manually cross-referencing papers for my own lab research and got tired of it.
 
-![ScholarLens demo](frontend/public/screenshots/demo.gif)
+<p align="center"><img src="frontend/public/screenshots/demo.gif" alt="ScholarLens demo — dashboard, knowledge graph, conflict map, hypotheses, search, monitor" width="780"></p>
 
 ---
 
@@ -30,31 +30,31 @@ Built because I was spending weeks manually cross-referencing papers for my own 
 
 **Conflict map** — every place your papers disagree, claim against claim, with the LLM verdict and a computed evidence-strength second opinion.
 
-![Conflict map](frontend/public/screenshots/conflict-map.png)
+<img src="frontend/public/screenshots/conflict-map.png" alt="Conflict map" width="720">
 
 **Dashboard** — the situation room: library state and where the tension is, at a glance.
 
-![Dashboard](frontend/public/screenshots/dashboard.png)
+<img src="frontend/public/screenshots/dashboard.png" alt="Dashboard" width="720">
 
 **Knowledge graph** — claim-level force simulation (no D3), paper-colored nodes, contradiction/support/nuance edges, with a debate-cluster view.
 
-![Knowledge graph](frontend/public/screenshots/knowledge-graph.png)
+<img src="frontend/public/screenshots/knowledge-graph.png" alt="Knowledge graph" width="720">
 
 **Search → answer** — retrieve passages by meaning (reranked), then synthesize a grounded answer over those same sources on demand.
 
-![Search and answer](frontend/public/screenshots/search.png)
+<img src="frontend/public/screenshots/search.png" alt="Search and answer" width="720">
 
 **Research monitor** — new papers matching your topics, plus citation alerts and author-follow native to your own library.
 
-![Research monitor](frontend/public/screenshots/monitor.png)
+<img src="frontend/public/screenshots/monitor.png" alt="Research monitor" width="720">
 
 **Hypotheses** — conflict-grounded hypotheses that cite specific contradictions, scored for novelty against your library.
 
-![Hypotheses](frontend/public/screenshots/hypotheses.png)
+<img src="frontend/public/screenshots/hypotheses.png" alt="Hypotheses" width="720">
 
 **Library** — the corpus and its six structured analyses per paper, with one-click export to BibTeX / RIS / APA.
 
-![Library](frontend/public/screenshots/library.png)
+<img src="frontend/public/screenshots/library.png" alt="Library" width="720">
 
 ---
 
