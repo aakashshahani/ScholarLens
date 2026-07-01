@@ -118,6 +118,8 @@ export interface Hypothesis {
   rationale: string;
   supporting_papers: { paper_id: string; title: string; relevant_finding: string }[];
   source_conflicts: string[];               // validated relationship IDs
+  // Readable labels for the cited conflicts (the conflicting paper pair + type).
+  conflict_details?: { id: string; paper_a: string; paper_b: string; type: string }[];
   grounding: "detected_conflicts" | "single_paper_gaps" | string;
   methodology: string;
   challenges: string[];

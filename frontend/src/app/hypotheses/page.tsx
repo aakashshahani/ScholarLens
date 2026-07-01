@@ -431,17 +431,34 @@ ${rows}
                         ))}
                       </div>
 
-                      {/* Source conflicts */}
+                      {/* Source conflicts — show the conflicting paper pair, not
+                          a raw UUID. Falls back to the id for older cached runs. */}
                       {isGrounded && h.source_conflicts?.length > 0 && (
                         <div className="mb-4">
                           <SectionLabel>Grounded in contradictions</SectionLabel>
                           <div className="flex flex-wrap gap-1.5">
-                            {h.source_conflicts.map((cid: string) => (
-                              <Link key={cid} href="/contradictions"
-                                className="inline-flex items-center px-2 py-0.5 rounded-[var(--r-md)] bg-[var(--contra-dim)] text-[var(--contra)] text-[10.5px] mono border border-[var(--contra-line)] hover:border-[var(--contra)] t-all">
-                                {cid.slice(0, 8)}…
-                              </Link>
-                            ))}
+                            {(h.conflict_details?.length
+                              ? h.conflict_details
+                              : h.source_conflicts.map((id) => ({ id, paper_a: "", paper_b: "", type: "" }))
+                            ).map((c) => {
+                              const shorten = (t: string) => (t.length > 26 ? t.slice(0, 26) + "…" : t);
+                              const label = c.paper_a && c.paper_b
+                                ? `${shorten(c.paper_a)}  ⚔  ${shorten(c.paper_b)}`
+                                : `${c.id.slice(0, 8)}…`;
+                              // Static class strings (Tailwind can't see interpolated names).
+                              const toneClass = c.type === "support"
+                                ? "bg-[var(--support-dim)] text-[var(--support)] border-[var(--support-line)] hover:border-[var(--support)]"
+                                : c.type === "nuance"
+                                ? "bg-[var(--nuance-dim)] text-[var(--nuance)] border-[var(--nuance-line)] hover:border-[var(--nuance)]"
+                                : "bg-[var(--contra-dim)] text-[var(--contra)] border-[var(--contra-line)] hover:border-[var(--contra)]";
+                              return (
+                                <Link key={c.id} href="/contradictions" title={c.type ? `${c.type}: ${c.paper_a} ⚔ ${c.paper_b}` : undefined}
+                                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] border t-all ${toneClass}`}>
+                                  {c.type && <span className="uppercase tracking-wider text-[9px] opacity-70">{c.type}</span>}
+                                  {label}
+                                </Link>
+                              );
+                            })}
                           </div>
                         </div>
                       )}
@@ -481,13 +498,15 @@ ${rows}
                   <div className="space-y-2.5">
                     {[...hypotheses]
                       .sort((a, b) => (b.novelty_score || 0) - (a.novelty_score || 0))
-                      .map((h, rankIdx) => {
+                      .map((h) => {
                         const cardNum = hypotheses.indexOf(h) + 1;
                         const score = h.novelty_score || 0;
                         const color = score > 0.30 ? "var(--support)" : score > 0.12 ? "var(--nuance)" : "var(--text-3)";
-                        // Width is relative to the top-ranked bar so differences
-                        // are visible even when absolute scores cluster tightly.
-                        const width = 30 + (score / maxNoveltyScore) * 70; // floor 30% so smallest bar still reads
+                        // Honest fixed scale (0 → 0.40 cosine distance = clearly
+                        // new territory). No stretch-to-max, so tightly clustered
+                        // scores read as genuinely similar rather than faking a
+                        // ranking that the numbers don't support.
+                        const width = Math.max(6, Math.min(1, score / 0.40) * 100);
                         return (
                           <div key={h.id} className="flex items-center gap-2.5">
                             <span className="mono text-[11px] text-[var(--text-3)] w-5 shrink-0">H{cardNum}</span>
@@ -498,6 +517,11 @@ ${rows}
                         );
                       })}
                   </div>
+                  {maxNoveltyScore < 0.30 && (
+                    <div className="text-[10.5px] text-[var(--text-4)] leading-[1.5] mt-3 pt-3 border-t border-[var(--line)]">
+                      These hypotheses extend conflicts already in your library — novelty is modest across the set.
+                    </div>
+                  )}
                 </Card>
               </div>
             </div>

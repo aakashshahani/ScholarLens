@@ -60,6 +60,7 @@ class Hypothesis:
     statement: str
     rationale: str
     source_conflicts: list[str]     # validated relationship IDs from the DB
+    conflict_details: list[dict]    # [{id, paper_a, paper_b, type}] for readable UI chips
     supporting_papers: list[dict]   # [{paper_id, title, relevant_finding}]
     methodology: str
     challenges: list[str]
@@ -75,6 +76,7 @@ class Hypothesis:
             "statement": self.statement,
             "rationale": self.rationale,
             "source_conflicts": self.source_conflicts,
+            "conflict_details": self.conflict_details,
             "supporting_papers": self.supporting_papers,
             "methodology": self.methodology,
             "challenges": self.challenges,
@@ -87,7 +89,10 @@ class Hypothesis:
 
     @staticmethod
     def from_dict(d: dict) -> "Hypothesis":
-        return Hypothesis(**{k: d[k] for k in Hypothesis.__dataclass_fields__})
+        kwargs = {k: d[k] for k in Hypothesis.__dataclass_fields__ if k in d}
+        # Tolerate older cached payloads that predate conflict_details.
+        kwargs.setdefault("conflict_details", [])
+        return Hypothesis(**kwargs)
 
 
 class HypothesisAgent:
@@ -405,6 +410,16 @@ class HypothesisAgent:
         valid_conflict_ids = set(conflict_ids)
         rq = research_question or "Generated from library analysis"
 
+        # Readable labels for cited conflicts — the UI shows the conflicting
+        # paper pair, not a raw UUID. Resolved once here from the relationship
+        # table + title map.
+        try:
+            _titles = self.db.paper_title_map(user_id=user_id)
+            _rels = {r.id: r for r in self.db.list_relationships(paper_ids=list(_titles.keys()))}
+        except Exception as e:  # noqa: BLE001
+            print(f"[hypotheses] conflict-label lookup failed: {e}")
+            _titles, _rels = {}, {}
+
         # Batch-embed all hypothesis statements in one Voyage call instead of
         # one call per hypothesis inside _score_novelty.
         statements = [item.get("statement", "") for item in parsed]
@@ -427,6 +442,17 @@ class HypothesisAgent:
                 real_id = label_to_real.get(label)
                 if real_id and real_id in valid_conflict_ids:
                     cited.append(real_id)
+
+            # Resolve each cited conflict to its paper pair + type for the UI.
+            conflict_details = []
+            for rid in cited:
+                r = _rels.get(rid)
+                conflict_details.append({
+                    "id": rid,
+                    "paper_a": _titles.get(r.paper_a, "") if r else "",
+                    "paper_b": _titles.get(r.paper_b, "") if r else "",
+                    "type": r.relationship if r else "",
+                })
 
             # Map paper titles to IDs — try exact then lowercase-normalized
             supporting = []
@@ -467,6 +493,7 @@ class HypothesisAgent:
                 statement=statement,
                 rationale=item.get("rationale", ""),
                 source_conflicts=cited,
+                conflict_details=conflict_details,
                 supporting_papers=supporting,
                 methodology=item.get("methodology", ""),
                 challenges=item.get("challenges", []),
