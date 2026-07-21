@@ -29,3 +29,6 @@ design_handoff_scholarlens/
 
 # Working docs — local reference (audit notes, setup guides), not app code
 docs/
+
+# Private study notes (kept local, not published)
+docs/STUDY_GUIDE.md
