@@ -757,27 +757,36 @@ class Database:
         return re.sub(r"[^a-z0-9]", "", (title or "").lower())[:80]
 
     def find_duplicate(self, title: str, doi: str | None = None,
-                       arxiv_id: str | None = None) -> Paper | None:
-        with self._cursor() as cur:
-            if doi:
-                cur.execute("SELECT * FROM papers WHERE doi = %s", (doi,))
-                row = cur.fetchone()
-                if row:
-                    return self._row_to_paper(row)
-            if arxiv_id:
-                cur.execute("SELECT * FROM papers WHERE arxiv_id = %s", (arxiv_id,))
-                row = cur.fetchone()
-                if row:
-                    return self._row_to_paper(row)
-            key = self._title_key(title)
-            if key:
-                cur.execute("SELECT id, title FROM papers")
-                for row in cur.fetchall():
-                    if self._title_key(row["title"]) == key:
-                        cur.execute("SELECT * FROM papers WHERE id = %s", (row["id"],))
-                        full = cur.fetchone()
-                        return self._row_to_paper(full) if full else None
+                       arxiv_id: str | None = None, *, user_id: str,
+                       exclude_id: str | None = None) -> Paper | None:
+        """A paper already in `user_id`'s library matching by DOI, arXiv id
+        (ignoring the version suffix) or normalised title. Scoped to one user:
+        the same paper in someone else's library is not a duplicate.
+        `exclude_id` skips the row being checked (a just-ingested upload)."""
+        conds = []
+        params: list = []
+        if doi:
+            conds.append("lower(doi) = lower(%s)")
+            params.append(doi.strip())
+        if arxiv_id:
+            conds.append(r"regexp_replace(arxiv_id, 'v\d+$', '') = %s")
+            params.append(re.sub(r"v\d+$", "", arxiv_id.strip()))
+        key = self._title_key(title)
+        if key:
+            conds.append("left(regexp_replace(lower(title), '[^a-z0-9]', '', 'g'), 80) = %s")
+            params.append(key)
+        if not conds:
             return None
+        sql = f"SELECT * FROM papers WHERE user_id = %s AND ({' OR '.join(conds)})"
+        params.insert(0, user_id)
+        if exclude_id:
+            sql += " AND id != %s"
+            params.append(exclude_id)
+        sql += " ORDER BY created_at ASC LIMIT 1"
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            return self._row_to_paper(row) if row else None
 
     @staticmethod
     def _row_to_paper(row) -> Paper:

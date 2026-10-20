@@ -866,8 +866,9 @@ async def upload_paper(
 
     # Dedup is per-user: a paper already in THIS user's library is a duplicate;
     # the same paper in another user's library is not (each owner keeps a copy).
-    existing = db.find_duplicate(paper.title, doi=paper.doi, arxiv_id=paper.arxiv_id)
-    if existing and existing.id != paper.id and existing.user_id == user.id:
+    existing = db.find_duplicate(paper.title, doi=paper.doi, arxiv_id=paper.arxiv_id,
+                                 user_id=user.id, exclude_id=paper.id)
+    if existing:
         agent.vector_store.delete_paper_chunks(paper.id)
         db.delete_paper(paper.id)
         try:
@@ -1485,8 +1486,8 @@ def import_add(
     # Dedup BEFORE downloading â€" per user (same paper in another user's library
     # is not a duplicate for this user).
     arxiv_id = req.source_id if req.source == "arxiv" else None
-    existing = db.find_duplicate(req.title, doi=req.doi, arxiv_id=arxiv_id)
-    if existing and existing.user_id == user.id:
+    existing = db.find_duplicate(req.title, doi=req.doi, arxiv_id=arxiv_id, user_id=user.id)
+    if existing:
         return {
             "id": existing.id,
             "title": existing.title,
@@ -2348,8 +2349,9 @@ async def upload_papers_batch(
             save_path.write_bytes(content)
             model = _resolve_model_and_meter(user)
             paper = agent.ingest_pdf(save_path, filename=display_name, api_key=user_key, model=model)
-            existing = db.find_duplicate(paper.title, doi=paper.doi, arxiv_id=paper.arxiv_id)
-            if existing and existing.id != paper.id and existing.user_id == user.id:
+            existing = db.find_duplicate(paper.title, doi=paper.doi, arxiv_id=paper.arxiv_id,
+                                         user_id=user.id, exclude_id=paper.id)
+            if existing:
                 agent.vector_store.delete_paper_chunks(paper.id)
                 db.delete_paper(paper.id)
                 try:
