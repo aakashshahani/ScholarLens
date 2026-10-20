@@ -14,7 +14,6 @@ from pathlib import Path
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import json
 import os
 import re
 import threading
@@ -231,21 +230,9 @@ try:
         if stale:
             print(f"[scheduler] Purged {len(stale)} stale jobs")
         try:
-            _conn = db._get_conn()
-            _cur = _conn.cursor()
-            try:
-                from datetime import datetime, timezone
-                _cur.execute(
-                    "DELETE FROM sessions WHERE expires_at < %s",
-                    (datetime.now(timezone.utc).isoformat(),),
-                )
-                deleted = _cur.rowcount
-                _conn.commit()
-                if deleted:
-                    print(f"[scheduler] Cleaned up {deleted} expired sessions")
-            finally:
-                _cur.close()
-                db._put_conn(_conn)
+            deleted = db.delete_expired_sessions()
+            if deleted:
+                print(f"[scheduler] Cleaned up {deleted} expired sessions")
         except Exception as e:
             print(f"[scheduler] Session cleanup failed: {e}")
 
@@ -694,13 +681,7 @@ def fix_abstracts():
         try:
             result = importer.lookup(p.title)
             if result and result.abstract and len(result.abstract) > len(p.abstract or ""):
-                clean = _normalize_abstract(result.abstract)
-                _conn = db._get_conn()
-                _cur = _conn.cursor()
-                _cur.execute("UPDATE papers SET abstract=%s WHERE id=%s", (clean, p.id))
-                _conn.commit()
-                _cur.close()
-                db._put_conn(_conn)
+                db.update_paper_abstract(p.id, _normalize_abstract(result.abstract))
                 updated += 1
                 print(f"Fixed abstract for: {p.title[:60]}")
         except Exception as e:
@@ -928,18 +909,7 @@ def reanalyze_paper(request: Request, paper_id: str, background_tasks: Backgroun
     # Invalidate cached claims + their relationships so they're freshly derived
     claim_ids = [c.id for c in db.get_claims_for_paper(paper_id)]
     db.delete_claims_for_paper(paper_id)
-    if claim_ids:
-        _conn = db._get_conn()
-        _cur = _conn.cursor()
-        try:
-            _cur.execute(
-                "DELETE FROM relationships WHERE claim_lo = ANY(%s) OR claim_hi = ANY(%s)",
-                (claim_ids, claim_ids),
-            )
-            _conn.commit()
-        finally:
-            _cur.close()
-            db._put_conn(_conn)
+    db.delete_relationships_for_claims(claim_ids)
     background_tasks.add_task(_analyze_paper_bg, paper_id, authlib.resolve_user_api_key(user), _resolve_model_and_meter(user))
     return {"id": paper_id, "status": "analyzing"}
 
@@ -1539,20 +1509,11 @@ def import_add(
 
     # Update metadata from the source (better than what PDF extraction finds),
     # and stamp ownership in the same write.
-    # Uses db._get_conn()/_put_conn() to go through the shared pool rather
-    # than opening a raw connection that could leak on exception.
-    _conn = db._get_conn()
-    _cur = _conn.cursor()
-    try:
-        _cur.execute(
-            "UPDATE papers SET title=%s, authors=%s, abstract=%s, year=%s, source=%s, doi=%s, arxiv_id=%s, user_id=%s WHERE id=%s",
-            (req.title, json.dumps(req.authors), _normalize_abstract(req.abstract), req.year,
-             req.source, req.doi, arxiv_id, user.id, paper.id),
-        )
-        _conn.commit()
-    finally:
-        _cur.close()
-        db._put_conn(_conn)
+    db.update_imported_paper(
+        paper.id, title=req.title, authors=req.authors,
+        abstract=_normalize_abstract(req.abstract), year=req.year,
+        source=req.source, doi=req.doi, arxiv_id=arxiv_id, user_id=user.id,
+    )
 
     # Analyze in background
     background_tasks.add_task(_analyze_paper_bg, paper.id, user_key, model)

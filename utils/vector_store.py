@@ -10,13 +10,13 @@ at the same price ($0.02/M tokens). Requires: VOYAGE_API_KEY in environment.
 
 from dataclasses import dataclass
 
+from contextlib import contextmanager
+
 import psycopg2
 import psycopg2.extras
-import psycopg2.pool
-from psycopg2.extras import RealDictCursor
 
 from config import settings
-from db.database import _get_pool, _reset_pool
+from db.database import pooled_connection
 
 
 @dataclass
@@ -38,22 +38,15 @@ class VectorStore:
         self._client = None
         self._init_table()
 
-    def _get_conn(self):
-        """Borrow a connection from the shared pool, recovering if it was
-        exhausted by leaked connections from earlier query errors."""
-        try:
-            conn = _get_pool().getconn()
-        except psycopg2.pool.PoolError:
-            _reset_pool()
-            conn = _get_pool().getconn()
-        conn.cursor_factory = RealDictCursor
-        return conn
-
-    def _put_conn(self, conn, *, close: bool = False):
-        try:
-            _get_pool().putconn(conn, close=close)
-        except Exception:
-            pass
+    @contextmanager
+    def _cursor(self):
+        """A dict cursor on a pooled connection; commits on clean exit."""
+        with pooled_connection() as conn:
+            cur = conn.cursor()
+            try:
+                yield cur
+            finally:
+                cur.close()
 
     @property
     def client(self):
@@ -64,26 +57,23 @@ class VectorStore:
         return self._client
 
     def _init_table(self):
-        conn = self._get_conn()
-        cur = conn.cursor()
-        cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        # 1024 dims — voyage-3.5-lite default output dimension
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS embeddings (
-                chunk_id    TEXT PRIMARY KEY,
-                paper_id    TEXT NOT NULL,
-                text        TEXT NOT NULL,
-                section     TEXT,
-                embedding   vector(1024) NOT NULL
+        # Table + btree index commit on their own, so a failure creating the
+        # ANN index below can't discard the schema.
+        with self._cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            # 1024 dims — voyage-3.5-lite default output dimension
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS embeddings (
+                    chunk_id    TEXT PRIMARY KEY,
+                    paper_id    TEXT NOT NULL,
+                    text        TEXT NOT NULL,
+                    section     TEXT,
+                    embedding   vector(1024) NOT NULL
+                )
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_embeddings_paper ON embeddings(paper_id)"
             )
-        """)
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_embeddings_paper ON embeddings(paper_id)"
-        )
-        # Commit the table + btree index before attempting the ANN index, so a
-        # failure there can be rolled back in isolation without discarding the
-        # schema we just created.
-        conn.commit()
 
         # Approximate-nearest-neighbour index for cosine distance. Without it,
         # every `<=>` query is a sequential scan over the whole table — slow and
@@ -91,18 +81,15 @@ class VectorStore:
         # `vector_cosine_ops` opclass matches the `<=>` operator used in search.
         # IF NOT EXISTS keeps this a no-op on every boot after the first.
         try:
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_embeddings_hnsw "
-                "ON embeddings USING hnsw (embedding vector_cosine_ops)"
-            )
-            conn.commit()
+            with self._cursor() as cur:
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_embeddings_hnsw "
+                    "ON embeddings USING hnsw (embedding vector_cosine_ops)"
+                )
         except psycopg2.Error as exc:
-            # Older pgvector (<0.5.0) lacks HNSW. Roll back just this statement;
-            # search falls back to the exact sequential scan — correct, slower.
-            conn.rollback()
+            # Older pgvector (<0.5.0) lacks HNSW; the failed statement was
+            # rolled back and search falls back to the exact sequential scan.
             print(f"[vector_store] HNSW index unavailable, using exact scan: {exc}")
-        cur.close()
-        self._put_conn(conn)
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of document texts."""
@@ -155,24 +142,20 @@ class VectorStore:
         # Strip NUL bytes — Postgres rejects them in string literals
         texts = [t.replace("\x00", "") if t else t for t in texts]
         embeddings = self.embed_texts(texts)
-        conn = self._get_conn()
-        cur = conn.cursor()
-        psycopg2.extras.execute_batch(
-            cur,
-            """INSERT INTO embeddings (chunk_id, paper_id, text, section, embedding)
-               VALUES (%s, %s, %s, %s, %s::vector)
-               ON CONFLICT (chunk_id) DO UPDATE SET
-                 paper_id=EXCLUDED.paper_id, text=EXCLUDED.text,
-                 section=EXCLUDED.section, embedding=EXCLUDED.embedding""",
-            [
-                (cid, pid, text, sec or "unknown", str(emb))
-                for cid, pid, text, sec, emb
-                in zip(chunk_ids, paper_ids, texts, sections, embeddings)
-            ],
-        )
-        conn.commit()
-        cur.close()
-        self._put_conn(conn)
+        with self._cursor() as cur:
+            psycopg2.extras.execute_batch(
+                cur,
+                """INSERT INTO embeddings (chunk_id, paper_id, text, section, embedding)
+                   VALUES (%s, %s, %s, %s, %s::vector)
+                   ON CONFLICT (chunk_id) DO UPDATE SET
+                     paper_id=EXCLUDED.paper_id, text=EXCLUDED.text,
+                     section=EXCLUDED.section, embedding=EXCLUDED.embedding""",
+                [
+                    (cid, pid, text, sec or "unknown", str(emb))
+                    for cid, pid, text, sec, emb
+                    in zip(chunk_ids, paper_ids, texts, sections, embeddings)
+                ],
+            )
 
     def search(
         self,
@@ -227,12 +210,9 @@ class VectorStore:
         """
         params_full = [query_vec_str] + params + [fetch_n]
 
-        conn = self._get_conn()
-        cur = conn.cursor()
-        cur.execute(sql, params_full)
-        rows = cur.fetchall()
-        cur.close()
-        self._put_conn(conn)
+        with self._cursor() as cur:
+            cur.execute(sql, params_full)
+            rows = cur.fetchall()
 
         # All candidates, still in cosine-distance order from SQL.
         candidates = [
@@ -300,12 +280,9 @@ class VectorStore:
         """
         params_full = [query_vec_str] + params + [fetch_n]
 
-        conn = self._get_conn()
-        cur = conn.cursor()
-        cur.execute(sql, params_full)
-        rows = cur.fetchall()
-        cur.close()
-        self._put_conn(conn)
+        with self._cursor() as cur:
+            cur.execute(sql, params_full)
+            rows = cur.fetchall()
 
         results = []
         for r in rows:
@@ -321,29 +298,17 @@ class VectorStore:
         return results
 
     def delete_paper_chunks(self, paper_id: str):
-        conn = self._get_conn()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM embeddings WHERE paper_id = %s", (paper_id,))
-        conn.commit()
-        cur.close()
-        self._put_conn(conn)
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM embeddings WHERE paper_id = %s", (paper_id,))
 
     def count(self) -> int:
-        conn = self._get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) as count FROM embeddings")
-        n = cur.fetchone()["count"]
-        cur.close()
-        self._put_conn(conn)
-        return int(n)
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) as count FROM embeddings")
+            return int(cur.fetchone()["count"])
 
     def count_for_papers(self, paper_ids: list[str]) -> int:
         if not paper_ids:
             return 0
-        conn = self._get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) as count FROM embeddings WHERE paper_id = ANY(%s)", (paper_ids,))
-        n = cur.fetchone()["count"]
-        cur.close()
-        self._put_conn(conn)
-        return int(n)
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) as count FROM embeddings WHERE paper_id = ANY(%s)", (paper_ids,))
+            return int(cur.fetchone()["count"])

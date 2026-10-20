@@ -42,12 +42,7 @@ def main() -> None:
         if not u:
             print(f"No user with email {args.from_email}")
             sys.exit(1)
-        conn = db._get_conn()
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET email = %s WHERE id = %s", (args.to_email, u.id))
-        conn.commit()
-        cur.close()
-        db._put_conn(conn)
+        db.update_user_email(u.id, args.to_email)
         print(f"Updated email {args.from_email} -> {args.to_email} (user {u.id}).")
         print(f"Now sign in with Clerk using {args.to_email} — your papers will link automatically.")
         return
