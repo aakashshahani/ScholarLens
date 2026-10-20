@@ -278,10 +278,21 @@ class Session:
 _ALLOWED_SETTING_COLS = {"model", "digest_email", "library_name", "api_key_encrypted"}
 
 
+# Schema setup (CREATE/ALTER ... IF NOT EXISTS, RLS) is idempotent but not
+# free — ENABLE ROW LEVEL SECURITY takes an exclusive lock per table, and every
+# agent builds its own Database(). Run it once per process.
+_schema_ready = False
+_schema_lock = threading.Lock()
+
+
 class Database:
     def __init__(self):
-        self._dsn = settings.database_url
-        self._init_db()
+        global _schema_ready
+        if not _schema_ready:
+            with _schema_lock:
+                if not _schema_ready:
+                    self._init_db()
+                    _schema_ready = True
 
     @contextmanager
     def _cursor(self):

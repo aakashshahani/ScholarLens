@@ -10,6 +10,7 @@ at the same price ($0.02/M tokens). Requires: VOYAGE_API_KEY in environment.
 
 from dataclasses import dataclass
 
+import threading
 from contextlib import contextmanager
 
 import psycopg2
@@ -32,11 +33,21 @@ class SearchResult:
     rerank_score: float | None = None
 
 
+# Table/index setup runs once per process, not once per VectorStore() —
+# every agent constructs its own instance.
+_table_ready = False
+_table_lock = threading.Lock()
+
+
 class VectorStore:
     def __init__(self):
-        self._dsn = settings.database_url
+        global _table_ready
         self._client = None
-        self._init_table()
+        if not _table_ready:
+            with _table_lock:
+                if not _table_ready:
+                    self._init_table()
+                    _table_ready = True
 
     @contextmanager
     def _cursor(self):
