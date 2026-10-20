@@ -19,11 +19,6 @@ if _env_file.exists():
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "data" / "uploads")))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# Legacy aliases kept so existing imports in api.py don't break.
-DATA_DIR = UPLOAD_DIR.parent
-CHROMA_DIR = DATA_DIR / "chroma"
-SQLITE_PATH = DATA_DIR / "scholarlens.db"
-
 
 def _env_int(name: str, default: int) -> int:
     """Parse an int env var, falling back to default on missing/garbage."""
@@ -89,9 +84,6 @@ class Settings:
     # Chunking params
     chunk_size: int = 500          # tokens per chunk
     chunk_overlap: int = 50        # overlap tokens
-
-    # ChromaDB
-    chroma_collection: str = "papers"
 
     # Semantic search relevance tiers (cosine distance, lower = more similar).
     # Recalibrated for voyage-3.5-lite on narrow-domain academic text.
@@ -194,7 +186,7 @@ class Settings:
         Map a cosine distance to a human-readable relevance tier.
 
         Args:
-            cosine_distance: Value in [0, 1] from ChromaDB (lower = more similar).
+            cosine_distance: pgvector `<=>` distance (lower = more similar).
 
         Returns:
             "highly_relevant", "related", or "tangential"

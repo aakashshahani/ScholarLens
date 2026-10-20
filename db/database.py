@@ -943,28 +943,6 @@ class Database:
             rows = cur.fetchall()
             return [self._row_to_rel(r) for r in rows]
 
-    def relationships_watermark(self, paper_ids: list[str] | None = None, strict: bool = False) -> str:
-        """
-        Returns the max created_at timestamp over the scoped relationships.
-        Used as a cache-bust key for hypothesis generation.
-        strict should match whatever list_relationships call the caller uses.
-        """
-        with self._cursor() as cur:
-            if paper_ids:
-                pid_arr = list(paper_ids)
-                if strict:
-                    cond = "WHERE paper_a = ANY(%s) AND paper_b = ANY(%s)"
-                else:
-                    cond = "WHERE paper_a = ANY(%s) OR paper_b = ANY(%s)"
-                cur.execute(
-                    f"SELECT COALESCE(MAX(created_at), '') FROM relationships {cond}",
-                    [pid_arr, pid_arr],
-                )
-            else:
-                cur.execute("SELECT COALESCE(MAX(created_at), '') FROM relationships")
-            row = cur.fetchone()
-            return row[0] if row else ""
-
     @staticmethod
     def _row_to_rel(r) -> "StoredRelationship":
         return StoredRelationship(
@@ -976,30 +954,6 @@ class Database:
         )
 
     # â”€â”€ Hypothesis cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-    def get_hypothesis_cache(self, cache_key: str) -> dict | None:
-        with self._cursor() as cur:
-            cur.execute(
-                "SELECT payload, grounding FROM hypothesis_cache WHERE cache_key = %s",
-                (cache_key,),
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {"hypotheses": json.loads(row["payload"]), "grounding": row["grounding"]}
-
-    def set_hypothesis_cache(self, cache_key: str, hypotheses: list, grounding: str,
-                             user_id: str | None = None):
-        with self._cursor() as cur:
-            cur.execute(
-                """INSERT INTO hypothesis_cache (cache_key, payload, grounding, created_at, user_id)
-                   VALUES (%s, %s, %s, %s, %s)
-                   ON CONFLICT(cache_key) DO UPDATE SET
-                     payload=EXCLUDED.payload, grounding=EXCLUDED.grounding,
-                     created_at=EXCLUDED.created_at, user_id=EXCLUDED.user_id""",
-                (cache_key, json.dumps(hypotheses), grounding,
-                 datetime.now(timezone.utc).isoformat(), user_id),
-            )
 
     def list_hypothesis_cache(self, user_paper_ids: list[str],
                               user_id: str | None = None) -> list[dict]:
@@ -1056,10 +1010,6 @@ class Database:
             # Sort combined results newest-first
             results.sort(key=lambda x: x.get("created_at") or "", reverse=True)
             return results
-
-    def invalidate_hypothesis_cache(self, cache_key: str):
-        with self._cursor() as cur:
-            cur.execute("DELETE FROM hypothesis_cache WHERE cache_key = %s", (cache_key,))
 
     # ── Hypothesis runs (permanent, never invalidated) ────────────────────────
 
@@ -1150,12 +1100,6 @@ class Database:
             )
             rows = cur.fetchall()
             return [self._row_to_cluster(r) for r in rows]
-
-    def get_cluster(self, cluster_id: str):
-        with self._cursor() as cur:
-            cur.execute("SELECT * FROM clusters WHERE id = %s", (cluster_id,))
-            row = cur.fetchone()
-            return self._row_to_cluster(row) if row else None
 
     @staticmethod
     def _row_to_cluster(r):
