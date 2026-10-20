@@ -92,7 +92,7 @@ def pooled_connection():
         _pool_slots.release()
 
 
-# â”€â”€ Data Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Data Models ──────────────────────────────────────────────────────────────
 
 def _clean(val):
     """Strip NUL bytes from strings — Postgres rejects them in string literals.
@@ -546,7 +546,7 @@ class Database:
             ]:
                 cur.execute(idx_sql)
 
-    # â”€â”€ Paper CRUD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Paper CRUD ────────────────────────────────────────────────────────────
 
     def insert_paper(self, paper: Paper) -> str:
         with self._cursor() as cur:
@@ -619,7 +619,7 @@ class Database:
             deleted = cur.rowcount > 0
             return deleted
 
-    # â”€â”€ Ownership helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Ownership helpers ─────────────────────────────────────────────────────
 
     def set_paper_owner(self, paper_id: str, user_id: str) -> None:
         with self._cursor() as cur:
@@ -661,7 +661,7 @@ class Database:
             n = cur.rowcount
             return n
 
-    # â”€â”€ Chunk CRUD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Chunk CRUD ────────────────────────────────────────────────────────────
 
     def insert_chunks(self, chunks: list[Chunk]):
         with self._cursor() as cur:
@@ -687,7 +687,7 @@ class Database:
                 for r in rows
             ]
 
-    # â”€â”€ Analysis CRUD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Analysis CRUD ─────────────────────────────────────────────────────────
 
     def insert_analysis(self, result: AnalysisResult) -> str:
         with self._cursor() as cur:
@@ -713,7 +713,7 @@ class Database:
                 for r in rows
             ]
 
-    # â”€â”€ Dedup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Dedup ─────────────────────────────────────────────────────────────────
 
     def get_analyses_for_papers(self, paper_ids: list[str]) -> dict[str, list]:
         """Batch fetch analyses for multiple papers — one DB call instead of N.
@@ -800,7 +800,7 @@ class Database:
             user_id=row.get("user_id"), created_at=row["created_at"],
         )
 
-    # â”€â”€ Claims cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Claims cache ──────────────────────────────────────────────────────────
 
     def insert_claims(self, claims: list[StoredClaim]):
         with self._cursor() as cur:
@@ -866,7 +866,7 @@ class Database:
         with self._cursor() as cur:
             cur.execute("DELETE FROM claims WHERE paper_id = %s", (paper_id,))
 
-    # â”€â”€ Relationships cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Relationships cache ───────────────────────────────────────────────────
 
     def upsert_relationship(self, rel: "StoredRelationship"):
         lo, hi = sorted([rel.claim_lo, rel.claim_hi])
@@ -953,7 +953,7 @@ class Database:
             similarity=r["similarity"], created_at=r["created_at"],
         )
 
-    # â”€â”€ Hypothesis cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Hypothesis cache ──────────────────────────────────────────────────────
 
     def list_hypothesis_cache(self, user_paper_ids: list[str],
                               user_id: str | None = None) -> list[dict]:
@@ -1116,7 +1116,7 @@ class Database:
         )
 
 
-    # â”€â”€ Users / Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Users / Auth ──────────────────────────────────────────────────────────
 
     def _row_to_user(self, row) -> User:
         return User(
@@ -1225,7 +1225,7 @@ class Database:
         with self._cursor() as cur:
             cur.execute(f"UPDATE users SET {set_clause} WHERE id = %s", values)
 
-    # â”€â”€ Sessions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Sessions ──────────────────────────────────────────────────────────────
 
     def create_session(self, user_id: str, token: str, expires_at: str) -> Session:
         sess = Session(
