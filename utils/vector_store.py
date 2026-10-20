@@ -85,6 +85,8 @@ class VectorStore:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_embeddings_paper ON embeddings(paper_id)"
             )
+            # No public PostgREST access, same as the tables in db/database.py.
+            cur.execute("ALTER TABLE embeddings ENABLE ROW LEVEL SECURITY")
 
         # Approximate-nearest-neighbour index for cosine distance. Without it,
         # every `<=>` query is a sequential scan over the whole table — slow and

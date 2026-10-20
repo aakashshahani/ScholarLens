@@ -520,6 +520,7 @@ class Database:
                 "relationships", "hypothesis_cache", "sessions",
                 "monitor_topics", "paper_tags", "monitor_results",
                 "hypothesis_feedback", "followed_authors",
+                "hypothesis_runs", "clusters",
             ]:
                 cur.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
             # Indexes
