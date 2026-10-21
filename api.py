@@ -559,7 +559,9 @@ def login(request: Request, response: Response, req: LoginRequest):
 
 @app.post("/api/auth/logout")
 def logout(request: Request, response: Response):
-    token = request.cookies.get(settings.session_cookie_name)
+    # Cookie or Bearer header: the frontend sends the token as a header on
+    # cross-origin deploys, and that session must be revoked too.
+    token = authlib.session_token_from_request(request)
     if token:
         db.delete_session(token)
     response.delete_cookie(settings.session_cookie_name, path="/")

@@ -114,6 +114,19 @@ def _is_expired(expires_at: str) -> bool:
 
 # ── FastAPI dependency ───────────────────────────────────────
 
+def session_token_from_request(request: Request) -> str | None:
+    """The opaque session token: the httpOnly cookie (same-origin), else an
+    Authorization: Bearer header (cross-origin, where third-party cookies are
+    blocked — Chrome 2024+)."""
+    token = request.cookies.get(settings.session_cookie_name)
+    if token:
+        return token
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:].strip() or None
+    return None
+
+
 def get_current_user(request: Request) -> User:
     """Resolve the logged-in user from the session cookie or Authorization
     header, or raise 401.
@@ -129,13 +142,7 @@ def get_current_user(request: Request) -> User:
         from clerk_auth import get_current_user_clerk
         return get_current_user_clerk(request)
 
-    token = request.cookies.get(settings.session_cookie_name)
-    if not token:
-        # Fall back to Authorization header for cross-origin requests
-        # where third-party cookies are blocked (Chrome 2024+)
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
+    token = session_token_from_request(request)
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
