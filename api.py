@@ -20,6 +20,8 @@ import threading
 import uuid
 import secrets
 
+import psycopg2.errors
+
 from fastapi import (
     FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Query,
     Request, Header, Depends, Response,
@@ -531,7 +533,11 @@ def register(request: Request, response: Response, req: RegisterRequest):
     email = req.email.lower().strip()
     if db.get_user_by_email(email):
         raise HTTPException(status_code=409, detail="Unable to register with this email.")
-    user = db.create_user(email, authlib.hash_password(req.password))
+    try:
+        user = db.create_user(email, authlib.hash_password(req.password))
+    except psycopg2.errors.UniqueViolation:
+        # Lost a race with a concurrent registration for the same email.
+        raise HTTPException(status_code=409, detail="Unable to register with this email.")
     # The very first account adopts any pre-auth (unowned) papers, so existing
     # test data isn't stranded once scoping turns on. Fires exactly once.
     if db.count_users() == 1:
