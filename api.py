@@ -906,12 +906,15 @@ async def upload_paper(
 def reanalyze_paper(request: Request, paper_id: str, background_tasks: BackgroundTasks = BackgroundTasks(),
                     user: User = Depends(authlib.get_current_user)):
     """Re-run analysis on an already-ingested paper."""
-    paper = _require_owned_paper(paper_id, user)
+    _require_owned_paper(paper_id, user)
+    # Meter first: a 402 must not leave the paper with its claims wiped.
+    api_key = authlib.resolve_user_api_key(user)
+    model = _resolve_model_and_meter(user)
     # Invalidate cached claims + their relationships so they're freshly derived
     claim_ids = [c.id for c in db.get_claims_for_paper(paper_id)]
     db.delete_claims_for_paper(paper_id)
     db.delete_relationships_for_claims(claim_ids)
-    background_tasks.add_task(_analyze_paper_bg, paper_id, authlib.resolve_user_api_key(user), _resolve_model_and_meter(user))
+    background_tasks.add_task(_analyze_paper_bg, paper_id, api_key, model)
     return {"id": paper_id, "status": "analyzing"}
 
 
@@ -1093,13 +1096,16 @@ def ask_question(request: Request, req: AskRequest,
     existing = _get_or_reuse_job(user.id, "ask")
     if existing:
         return {"job_id": existing, "status": "running"}
+    # Resolve key + meter BEFORE registering the job: a 402 here must not leave
+    # a phantom "running" job that every later request would reuse.
+    api_key = authlib.resolve_user_api_key(user)
+    model = _resolve_model_and_meter(user)
     job_id = _new_job(user.id, "ask")
     raw_history = getattr(req, "history", None)
     history = [{"role": m.role, "content": m.content} for m in raw_history] if raw_history else None
     background_tasks.add_task(
         _ask_bg, job_id, req.question, req.paper_id,
-        _owned_ids(user), authlib.resolve_user_api_key(user),
-        _resolve_model_and_meter(user), _cache_key, history,
+        _owned_ids(user), api_key, model, _cache_key, history,
     )
     return {"job_id": job_id, "status": "running"}
 
@@ -1276,11 +1282,12 @@ def run_contradictions(request: Request, req: ContradictionRequest,
     existing = _get_or_reuse_job(user.id, "contradictions")
     if existing:
         return {"job_id": existing, "status": "running"}
+    api_key = authlib.resolve_user_api_key(user)
+    model = _resolve_model_and_meter(user)
     job_id = _new_job(user.id, "contradictions")
     background_tasks.add_task(
         _contradiction_bg, job_id, scope,
-        req.similarity_threshold, req.max_pairs,
-        authlib.resolve_user_api_key(user), _resolve_model_and_meter(user), user.id,
+        req.similarity_threshold, req.max_pairs, api_key, model, user.id,
     )
     return {"job_id": job_id, "status": "running"}
 
@@ -1382,12 +1389,12 @@ def generate_hypotheses(request: Request, req: HypothesisRequest,
     existing = _get_or_reuse_job(user.id, "hypotheses")
     if existing:
         return {"job_id": existing, "status": "running"}
+    api_key = authlib.resolve_user_api_key(user)
+    model = _resolve_model_and_meter(user)
     job_id = _new_job(user.id, "hypotheses")
     background_tasks.add_task(
         _hypothesis_bg, job_id, req.research_question, scope,
-        req.num_hypotheses, req.refresh,
-        authlib.resolve_user_api_key(user), _resolve_model_and_meter(user),
-        user.id,
+        req.num_hypotheses, req.refresh, api_key, model, user.id,
     )
     return {"job_id": job_id, "status": "running"}
 
@@ -1594,11 +1601,13 @@ def monitor_scan(request: Request, req: MonitorRequest,
         )
         for t in req.topics
     ]
+    api_key = authlib.resolve_user_api_key(user)
+    model = _resolve_model_and_meter(user)
     job_id = _new_job(user.id, "monitor_scan")
     background_tasks.add_task(
         _monitor_scan_bg, job_id, topics, req.email,
         req.max_per_source, req.relevance_threshold,
-        user.id, authlib.resolve_user_api_key(user), _resolve_model_and_meter(user),
+        user.id, api_key, model,
     )
     return {"job_id": job_id, "status": "running"}
 
@@ -2097,12 +2106,10 @@ def detect_clusters(request: Request, req: ClusterRequest,
     existing = _get_or_reuse_job(user.id, "clusters")
     if existing:
         return {"job_id": existing, "status": "running"}
+    api_key = authlib.resolve_user_api_key(user)
+    model = _resolve_model_and_meter(user)
     job_id = _new_job(user.id, "clusters")
-    background_tasks.add_task(
-        _cluster_bg, job_id, scope,
-        authlib.resolve_user_api_key(user), _resolve_model_and_meter(user),
-        user.id,
-    )
+    background_tasks.add_task(_cluster_bg, job_id, scope, api_key, model, user.id)
     return {"job_id": job_id, "status": "running"}
 
 
