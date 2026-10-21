@@ -25,6 +25,7 @@ from fastapi import (
     Request, Header, Depends, Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, EmailStr, field_validator
 from typing import Annotated, Optional
@@ -817,17 +818,19 @@ def paper_status(paper_id: str, user: User = Depends(authlib.get_current_user)):
 
 # ── Upload & Analyze ─────────────────────────────────────────
 
-@app.post("/api/papers/upload")
-@limiter.limit(settings.rl_upload)
-async def upload_paper(
-    request: Request,
-    file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
-    user: User = Depends(authlib.get_current_user),
-):
+class _UploadRejected(Exception):
+    """A file in an upload failed validation (status code + client message)."""
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+
+
+async def _read_pdf_upload(file: UploadFile) -> bytes:
+    """Bounded read + validation of one uploaded PDF. Raises _UploadRejected."""
     # Cheap first gate: extension.
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files accepted")
+        raise _UploadRejected(400, "Only PDF files accepted")
 
     # Bounded read — never pull an unbounded upload into memory. Abort as soon
     # as the running total crosses the cap rather than reading the whole thing.
@@ -839,32 +842,32 @@ async def upload_paper(
             break
         buf.extend(chunk)
         if len(buf) > max_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File exceeds the {max_bytes // (1024 * 1024)} MB limit.",
-            )
-    content = bytes(buf)
+            raise _UploadRejected(413, f"File exceeds the {max_bytes // (1024 * 1024)} MB limit.")
 
     # Validate it is actually a PDF, not arbitrary bytes renamed .pdf.
-    if b"%PDF-" not in content[:1024]:
-        raise HTTPException(status_code=400, detail="File is not a valid PDF.")
+    if b"%PDF-" not in bytes(buf[:1024]):
+        raise _UploadRejected(400, "File is not a valid PDF.")
+    return bytes(buf)
 
+
+def _ingest_upload(content: bytes, client_filename: str | None, user: User,
+                   api_key: str | None, model: str) -> tuple[str, Paper]:
+    """Write, ingest and dedup one validated PDF. Blocking (PDF parsing, an
+    LLM metadata call, embedding) — callers run it in the threadpool so the
+    event loop keeps serving other requests. Returns (status, paper) where
+    status is "duplicate" (paper = the existing copy) or "analyzing"."""
     # NEVER trust the client filename for the on-disk path (path traversal:
     # "../../api.py" would escape the upload dir). Write under a generated name
     # and keep a sanitized original only as a display string.
-    display_name = _safe_display_name(file.filename)
+    display_name = _safe_display_name(client_filename)
     save_path = UPLOAD_DIR / f"{uuid.uuid4().hex}.pdf"
 
     # Defense in depth: confirm the resolved path stays inside UPLOAD_DIR.
     if UPLOAD_DIR.resolve() not in save_path.resolve().parents:
-        raise HTTPException(status_code=400, detail="Invalid upload path.")
+        raise _UploadRejected(400, "Invalid upload path.")
 
     save_path.write_bytes(content)
-
-    # Ingest (extract + chunk + embed) — this is fast enough to do inline
-    user_key = authlib.resolve_user_api_key(user)
-    model = _resolve_model_and_meter(user)
-    paper = agent.ingest_pdf(save_path, filename=display_name, api_key=user_key, model=model)
+    paper = agent.ingest_pdf(save_path, filename=display_name, api_key=api_key, model=model)
 
     # Dedup is per-user: a paper already in THIS user's library is a duplicate;
     # the same paper in another user's library is not (each owner keeps a copy).
@@ -877,15 +880,41 @@ async def upload_paper(
             save_path.unlink(missing_ok=True)  # drop the redundant file copy
         except OSError:
             pass
-        return {
-            "id": existing.id,
-            "title": existing.title,
-            "status": "duplicate",
-            "message": f"This paper is already in your library: \"{existing.title}\".",
-        }
+        return "duplicate", existing
 
     # Stamp ownership before analysis kicks off.
     db.set_paper_owner(paper.id, user.id)
+    return "analyzing", paper
+
+
+@app.post("/api/papers/upload")
+@limiter.limit(settings.rl_upload)
+async def upload_paper(
+    request: Request,
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    user: User = Depends(authlib.get_current_user),
+):
+    try:
+        content = await _read_pdf_upload(file)
+    except _UploadRejected as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+    user_key = authlib.resolve_user_api_key(user)
+    model = await run_in_threadpool(_resolve_model_and_meter, user)
+    try:
+        status, paper = await run_in_threadpool(
+            _ingest_upload, content, file.filename, user, user_key, model)
+    except _UploadRejected as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+    if status == "duplicate":
+        return {
+            "id": paper.id,
+            "title": paper.title,
+            "status": "duplicate",
+            "message": f"This paper is already in your library: \"{paper.title}\".",
+        }
 
     # Analyze in background (parallel — ~5x faster than sequential loop)
     background_tasks.add_task(_analyze_paper_bg, paper.id, user_key, model)
@@ -2321,63 +2350,36 @@ async def upload_papers_batch(
     if len(files) > 20:
         raise HTTPException(status_code=400, detail="Maximum 20 files per batch.")
 
-    max_bytes = settings.max_upload_bytes
     results = []
     user_key = authlib.resolve_user_api_key(user)
 
     for file in files:
-        if not file.filename or not file.filename.lower().endswith(".pdf"):
-            results.append({"filename": file.filename or "unknown", "status": "error",
-                            "message": "Not a PDF file."})
-            continue
+        name = file.filename or "unknown"
         try:
-            buf = bytearray()
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                if len(buf) > max_bytes:
-                    results.append({"filename": file.filename, "status": "error",
-                                    "message": f"Exceeds {max_bytes // (1024*1024)} MB limit."})
-                    buf = None
-                    break
-            if buf is None:
-                continue
-            content = bytes(buf)
-            if b"%PDF-" not in content[:1024]:
-                results.append({"filename": file.filename, "status": "error",
-                                "message": "Not a valid PDF."})
-                continue
-            display_name = _safe_display_name(file.filename)
-            save_path = UPLOAD_DIR / f"{uuid.uuid4().hex}.pdf"
-            if UPLOAD_DIR.resolve() not in save_path.resolve().parents:
-                results.append({"filename": file.filename, "status": "error",
-                                "message": "Invalid path."})
-                continue
-            save_path.write_bytes(content)
-            model = _resolve_model_and_meter(user)
-            paper = agent.ingest_pdf(save_path, filename=display_name, api_key=user_key, model=model)
-            existing = db.find_duplicate(paper.title, doi=paper.doi, arxiv_id=paper.arxiv_id,
-                                         user_id=user.id, exclude_id=paper.id)
-            if existing:
-                agent.vector_store.delete_paper_chunks(paper.id)
-                db.delete_paper(paper.id)
-                try:
-                    save_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                results.append({"filename": file.filename, "status": "duplicate",
-                                "id": existing.id, "title": existing.title,
-                                "message": f"Already in library: \"{existing.title}\""})
-                continue
-            db.set_paper_owner(paper.id, user.id)
-            background_tasks.add_task(_analyze_paper_bg, paper.id, user_key, model)
-            results.append({"filename": file.filename, "status": "analyzing",
-                            "id": paper.id, "title": paper.title})
-        except Exception as e:
-            results.append({"filename": getattr(file, "filename", "unknown"),
-                            "status": "error", "message": str(e)})
+            content = await _read_pdf_upload(file)
+            model = await run_in_threadpool(_resolve_model_and_meter, user)
+            status, paper = await run_in_threadpool(
+                _ingest_upload, content, file.filename, user, user_key, model)
+        except _UploadRejected as e:
+            results.append({"filename": name, "status": "error", "message": e.message})
+            continue
+        except HTTPException as e:
+            results.append({"filename": name, "status": "error", "message": str(e.detail)})
+            continue
+        except Exception as e:  # noqa: BLE001 — one bad file mustn't sink the batch
+            print(f"[upload-batch] {name}: {type(e).__name__}: {e}")
+            results.append({"filename": name, "status": "error",
+                            "message": "Could not process this file."})
+            continue
+
+        if status == "duplicate":
+            results.append({"filename": name, "status": "duplicate",
+                            "id": paper.id, "title": paper.title,
+                            "message": f"Already in library: \"{paper.title}\""})
+            continue
+        background_tasks.add_task(_analyze_paper_bg, paper.id, user_key, model)
+        results.append({"filename": name, "status": "analyzing",
+                        "id": paper.id, "title": paper.title})
 
     _invalidate_insight_cache()
     return {"results": results, "total": len(results),
