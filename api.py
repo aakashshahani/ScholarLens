@@ -527,7 +527,15 @@ def _scope_ids(user: User, requested: list[str] | None) -> list[str]:
     return [pid for pid in requested if pid in owned_set]
 
 
-@app.post("/api/auth/register")
+def _require_password_auth():
+    """Password register/login only exist in password mode. Under Clerk they
+    would mint sessions the Clerk dependency never accepts, and an unverified
+    password row would be adopted by Clerk's link-by-email step."""
+    if settings.auth_provider == "clerk":
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+@app.post("/api/auth/register", dependencies=[Depends(_require_password_auth)])
 @limiter.limit(settings.rl_register)
 def register(request: Request, response: Response, req: RegisterRequest):
     email = req.email.lower().strip()
@@ -548,7 +556,7 @@ def register(request: Request, response: Response, req: RegisterRequest):
     return {**_public_user(user), "session_token": token}
 
 
-@app.post("/api/auth/login")
+@app.post("/api/auth/login", dependencies=[Depends(_require_password_auth)])
 @limiter.limit(settings.rl_login)
 def login(request: Request, response: Response, req: LoginRequest):
     email = req.email.lower().strip()
