@@ -479,21 +479,23 @@ def _resolve_model_and_meter(user: User) -> str:
     model = authlib.resolve_user_model(user)
     if authlib.user_has_own_key(user):
         return model
-    if user.free_actions_used >= settings.free_action_limit:
+    is_sonnet = authlib.model_tier(model) == "sonnet"
+    if db.try_consume_free_action(user.id, is_sonnet,
+                                  settings.free_action_limit, settings.free_sonnet_limit):
+        return model
+    # Refused: re-read the counters to say which limit was hit.
+    fresh = db.get_user_by_id(user.id) or user
+    if fresh.free_actions_used >= settings.free_action_limit:
         raise HTTPException(
             status_code=402,
             detail=(f"Free limit reached ({settings.free_action_limit} actions). "
                     "Add your own Anthropic API key in Settings to keep going."),
         )
-    is_sonnet = authlib.model_tier(model) == "sonnet"
-    if is_sonnet and user.free_sonnet_used >= settings.free_sonnet_limit:
-        raise HTTPException(
-            status_code=402,
-            detail=(f"Free Sonnet limit reached ({settings.free_sonnet_limit}). "
-                    "Add your own Anthropic API key for more -- Haiku stays available."),
-        )
-    db.increment_usage(user.id, is_sonnet)
-    return model
+    raise HTTPException(
+        status_code=402,
+        detail=(f"Free Sonnet limit reached ({settings.free_sonnet_limit}). "
+                "Add your own Anthropic API key for more -- Haiku stays available."),
+    )
 
 
 def _require_owned_paper(paper_id: str, user: User) -> Paper:

@@ -1198,23 +1198,21 @@ class Database:
             )
             return user
 
-    def increment_usage(self, user_id: str, is_sonnet: bool) -> tuple[int, int]:
+    def try_consume_free_action(self, user_id: str, is_sonnet: bool,
+                                action_limit: int, sonnet_limit: int) -> bool:
+        """Atomically spend one free action (and one free Sonnet action when
+        `is_sonnet`), but only while the user is under both limits. Check and
+        increment are a single UPDATE, so concurrent requests can't overshoot."""
+        sonnet = 1 if is_sonnet else 0
         with self._cursor() as cur:
-            if is_sonnet:
-                cur.execute(
-                    "UPDATE users SET free_actions_used = free_actions_used + 1, "
-                    "free_sonnet_used = free_sonnet_used + 1 WHERE id = %s "
-                    "RETURNING free_actions_used, free_sonnet_used",
-                    (user_id,),
-                )
-            else:
-                cur.execute(
-                    "UPDATE users SET free_actions_used = free_actions_used + 1 WHERE id = %s "
-                    "RETURNING free_actions_used, free_sonnet_used",
-                    (user_id,),
-                )
-            row = cur.fetchone()
-            return (row["free_actions_used"], row["free_sonnet_used"]) if row else (0, 0)
+            cur.execute(
+                "UPDATE users SET free_actions_used = free_actions_used + 1, "
+                "free_sonnet_used = free_sonnet_used + %s "
+                "WHERE id = %s AND free_actions_used < %s "
+                "AND (%s = 0 OR free_sonnet_used < %s) RETURNING id",
+                (sonnet, user_id, action_limit, sonnet, sonnet_limit),
+            )
+            return cur.fetchone() is not None
 
     def update_user_settings(self, user_id: str, **fields) -> None:
         cols = {k: v for k, v in fields.items() if k in _ALLOWED_SETTING_COLS}
