@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import os
 import re
 import threading
+import json
 import uuid
 import secrets
 
@@ -272,10 +273,13 @@ _insight_cache: dict[str, dict] = {}
 _embedding_count_cache: dict[str, object] = {"value": 0, "ts": 0.0}
 
 
-def _invalidate_insight_cache():
-    """Call this any time the library changes so the feed reflects it
-    immediately. Clears every user's entry (cheap to rebuild)."""
+def _invalidate_library_caches():
+    """Call this any time a library changes (papers added/removed, new
+    relationships) so the insight feed and cached answers reflect it
+    immediately. Clears every user's entries (cheap to rebuild)."""
     _insight_cache.clear()
+    with _ask_lock:
+        _ask_cache.clear()
 
 
 # ── Request/Response Models ──────────────────────────────────
@@ -805,7 +809,7 @@ def delete_paper(paper_id: str, user: User = Depends(authlib.get_current_user)):
     db.delete_paper(paper_id)
     # Purge relationships referencing this paper's claims (no FK cascade on those)
     db.delete_relationships_for_claims(claim_ids)
-    _invalidate_insight_cache()
+    _invalidate_library_caches()
     return {"status": "deleted", "id": paper_id}
 
 
@@ -928,7 +932,7 @@ async def upload_paper(
 
     # Analyze in background (parallel — ~5x faster than sequential loop)
     background_tasks.add_task(_analyze_paper_bg, paper.id, user_key, model)
-    _invalidate_insight_cache()
+    _invalidate_library_caches()
 
     return {
         "id": paper.id,
@@ -1027,14 +1031,23 @@ def search_papers(request: Request, req: SearchRequest,
 
 import hashlib as _hashlib
 _ask_cache: dict[str, dict] = {}
+_ask_lock = threading.Lock()  # background asks write while requests read
 _ASK_CACHE_TTL = 3600  # 1 hour
 _ASK_CACHE_MAX = 500   # hard cap so the cache can't grow without bound
+
+
+def _ask_cache_key(user_id: str, question: str, paper_id: str | None,
+                   history: list[dict] | None) -> str:
+    """The answer depends on the conversation too, so history is in the key —
+    a follow-up must never be served an answer from a different thread."""
+    raw = json.dumps([user_id, question.strip(), paper_id, history or []])
+    return _hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
 def _prune_ask_cache() -> None:
     """Evict expired entries, then cap total size (oldest first). Without this
     the in-memory ask cache grows by one entry per unique question for the life
-    of the process — a slow leak on the 512MB tier."""
+    of the process — a slow leak on the 512MB tier. Caller holds _ask_lock."""
     now = _time.time()
     for k in [k for k, v in _ask_cache.items() if now - v.get("ts", 0) > _ASK_CACHE_TTL]:
         _ask_cache.pop(k, None)
@@ -1111,8 +1124,9 @@ def _ask_bg(job_id: str, question: str, paper_id: str | None,
             history=history,
             return_sources=True,
         )
-        _ask_cache[cache_key] = {"answer": answer, "sources": sources, "ts": _time.time()}
-        _prune_ask_cache()
+        with _ask_lock:
+            _ask_cache[cache_key] = {"answer": answer, "sources": sources, "ts": _time.time()}
+            _prune_ask_cache()
         _finish_job(job_id, {"answer": answer, "sources": sources, "cached": False})
     except Exception as e:
         _fail_job(job_id, str(e))
@@ -1125,15 +1139,14 @@ def ask_question(request: Request, req: AskRequest,
                  user: User = Depends(authlib.get_current_user)):
     """Simple RAG Ask — one embed + one pgvector search + one LLM call.
     Runs as a background task to avoid blocking the main thread."""
-    _cache_raw = f"{user.id}:{req.question}:{req.paper_id}"
-    _cache_key = _hashlib.sha256(_cache_raw.encode()).hexdigest()[:16]
-    _now = _time.time()
-    if _cache_key in _ask_cache:
-        entry = _ask_cache[_cache_key]
-        if _now - entry["ts"] < _ASK_CACHE_TTL:
-            job_id = _new_job(user.id, "ask")
-            _finish_job(job_id, {"answer": entry["answer"], "sources": entry.get("sources", []), "cached": True})
-            return {"job_id": job_id, "status": "done", "cached": True}
+    history = [{"role": m.role, "content": m.content} for m in req.history] if req.history else None
+    _cache_key = _ask_cache_key(user.id, req.question, req.paper_id, history)
+    with _ask_lock:
+        entry = _ask_cache.get(_cache_key)
+    if entry is not None and _time.time() - entry["ts"] < _ASK_CACHE_TTL:
+        job_id = _new_job(user.id, "ask")
+        _finish_job(job_id, {"answer": entry["answer"], "sources": entry.get("sources", []), "cached": True})
+        return {"job_id": job_id, "status": "done", "cached": True}
     existing = _get_or_reuse_job(user.id, "ask")
     if existing:
         return {"job_id": existing, "status": "running"}
@@ -1142,8 +1155,6 @@ def ask_question(request: Request, req: AskRequest,
     api_key = authlib.resolve_user_api_key(user)
     model = _resolve_model_and_meter(user)
     job_id = _new_job(user.id, "ask")
-    raw_history = getattr(req, "history", None)
-    history = [{"role": m.role, "content": m.content} for m in raw_history] if raw_history else None
     background_tasks.add_task(
         _ask_bg, job_id, req.question, req.paper_id,
         _owned_ids(user), api_key, model, _cache_key, history,
@@ -1269,7 +1280,7 @@ def _contradiction_bg(job_id: str, scope: list[str], similarity_threshold: float
             api_key=api_key,
             model=model,
         )
-        _invalidate_insight_cache()
+        _invalidate_library_caches()
         try:
             contradiction_agent.detect_clusters(
                 paper_ids=scope,
@@ -1566,7 +1577,7 @@ def import_add(
 
     # Analyze in background
     background_tasks.add_task(_analyze_paper_bg, paper.id, user_key, model)
-    _invalidate_insight_cache()
+    _invalidate_library_caches()
 
     return {
         "id": paper.id,
@@ -2024,7 +2035,7 @@ def _build_graph_compute(req, papers, api_key: str | None = None, model: str | N
     # them immediately — same contract as the contradiction scan endpoint.
     # Without this, expanding the graph can surface contradictions that the
     # dashboard's "top contradiction" card never sees (stale cache).
-    _invalidate_insight_cache()
+    _invalidate_library_caches()
 
     # Degree count for node sizing
     degree: dict[str, int] = {}
@@ -2399,7 +2410,7 @@ async def upload_papers_batch(
         results.append({"filename": name, "status": "analyzing",
                         "id": paper.id, "title": paper.title})
 
-    _invalidate_insight_cache()
+    _invalidate_library_caches()
     return {"results": results, "total": len(results),
             "queued": sum(1 for r in results if r["status"] == "analyzing")}
 

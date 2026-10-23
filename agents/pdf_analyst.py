@@ -460,8 +460,9 @@ class PDFAnalysisAgent:
                 exclude_sections=["references", "appendix"],
             )
         except Exception as e:
-            msg = f"Search failed: {e}. Please try again."
-            return (msg, []) if return_sources else msg
+            # Raise rather than return the error as an "answer": callers cache
+            # answers, and a transient outage must not be served for an hour.
+            raise RuntimeError("Search is temporarily unavailable. Please try again.") from e
 
         if not results:
             msg = (
@@ -528,8 +529,8 @@ class PDFAnalysisAgent:
             answer = response.content[0].text if response.content else ""
             # Release the response object immediately
             del response
-            return (answer, sources) if return_sources else answer
         except Exception as e:
-            msg = f"Could not generate an answer: {e}"
-            return (msg, sources) if return_sources else msg
+            print(f"[ask] answer generation failed: {type(e).__name__}: {e}")
+            raise RuntimeError("Could not generate an answer right now. Please try again.") from e
+        return (answer, sources) if return_sources else answer
 
