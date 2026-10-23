@@ -1642,6 +1642,15 @@ def monitor_scan(request: Request, req: MonitorRequest,
     if existing:
         return {"job_id": existing, "status": "running"}
 
+    # The digest is sent from the server's mail account, so it may only go to
+    # the caller's own addresses — never an arbitrary recipient.
+    recipient = (req.email or "").strip() or None
+    if recipient:
+        own = {user.email.lower(), (user.digest_email or "").lower()} - {""}
+        if recipient.lower() not in own:
+            raise HTTPException(status_code=400,
+                                detail="Digests can only be sent to your account or digest email.")
+
     topics = [
         MonitorTopic(
             name=t.name,
@@ -1654,7 +1663,7 @@ def monitor_scan(request: Request, req: MonitorRequest,
     model = _resolve_model_and_meter(user)
     job_id = _new_job(user.id, "monitor_scan")
     background_tasks.add_task(
-        _monitor_scan_bg, job_id, topics, req.email,
+        _monitor_scan_bg, job_id, topics, recipient,
         req.max_per_source, req.relevance_threshold,
         user.id, api_key, model,
     )
