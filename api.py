@@ -715,13 +715,7 @@ def fix_abstracts():
 def list_papers(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
                 tag: Optional[str] = Query(None),
                 user: User = Depends(authlib.get_current_user)):
-    papers = db.list_papers(limit=limit, offset=offset, user_id=user.id)
-    if not papers:
-        return []
-    # Tag filter: narrow to papers that carry the requested tag
-    if tag:
-        tagged_ids = set(db.list_paper_ids_by_tag(user.id, tag))
-        papers = [p for p in papers if p.id in tagged_ids]
+    papers = db.list_papers(limit=limit, offset=offset, user_id=user.id, tag=tag)
     if not papers:
         return []
     paper_ids = [p.id for p in papers]

@@ -568,22 +568,32 @@ class Database:
             row = cur.fetchone()
             return self._row_to_paper(row) if row else None
 
+    # Every paper column except full_text, which can be megabytes per paper and
+    # is only needed by analysis (get_paper), never by listings.
+    _PAPER_LIST_COLS = ("p.id, p.title, p.authors, p.abstract, p.year, p.source, p.doi, "
+                        "p.arxiv_id, p.filename, p.page_count, p.user_id, p.created_at")
+
     def list_papers(self, limit: int = 50, offset: int = 0,
-                    user_id: str | None = None) -> list[Paper]:
+                    user_id: str | None = None, tag: str | None = None) -> list[Paper]:
+        """Newest-first page of papers, without full_text. `tag` filters in SQL
+        so pagination applies to the filtered set, not before it."""
+        conds, params = [], []
+        join = ""
+        if user_id is not None:
+            conds.append("p.user_id = %s")
+            params.append(user_id)
+        if tag:
+            join = " JOIN paper_tags t ON t.paper_id = p.id"
+            conds.append("t.tag = %s")
+            params.append(tag.strip().lower())
+        where = (" WHERE " + " AND ".join(conds)) if conds else ""
         with self._cursor() as cur:
-            if user_id is not None:
-                cur.execute(
-                    "SELECT * FROM papers WHERE user_id = %s "
-                    "ORDER BY created_at DESC LIMIT %s OFFSET %s",
-                    (user_id, limit, offset),
-                )
-            else:
-                cur.execute(
-                    "SELECT * FROM papers ORDER BY created_at DESC LIMIT %s OFFSET %s",
-                    (limit, offset),
-                )
-            rows = cur.fetchall()
-            return [self._row_to_paper(r) for r in rows]
+            cur.execute(
+                f"SELECT {self._PAPER_LIST_COLS} FROM papers p{join}{where} "
+                "ORDER BY p.created_at DESC LIMIT %s OFFSET %s",
+                params + [limit, offset],
+            )
+            return [self._row_to_paper(r) for r in cur.fetchall()]
 
     def paper_title_map(self, user_id: str | None = None) -> dict[str, str]:
         """Return {paper_id: title} for papers owned by user_id (or all papers if None).
@@ -801,7 +811,7 @@ class Database:
             abstract=row["abstract"], year=row["year"],
             source=row["source"], doi=row["doi"],
             arxiv_id=row["arxiv_id"], filename=row["filename"],
-            full_text=row["full_text"], page_count=row["page_count"],
+            full_text=row.get("full_text"), page_count=row["page_count"],
             user_id=row.get("user_id"), created_at=row["created_at"],
         )
 
@@ -1520,15 +1530,6 @@ class Database:
             )
             rows = cur.fetchall()
             return [r["tag"] for r in rows]
-
-    def list_paper_ids_by_tag(self, user_id: str, tag: str) -> list[str]:
-        with self._cursor() as cur:
-            cur.execute(
-                "SELECT paper_id FROM paper_tags WHERE user_id = %s AND tag = %s",
-                (user_id, tag.strip().lower()),
-            )
-            rows = cur.fetchall()
-            return [r["paper_id"] for r in rows]
 
     # ── Relationship feedback ─────────────────────────────────────────────────
 
