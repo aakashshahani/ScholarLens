@@ -53,10 +53,11 @@ def _is_due(topic) -> bool:
     return True
 
 
-def run() -> int:
-    """Scan all active users. Returns the number of users scanned."""
-    db = Database()
-    monitor = MonitoringAgent()
+def run(db: Database | None = None, monitor: MonitoringAgent | None = None) -> int:
+    """Scan all active users. Returns the number of users scanned. The web
+    process passes its own db/monitor when it runs this in-process."""
+    db = db or Database()
+    monitor = monitor or MonitoringAgent()
 
     max_per_source = int(os.getenv("MONITOR_MAX_PER_SOURCE", "5"))
     relevance_min = float(os.getenv("MONITOR_RELEVANCE_MIN", "0.3"))

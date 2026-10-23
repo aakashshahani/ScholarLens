@@ -161,44 +161,17 @@ monitor = MonitoringAgent()
 
 
 # ── Scheduled monitoring job ──────────────────────────────────────────────────
-# Runs daily at 6am UTC. For each user with active saved topics and a
-# digest_email configured, runs a full scan and sends the email digest.
-# APScheduler runs in-process — no broker or worker needed.
-# State is in-memory only: if Render restarts, the scheduler restarts too.
-# This is fine since UptimeRobot keep-alive pings prevent cold starts during
-# active hours, and a missed daily scan is not catastrophic.
+# In-process fallback for single-dyno deploys. It runs exactly the same code as
+# the standalone `python -m jobs.run_monitor` worker (cadence-aware, persists
+# per topic, emails a digest when one is configured) so the two can't drift.
+# APScheduler state is in-memory: a missed daily scan after a restart is fine.
 
 def _run_scheduled_monitor():
-    """Background job: scan saved topics for all active users."""
+    """Background job: scan due topics for every user with active topics."""
     print("[scheduler] Starting daily monitor scan...")
     try:
-        users = db.list_users_with_active_topics()
-        print(f"[scheduler] Found {len(users)} users with active topics")
-        for user in users:
-            if not user.digest_email:
-                continue
-            topics_rows = db.list_monitor_topics(user.id)
-            active = [t for t in topics_rows if t.is_active]
-            if not active:
-                continue
-            monitor_topics = [
-                MonitorTopic(name=t.name, keywords=t.keywords, sources=t.sources)
-                for t in active
-            ]
-            print(f"[scheduler] Scanning {len(active)} topics for {user.email}")
-            try:
-                # Memory-bounded + persisted path. Prefer the standalone
-                # `jobs.run_monitor` worker in production (separate container);
-                # this in-process fallback exists for single-dyno deploys.
-                monitor.run_scan_persisted(
-                    topics=monitor_topics,
-                    user_id=user.id,
-                    recipient=user.digest_email,
-                )
-                for t in active:
-                    db.update_topic_scanned_at(t.id)
-            except Exception as e:
-                print(f"[scheduler] Scan failed for {user.email}: {e}")
+        from jobs.run_monitor import run as run_monitor_worker
+        run_monitor_worker(db=db, monitor=monitor)
     except Exception as e:
         print(f"[scheduler] Job failed: {e}")
 
