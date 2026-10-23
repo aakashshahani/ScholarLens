@@ -140,7 +140,9 @@ def get_current_user(request: Request) -> User:
     # code never loads in the default password deployment.
     if settings.auth_provider == "clerk":
         from clerk_auth import get_current_user_clerk
-        return get_current_user_clerk(request)
+        user = get_current_user_clerk(request)
+        request.state.user = user  # lets the rate limiter key by user
+        return user
 
     token = session_token_from_request(request)
     if not token:
@@ -160,6 +162,9 @@ def get_current_user(request: Request) -> User:
         _db.delete_session(token)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    # Per-endpoint rate limits run after dependencies resolve, so setting this
+    # here makes them key on the account instead of the (shared) client IP.
+    request.state.user = user
     return user
 
 
