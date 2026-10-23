@@ -2302,7 +2302,7 @@ def insight_feed(request: Request, req: InsightRequest, user: User = Depends(aut
     gap_paper_map = {p.id: p for p in papers[:8]}
     for pid, analyses in gap_analyses_map.items():
         p = gap_paper_map.get(pid)
-        if not p:
+        if not p or p.title in papers_in_relationships:
             continue
         for a in analyses:
             if a.analysis_type == "research_gaps" and a.content:
