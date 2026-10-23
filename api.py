@@ -236,10 +236,6 @@ _INSIGHT_CACHE_TTL = 2 * 60 * 60  # 2 hours in seconds
 # user so one account's feed is never served to another.
 _insight_cache: dict[str, dict] = {}
 
-# Embedding count cache: pgvector COUNT(*) is called on every /health probe
-# (Render UptimeRobot pings every minute). Cache for 60s to avoid constant load.
-_embedding_count_cache: dict[str, object] = {"value": 0, "ts": 0.0}
-
 
 def _invalidate_library_caches():
     """Call this any time a library changes (papers added/removed, new
@@ -631,23 +627,28 @@ def health_root():
 
 @app.get("/api/health")
 @limiter.exempt
-def health():
+def health(request: Request):
+    """Liveness for anyone; library stats only for the signed-in caller.
+
+    The fingerprint ("<paper count>:<newest paper>") is per user — the frontend
+    uses it to flag that *your* library changed since results were cached, so a
+    global value would fire that banner whenever anyone uploaded anything, and
+    would leak the size of everyone else's libraries to anonymous callers."""
     errors = settings.validate()
-    paper_count, latest_paper = db.paper_stats()
-    now_ts = _time.time()
-    if now_ts - _embedding_count_cache["ts"] > 60:
-        _embedding_count_cache["value"] = agent.vector_store.count()
-        _embedding_count_cache["ts"] = now_ts
-    embedding_count = _embedding_count_cache["value"]
-    # Library fingerprint: changes whenever papers are added or removed.
-    # Frontend uses this as a cache-bust key for contradiction results.
-    fingerprint = f"{paper_count}:{latest_paper}"
+    status = "ok" if not errors else "degraded"
+    try:
+        user = authlib.get_current_user(request)
+    except HTTPException:
+        return {"status": status, "errors": [], "papers": 0, "embeddings": 0,
+                "library_fingerprint": ""}
+    paper_count, latest_paper = db.paper_stats(user.id)
+    owned = db.list_paper_ids_for_user(user.id) if paper_count else []
     return {
-        "status": "ok" if not errors else "degraded",
+        "status": status,
         "errors": errors,
         "papers": paper_count,
-        "embeddings": embedding_count,
-        "library_fingerprint": fingerprint,
+        "embeddings": agent.vector_store.count_for_papers(owned),
+        "library_fingerprint": f"{paper_count}:{latest_paper}",
     }
 
 
