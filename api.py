@@ -1240,7 +1240,7 @@ def list_contradictions(user: User = Depends(authlib.get_current_user)):
             # Computed second opinion on which side is better supported, derived
             # from the claims' own stated cues — independent of the LLM verdict.
             "evidence_gap": evidence_gap(es_a, es_b),
-            "similarity": round(r.similarity, 3),
+            "similarity": round(r.similarity or 0.0, 3),
             "claim_a": {
                 "paper_id": a.paper_id,
                 "paper_title": claim_paper_title.get(a.id, "Unknown paper"),
@@ -1260,7 +1260,8 @@ def list_contradictions(user: User = Depends(authlib.get_current_user)):
 
     # Sort: contradictions first, then nuance, then support; newest within each.
     order = {"contradiction": 0, "nuance": 1, "support": 2}
-    out.sort(key=lambda x: (order.get(x["relationship"], 9), x["created_at"] or ""), reverse=False)
+    out.sort(key=lambda x: x["created_at"] or "", reverse=True)
+    out.sort(key=lambda x: order.get(x["relationship"], 9))  # stable: keeps newest-first
     return out
 
 
@@ -1295,7 +1296,7 @@ def _contradiction_bg(job_id: str, scope: list[str], similarity_threshold: float
                 "evidence_gap": evidence_gap(
                     score_claim(r.claim_a.text), score_claim(r.claim_b.text)
                 ),
-                "similarity": round(r.similarity, 3),
+                "similarity": round(r.similarity or 0.0, 3),
                 "claim_a": {
                     "paper_id": r.claim_a.paper_id,
                     "paper_title": r.claim_a.paper_title,
@@ -1919,7 +1920,7 @@ def _build_graph_readonly(papers):
             "target": r.claim_hi,
             "relationship": r.relationship,
             "category": r.category,
-            "similarity": round(r.similarity, 3),
+            "similarity": round(r.similarity or 0.0, 3),
             "explanation": r.explanation,
         })
         connected_claim_ids.add(r.claim_lo)
