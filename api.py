@@ -1349,18 +1349,17 @@ def get_cached_hypotheses(user: User = Depends(authlib.get_current_user)):
     Falls back to the legacy hypothesis_cache if no runs exist yet.
     Zero LLM calls — pure DB reads.
     """
+    return _latest_hypotheses(user)
+
+
+def _latest_hypotheses(user: User) -> list[dict]:
+    """The user's most recent hypotheses: the latest saved run, falling back
+    to the legacy hypothesis_cache rows written before runs existed."""
     runs = db.list_hypothesis_runs(user.id, limit=1)
     if runs:
-        try:
-            return runs[0].hypotheses
-        except Exception:
-            pass
-    # Legacy fallback
-    paper_ids = db.list_paper_ids_for_user(user.id)
-    entries = db.list_hypothesis_cache(paper_ids, user_id=user.id)
-    if entries:
-        return entries[0]["hypotheses"]
-    return []
+        return runs[0].hypotheses
+    entries = db.list_hypothesis_cache(_owned_ids(user), user_id=user.id)
+    return entries[0]["hypotheses"] if entries else []
 
 
 @app.get("/api/hypotheses/runs")
@@ -2701,11 +2700,9 @@ def export_hypotheses(
     user: User = Depends(authlib.get_current_user),
 ):
     """Export the hypothesis report as Markdown or JSON."""
-    owned = _owned_ids(user)
-    cached_entries = db.list_hypothesis_cache(owned, user_id=user.id)
-    if not cached_entries:
+    hypotheses = _latest_hypotheses(user)
+    if not hypotheses:
         raise HTTPException(status_code=404, detail="No hypotheses generated yet.")
-    hypotheses = cached_entries[0]["hypotheses"]
 
     if fmt == "json":
         return JSONResponse(content=hypotheses)
@@ -2719,7 +2716,7 @@ def export_hypotheses(
             "",
             f"**Rationale:** {h.get('rationale', '')}",
             "",
-            f"**Novelty:** {h.get('novelty_tier', 'unknown')} (score: {round(h.get('novelty_score', 0), 3)})",
+            f"**Novelty:** {h.get('novelty_tier', 'unknown')} (score: {round(h.get('novelty_score') or 0, 3)})",
             "",
             f"**Methodology:** {h.get('methodology', '')}",
             "",
