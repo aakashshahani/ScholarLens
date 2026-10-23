@@ -242,66 +242,83 @@ class PDFAnalysisAgent:
 
     # ── Core Ingest Pipeline ─────────────────────────────────
 
-    def ingest_pdf(self, file_path: str | Path, filename: str | None = None, api_key: str | None = None, model: str | None = None) -> Paper:
+    def ingest_pdf(self, file_path: str | Path, filename: str | None = None,
+                   api_key: str | None = None, model: str | None = None,
+                   user_id: str | None = None) -> Paper:
         """
         Full ingestion pipeline:
         1. Extract text from PDF
-        2. Chunk text with section awareness
-        3. Embed and store chunks in ChromaDB
-        4. Create paper record in SQLite
+        2. Extract metadata (LLM) and create the paper row, owned by user_id
+        3. Chunk text with section awareness
+        4. Embed chunks into pgvector and store them
         Returns the Paper object with its ID.
+
+        The source PDF is deleted afterwards — its text now lives in the paper
+        row and nothing reads the file again. If any step after the insert
+        fails, the half-built paper is removed so no orphan row remains.
         """
         file_path = Path(file_path)
-        extracted = extract_pdf(file_path)
+        try:
+            extracted = extract_pdf(file_path)
+        finally:
+            try:
+                file_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
         meta = self._extract_metadata(extracted.full_text[:6000], api_key=api_key, model=model)
 
         paper = Paper(
             id=Paper.new_id(),
-            title=meta.get("title", filename or file_path.stem),
-            authors=meta.get("authors", []),
-            abstract=meta.get("abstract", ""),
-            year=meta.get("year"),
+            # `or`, not .get(default): the model returns "" / null for unknown
+            # fields, which must still fall back to something usable.
+            title=(meta.get("title") or "").strip() or (filename or file_path.stem),
+            authors=[a for a in (meta.get("authors") or []) if isinstance(a, str) and a.strip()],
+            abstract=meta.get("abstract") or "",
+            year=meta.get("year") if isinstance(meta.get("year"), int) else None,
             source="upload",
             filename=filename or file_path.name,
             full_text=extracted.full_text,
             page_count=extracted.page_count,
+            user_id=user_id,
         )
         self.db.insert_paper(paper)
 
-        text_chunks = chunk_text(
-            extracted.pages,
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-        )
+        try:
+            text_chunks = chunk_text(
+                extracted.pages,
+                chunk_size=settings.chunk_size,
+                chunk_overlap=settings.chunk_overlap,
+            )
 
-        if text_chunks:
-            db_chunks = []
-            chunk_ids = []
-            texts = []
-            paper_ids_list = []
-            sections = []
-
-            for tc in text_chunks:
-                chunk = Chunk(
-                    id=Chunk.new_id(),
-                    paper_id=paper.id,
-                    text=tc.text,
-                    chunk_index=tc.chunk_index,
-                    section=tc.section,
-                    page_number=tc.page_number,
+            if text_chunks:
+                db_chunks = [
+                    Chunk(
+                        id=Chunk.new_id(),
+                        paper_id=paper.id,
+                        text=tc.text,
+                        chunk_index=tc.chunk_index,
+                        section=tc.section,
+                        page_number=tc.page_number,
+                    )
+                    for tc in text_chunks
+                ]
+                self.vector_store.add_chunks(
+                    [c.id for c in db_chunks],
+                    [c.text for c in db_chunks],
+                    [paper.id] * len(db_chunks),
+                    [c.section for c in db_chunks],
                 )
-                db_chunks.append(chunk)
-                chunk_ids.append(chunk.id)
-                texts.append(tc.text)
-                paper_ids_list.append(paper.id)
-                sections.append(tc.section)
-
-            self.vector_store.add_chunks(chunk_ids, texts, paper_ids_list, sections)
-
-            for chunk, cid in zip(db_chunks, chunk_ids):
-                chunk.embedding_id = cid
-            self.db.insert_chunks(db_chunks)
+                for chunk in db_chunks:
+                    chunk.embedding_id = chunk.id
+                self.db.insert_chunks(db_chunks)
+        except Exception:
+            try:
+                self.vector_store.delete_paper_chunks(paper.id)
+                self.db.delete_paper(paper.id)
+            except Exception as cleanup_err:  # noqa: BLE001
+                print(f"ingest cleanup failed for {paper.id}: {cleanup_err}")
+            raise
 
         return paper
 

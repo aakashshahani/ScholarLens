@@ -306,6 +306,13 @@ class ImportAddRequest(BaseModel):
     pdf_url: Optional[str] = Field(None, max_length=2000)
     url: str = Field(..., max_length=2000)
 
+    @field_validator("source")
+    @classmethod
+    def _known_source(cls, v):
+        if v not in _ALLOWED_SOURCES:
+            raise ValueError(f"Unknown source: {v}")
+        return v
+
     @field_validator("pdf_url", "url", mode="before")
     @classmethod
     def _safe_url(cls, v):
@@ -850,7 +857,9 @@ def _ingest_upload(content: bytes, client_filename: str | None, user: User,
         raise _UploadRejected(400, "Invalid upload path.")
 
     save_path.write_bytes(content)
-    paper = agent.ingest_pdf(save_path, filename=display_name, api_key=api_key, model=model)
+    # Ingested already owned by the caller (and the file removed afterwards).
+    paper = agent.ingest_pdf(save_path, filename=display_name, api_key=api_key,
+                             model=model, user_id=user.id)
 
     # Dedup is per-user: a paper already in THIS user's library is a duplicate;
     # the same paper in another user's library is not (each owner keeps a copy).
@@ -859,14 +868,8 @@ def _ingest_upload(content: bytes, client_filename: str | None, user: User,
     if existing:
         agent.vector_store.delete_paper_chunks(paper.id)
         db.delete_paper(paper.id)
-        try:
-            save_path.unlink(missing_ok=True)  # drop the redundant file copy
-        except OSError:
-            pass
         return "duplicate", existing
 
-    # Stamp ownership before analysis kicks off.
-    db.set_paper_owner(paper.id, user.id)
     return "analyzing", paper
 
 
@@ -1551,7 +1554,10 @@ def import_add(
             "message": f"This paper is already in your library: \"{existing.title}\".",
         }
 
-    # Download PDF
+    # Meter before downloading, so a 402 never leaves a fetched file behind.
+    user_key = authlib.resolve_user_api_key(user)
+    model = _resolve_model_and_meter(user)
+
     pdf_path = importer.download_pdf(result)
     if not pdf_path:
         raise HTTPException(
@@ -1559,10 +1565,9 @@ def import_add(
             detail="PDF download failed. The paper may not have an open-access PDF.",
         )
 
-    # Ingest into library
-    user_key = authlib.resolve_user_api_key(user)
-    model = _resolve_model_and_meter(user)
-    paper = agent.ingest_pdf(pdf_path, filename=pdf_path.name, api_key=user_key, model=model)
+    # Ingest into library (removes the downloaded file when done)
+    paper = agent.ingest_pdf(pdf_path, filename=pdf_path.name, api_key=user_key,
+                             model=model, user_id=user.id)
 
     # Update metadata from the source (better than what PDF extraction finds),
     # and stamp ownership in the same write.

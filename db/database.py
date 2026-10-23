@@ -631,10 +631,6 @@ class Database:
 
     # ── Ownership helpers ─────────────────────────────────────────────────────
 
-    def set_paper_owner(self, paper_id: str, user_id: str) -> None:
-        with self._cursor() as cur:
-            cur.execute("UPDATE papers SET user_id = %s WHERE id = %s", (user_id, paper_id))
-
     def update_paper_abstract(self, paper_id: str, abstract: str) -> None:
         with self._cursor() as cur:
             cur.execute("UPDATE papers SET abstract = %s WHERE id = %s",
