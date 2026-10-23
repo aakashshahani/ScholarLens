@@ -224,15 +224,10 @@ try:
                            id="daily_monitor", replace_existing=True)
     def _cleanup_sessions():
         """Delete expired sessions + stale jobs nightly."""
-        # Purge jobs older than 2 hours from the in-memory store
-        cutoff = _time.time() - 7200
-        stale = [jid for jid, j in list(_jobs.items()) if j.get("created_at", 0) < cutoff]
-        for jid in stale:
-            j = _jobs.pop(jid, {})
-            key = f"{j.get('user_id')}:{j.get('endpoint')}"
-            _active_jobs.pop(key, None)
-        if stale:
-            print(f"[scheduler] Purged {len(stale)} stale jobs")
+        with _jobs_lock:
+            purged = _purge_jobs_locked()
+        if purged:
+            print(f"[scheduler] Purged {purged} stale jobs")
         try:
             deleted = db.delete_expired_sessions()
             if deleted:
@@ -1067,10 +1062,33 @@ _active_jobs: dict[str, str] = {}
 _jobs_lock = threading.Lock()
 
 
-def _new_job(user_id: str, endpoint: str) -> str:
-    """Create a new job entry. Returns job_id."""
+_JOB_RESULT_TTL = 60 * 60       # finished jobs: long enough for any poller
+_JOB_RUNNING_TTL = 2 * 60 * 60  # running jobs older than this are presumed dead
+
+
+def _purge_jobs_locked() -> int:
+    """Drop expired jobs (caller holds _jobs_lock). Finished jobs keep their
+    full result payload in memory, so this runs on every new job rather than
+    once a night — the store stays bounded by recent activity."""
+    now = _time.time()
+    stale = [
+        jid for jid, j in _jobs.items()
+        if now - j.get("created_at", 0) > (_JOB_RUNNING_TTL if j["status"] == "running" else _JOB_RESULT_TTL)
+    ]
+    for jid in stale:
+        j = _jobs.pop(jid)
+        key = f"{j.get('user_id')}:{j.get('endpoint')}"
+        if _active_jobs.get(key) == jid:
+            _active_jobs.pop(key, None)
+    return len(stale)
+
+
+def _new_job(user_id: str, endpoint: str, *, track_active: bool = True) -> str:
+    """Create a new job entry. Returns job_id. track_active=False for jobs that
+    finish immediately (cache hits) so they never displace a running job."""
     job_id = str(uuid.uuid4())
     with _jobs_lock:
+        _purge_jobs_locked()
         _jobs[job_id] = {
             "status": "running",
             "result": None,
@@ -1079,26 +1097,31 @@ def _new_job(user_id: str, endpoint: str) -> str:
             "endpoint": endpoint,
             "created_at": _time.time(),
         }
-        _active_jobs[f"{user_id}:{endpoint}"] = job_id
+        if track_active:
+            _active_jobs[f"{user_id}:{endpoint}"] = job_id
     return job_id
 
 
-def _finish_job(job_id: str, result: dict):
+def _settle_job(job_id: str, status: str, *, result=None, error: str | None = None):
     with _jobs_lock:
-        if job_id in _jobs:
-            _jobs[job_id]["status"] = "done"
-            _jobs[job_id]["result"] = result
-        job = _jobs.get(job_id, {})
-        _active_jobs.pop(f"{job.get('user_id')}:{job.get('endpoint')}", None)
+        job = _jobs.get(job_id)
+        if job is None:
+            return
+        job["status"] = status
+        job["result"] = result
+        job["error"] = error
+        # Only release the user's active slot if it still points at THIS job.
+        key = f"{job['user_id']}:{job['endpoint']}"
+        if _active_jobs.get(key) == job_id:
+            _active_jobs.pop(key, None)
+
+
+def _finish_job(job_id: str, result):
+    _settle_job(job_id, "done", result=result)
 
 
 def _fail_job(job_id: str, error: str):
-    with _jobs_lock:
-        if job_id in _jobs:
-            _jobs[job_id]["status"] = "error"
-            _jobs[job_id]["error"] = error
-        job = _jobs.get(job_id, {})
-        _active_jobs.pop(f"{job.get('user_id')}:{job.get('endpoint')}", None)
+    _settle_job(job_id, "error", error=error)
 
 
 def _get_or_reuse_job(user_id: str, endpoint: str) -> str | None:
@@ -1144,7 +1167,7 @@ def ask_question(request: Request, req: AskRequest,
     with _ask_lock:
         entry = _ask_cache.get(_cache_key)
     if entry is not None and _time.time() - entry["ts"] < _ASK_CACHE_TTL:
-        job_id = _new_job(user.id, "ask")
+        job_id = _new_job(user.id, "ask", track_active=False)
         _finish_job(job_id, {"answer": entry["answer"], "sources": entry.get("sources", []), "cached": True})
         return {"job_id": job_id, "status": "done", "cached": True}
     existing = _get_or_reuse_job(user.id, "ask")
