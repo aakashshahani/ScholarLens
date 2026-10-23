@@ -674,6 +674,11 @@ class Database:
                   c.page_number, c.embedding_id) for c in chunks],
             )
 
+    def count_chunks_for_paper(self, paper_id: str) -> int:
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS cnt FROM chunks WHERE paper_id = %s", (paper_id,))
+            return int(cur.fetchone()["cnt"])
+
     def get_chunks_for_paper(self, paper_id: str) -> list[Chunk]:
         with self._cursor() as cur:
             cur.execute(

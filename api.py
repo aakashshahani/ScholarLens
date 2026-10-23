@@ -30,7 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, EmailStr, field_validator
-from typing import Annotated, Optional
+from typing import Annotated, NamedTuple, Optional
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -773,7 +773,7 @@ def _strip_scaffolding(text: str) -> str:
 def get_paper(paper_id: str, user: User = Depends(authlib.get_current_user)):
     paper = _require_owned_paper(paper_id, user)
     analyses = db.get_analyses_for_paper(paper_id)
-    chunks = db.get_chunks_for_paper(paper_id)
+    chunk_count = db.count_chunks_for_paper(paper_id)
     paper_tags = db.get_tags_for_paper(paper_id)
     return {
         "id": paper.id,
@@ -786,7 +786,7 @@ def get_paper(paper_id: str, user: User = Depends(authlib.get_current_user)):
         "arxiv_id": paper.arxiv_id,
         "page_count": paper.page_count,
         "created_at": paper.created_at,
-        "chunk_count": len(chunks),
+        "chunk_count": chunk_count,
         "tags": paper_tags,
         "analyses": [
             {
@@ -1885,7 +1885,12 @@ class GraphRequest(BaseModel):
     compute: bool = False
 
 
-def _build_graph_readonly(papers):
+class _PaperRef(NamedTuple):
+    id: str
+    title: str
+
+
+def _build_graph_readonly(papers: list[_PaperRef]):
     """
     Assemble the graph from the persisted relationships table — no agent
     calls, no LLM, no writes. This is the same data the conflict map and
@@ -1897,14 +1902,16 @@ def _build_graph_readonly(papers):
     simply have no nodes (same as before — isolated claims are hidden).
     """
     scope_ids = [p.id for p in papers]
+    titles = {p.id: p.title for p in papers}
 
-    # Claim lookup: id -> (claim object, paper title). Pure DB read.
+    # Claim lookup: id -> (claim object, paper title). One batched DB read.
     claim_by_id = {}
-    for p in papers:
-        for c in db.get_claims_for_paper(p.id):
-            claim_by_id[c.id] = (c, p.title)
+    for pid, claims in db.get_claims_for_papers(scope_ids).items():
+        for c in claims:
+            claim_by_id[c.id] = (c, titles.get(pid, "Unknown paper"))
 
-    rels = db.list_relationships(paper_ids=scope_ids)
+    # strict: both endpoints must be in scope (checked again below per claim).
+    rels = db.list_relationships(paper_ids=scope_ids, strict=True)
 
     edges = []
     connected_claim_ids = set()
@@ -2074,8 +2081,9 @@ def build_graph(request: Request, req: GraphRequest, user: User = Depends(authli
     scope = _scope_ids(user, req.paper_ids)
     if len(scope) < 2:
         return {"nodes": [], "edges": [], "papers": []}
-    papers = [db.get_paper(pid) for pid in scope]
-    papers = [p for p in papers if p is not None]
+    # Only ids + titles are needed here — don't load every paper's full text.
+    titles = db.get_paper_titles(scope)
+    papers = [_PaperRef(pid, titles[pid]) for pid in scope if pid in titles]
 
     if len(papers) < 2:
         return {"nodes": [], "edges": [], "papers": []}
