@@ -29,6 +29,7 @@ Stage 1 hybrid retrieval (added):
   are collapsed and pairs are sorted by their best score across both passes.
 """
 
+import concurrent.futures
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -416,23 +417,55 @@ class ContradictionAgent:
             # Also check the DB before calling the LLM
             db_hit = self.db.get_relationship(pair.claim_a.id, pair.claim_b.id)
             if db_hit:
-                result = ContradictionResult(
-                    id=db_hit.id,
-                    claim_a=pair.claim_a,
-                    claim_b=pair.claim_b,
-                    relationship=db_hit.relationship,
-                    category=db_hit.category or "findings",
-                    explanation=db_hit.explanation or "",
-                    stronger_evidence=db_hit.stronger_evidence or "neither",
-                    resolution=db_hit.resolution or "",
-                    similarity=pair.similarity,
-                    retrieval_source=pair.retrieval_source,
-                    created_at=db_hit.created_at,
-                )
+                result = self._result_from_stored(db_hit, pair)
                 self._judgment_cache[key] = result
                 return result
 
-        # ── LLM call ─────────────────────────────────────────
+        result = self._llm_judge(pair, api_key=api_key, model=model)
+        if use_cache:
+            self._store_result(result, pair)
+        return result
+
+    @staticmethod
+    def _result_from_stored(rel: StoredRelationship, pair: ClaimPair) -> ContradictionResult:
+        return ContradictionResult(
+            id=rel.id,
+            claim_a=pair.claim_a,
+            claim_b=pair.claim_b,
+            relationship=rel.relationship,
+            category=rel.category or "findings",
+            explanation=rel.explanation or "",
+            stronger_evidence=rel.stronger_evidence or "neither",
+            resolution=rel.resolution or "",
+            similarity=pair.similarity,
+            retrieval_source=pair.retrieval_source,
+            created_at=rel.created_at,
+        )
+
+    def _store_result(self, result: ContradictionResult, pair: ClaimPair) -> None:
+        """Write a fresh judgment through to the DB (errors are not persisted,
+        so a failed pair is retried on the next scan)."""
+        if result.relationship == "error":
+            return
+        self.db.upsert_relationship(StoredRelationship(
+            id=result.id,
+            claim_lo=pair.claim_a.id,
+            claim_hi=pair.claim_b.id,
+            paper_a=pair.claim_a.paper_id,
+            paper_b=pair.claim_b.paper_id,
+            relationship=result.relationship,
+            category=result.category,
+            explanation=result.explanation,
+            stronger_evidence=result.stronger_evidence,
+            resolution=result.resolution,
+            similarity=pair.similarity,
+            created_at=result.created_at,
+        ))
+        self._judgment_cache[self._cache_key(pair.claim_a.id, pair.claim_b.id)] = result
+
+    def _llm_judge(self, pair: ClaimPair, api_key: str | None = None, model: str | None = None) -> ContradictionResult:
+        """One Stage-2 LLM judgment. Never raises: a failure comes back as a
+        relationship="error" result."""
         try:
             response = self._anthropic(api_key).messages.create(
                 model=(model or settings.anthropic_model),
@@ -519,27 +552,34 @@ class ContradictionAgent:
                 retrieval_source=pair.retrieval_source,
             )
 
-        # ── Write through to DB (skip errors and eval mode) ──
-        if use_cache and result.relationship != "error":
-            self.db.upsert_relationship(StoredRelationship(
-                id=result.id,
-                claim_lo=pair.claim_a.id,
-                claim_hi=pair.claim_b.id,
-                paper_a=pair.claim_a.paper_id,
-                paper_b=pair.claim_b.paper_id,
-                relationship=result.relationship,
-                category=result.category,
-                explanation=result.explanation,
-                stronger_evidence=result.stronger_evidence,
-                resolution=result.resolution,
-                similarity=pair.similarity,
-                created_at=result.created_at,
-            ))
-            self._judgment_cache[key] = result
-
         return result
 
     # ── Full pipeline ────────────────────────────────────────
+
+    # Concurrent LLM calls per scan. Same total cost as sequential; bounded so a
+    # BYOK key's per-minute rate limit isn't hammered.
+    _LLM_WORKERS = 4
+
+    def _claims_for_papers(self, paper_ids: list[str], api_key: str | None,
+                           model: str | None) -> list[Claim]:
+        """Claims for every paper — cached rows in one query, and LLM extraction
+        (concurrently) only for papers that have none yet."""
+        titles = self.db.get_paper_titles(paper_ids)
+        cached = self.db.get_claims_for_papers(list(titles))
+        claims: list[Claim] = []
+        missing: list[str] = []
+        for pid in paper_ids:
+            if pid not in titles:
+                continue
+            if cached.get(pid):
+                claims.extend(_stored_to_claim(sc, titles[pid]) for sc in cached[pid])
+            else:
+                missing.append(pid)
+        if missing:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(self._LLM_WORKERS, len(missing))) as ex:
+                for extracted in ex.map(lambda pid: self.extract_claims(pid, api_key=api_key, model=model), missing):
+                    claims.extend(extracted)
+        return claims
 
     def run_contradiction_scan(
         self,
@@ -553,63 +593,54 @@ class ContradictionAgent:
         Run the full contradiction detection pipeline:
         1. Extract claims from all papers (DB-first, LLM on cache miss)
         2. Find similar claim pairs across papers (hybrid: dense + BM25)
-        3. Judge each pair (DB-first, LLM on cache miss)
+        3. Judge each new pair (LLM, concurrently); known pairs come from the DB
         4. Persist every new judgment to the relationships table
 
         Returns results sorted: contradictions → nuance → support → unrelated.
         """
-        if paper_ids:
-            papers = [self.db.get_paper(pid) for pid in paper_ids]
-            papers = [p for p in papers if p is not None]
-        else:
-            papers = self.db.list_papers(limit=50)
-
-        if len(papers) < 2:
+        if not paper_ids:
+            paper_ids = [p.id for p in self.db.list_papers(limit=50)]
+        if len(paper_ids) < 2:
             return []
 
-        all_claims = []
-        for paper in papers:
-            claims = self.extract_claims(paper.id, api_key=api_key, model=model)
-            all_claims.extend(claims)
-
+        all_claims = self._claims_for_papers(paper_ids, api_key, model)
         if len(all_claims) < 2:
             return []
 
         pairs = self.find_claim_pairs(all_claims, similarity_threshold)
 
-        # Skip pairs already in the DB — incremental scanning: never recompute
-        # relationships that exist, only evaluate truly new pairs.
-        # This allows the graph to grow without redundant LLM calls.
-        already_seen: set[tuple[str, str]] = set()
+        # Incremental scanning: relationships already judged are loaded in ONE
+        # query and never recomputed; only genuinely new pairs reach the LLM.
+        known = {
+            (r.claim_lo, r.claim_hi): r
+            for r in self.db.list_relationships(paper_ids=paper_ids, strict=True)
+        }
+        seen: set[tuple[str, str]] = set()
         new_pairs: list[ClaimPair] = []
-        existing_pairs: list[ClaimPair] = []
+        existing_results: list[ContradictionResult] = []
         for pair in pairs:
-            lo, hi = sorted([pair.claim_a.id, pair.claim_b.id])
-            if (lo, hi) in already_seen:
+            key = self._cache_key(pair.claim_a.id, pair.claim_b.id)
+            if key in seen:
                 continue
-            already_seen.add((lo, hi))
-            if self.db.get_relationship(pair.claim_a.id, pair.claim_b.id) is not None:
-                existing_pairs.append(pair)
+            seen.add(key)
+            rel = known.get(key)
+            if rel is not None:
+                if len(existing_results) < max_pairs:
+                    existing_results.append(self._result_from_stored(rel, pair))
             else:
                 new_pairs.append(pair)
 
-        # Evaluate new pairs up to max_pairs; existing ones are returned from DB.
         pairs_to_judge = new_pairs[:max_pairs]
+        new_results: list[ContradictionResult] = []
+        if pairs_to_judge:
+            def _judge(pair: ClaimPair) -> ContradictionResult:
+                result = self._llm_judge(pair, api_key=api_key, model=model)
+                self._store_result(result, pair)
+                return result
 
-        if not pairs_to_judge and not existing_pairs:
-            return []
-
-        # Judge new pairs via LLM
-        new_results = []
-        for pair in pairs_to_judge:
-            result = self.judge_pair(pair, api_key=api_key, model=model)
-            new_results.append(result)
-
-        # Load existing pairs from DB cache (no LLM call)
-        existing_results = []
-        for pair in existing_pairs[:max_pairs]:
-            result = self.judge_pair(pair, use_cache=True, api_key=api_key, model=model)
-            existing_results.append(result)
+            workers = min(self._LLM_WORKERS, len(pairs_to_judge))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                new_results = list(ex.map(_judge, pairs_to_judge))
 
         results = new_results + existing_results
         priority = {"contradiction": 0, "nuance": 1, "support": 2, "unrelated": 3, "error": 4}
