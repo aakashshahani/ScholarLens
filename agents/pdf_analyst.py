@@ -379,7 +379,23 @@ class PDFAnalysisAgent:
             print(f"Analysis failed [{analysis_type}] for {paper_id}: {e}")
             return {"type": analysis_type, "status": "error", "error": str(e)}
 
-    def analyze_paper(self, paper_id: str, api_key: str | None = None, model: str | None = None) -> list[dict]:
+    def reindex_paper(self, paper_id: str) -> int:
+        """Re-embed a paper's stored chunks if it has no vectors (e.g. it was
+        ingested before the pgvector migration, or embedding failed). Returns
+        the number of chunks embedded; 0 when the index was already present."""
+        if self.vector_store.count_for_papers([paper_id]) > 0:
+            return 0
+        chunks = self.db.get_chunks_for_paper(paper_id)
+        if not chunks:
+            return 0
+        self.vector_store.add_chunks(
+            [c.id for c in chunks], [c.text for c in chunks],
+            [paper_id] * len(chunks), [c.section for c in chunks],
+        )
+        return len(chunks)
+
+    def analyze_paper(self, paper_id: str, api_key: str | None = None, model: str | None = None,
+                      force: bool = False) -> list[dict]:
         """
         Run all 6 analysis types concurrently for a paper.
 
@@ -387,8 +403,9 @@ class PDFAnalysisAgent:
         prompt — no tool use, no multi-turn loop. All 6 fire in parallel
         via ThreadPoolExecutor and results are persisted as they complete.
 
-        Skip types that are already stored (idempotent — safe to call on a
-        paper that was partially analyzed).
+        By default types that are already stored are skipped (idempotent —
+        safe to call on a partially analyzed paper). force=True (re-analyze)
+        discards the stored analyses and regenerates all six.
 
         Returns a list of status dicts, one per analysis type.
         """
@@ -400,6 +417,13 @@ class PDFAnalysisAgent:
         if not paper.full_text:
             print(f"analyze_paper: paper {paper_id} has no stored text")
             return []
+
+        if force:
+            self.db.delete_analyses_for_paper(paper_id)
+            try:
+                self.reindex_paper(paper_id)
+            except Exception as e:  # noqa: BLE001 — analysis can still proceed
+                print(f"analyze_paper: re-index failed for {paper_id}: {e}")
 
         # Skip types already stored — makes re-runs idempotent
         existing = {a.analysis_type for a in self.db.get_analyses_for_paper(paper_id)}

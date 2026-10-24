@@ -370,11 +370,14 @@ class MonitorTopicRequest(BaseModel):
 
 # ── Background task helper ───────────────────────────────────
 
-def _analyze_paper_bg(paper_id: str, api_key: str | None = None, model: str | None = None):
+def _analyze_paper_bg(paper_id: str, api_key: str | None = None, model: str | None = None,
+                      force: bool = False):
     """Background task for paper analysis. Runs on the caller's BYOK key when
-    provided, else the server key; `model` is the resolved, tier-capped model."""
+    provided, else the server key; `model` is the resolved, tier-capped model.
+    force=True regenerates every analysis (and re-embeds if the paper has no
+    vectors) — what the Re-analyze button promises."""
     try:
-        agent.analyze_paper(paper_id, api_key=api_key, model=model)
+        agent.analyze_paper(paper_id, api_key=api_key, model=model, force=force)
     except Exception as e:
         print(f"Background analysis failed for {paper_id}: {e}")
 
@@ -931,7 +934,8 @@ def reanalyze_paper(request: Request, paper_id: str, background_tasks: Backgroun
     claim_ids = [c.id for c in db.get_claims_for_paper(paper_id)]
     db.delete_claims_for_paper(paper_id)
     db.delete_relationships_for_claims(claim_ids)
-    background_tasks.add_task(_analyze_paper_bg, paper_id, api_key, model)
+    background_tasks.add_task(_analyze_paper_bg, paper_id, api_key, model, True)
+    _invalidate_library_caches()
     return {"id": paper_id, "status": "analyzing"}
 
 

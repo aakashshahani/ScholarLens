@@ -710,6 +710,10 @@ class Database:
             )
             return result.id
 
+    def delete_analyses_for_paper(self, paper_id: str) -> None:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM analysis_results WHERE paper_id = %s", (paper_id,))
+
     def get_analyses_for_paper(self, paper_id: str) -> list[AnalysisResult]:
         with self._cursor() as cur:
             cur.execute(
