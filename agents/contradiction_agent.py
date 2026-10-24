@@ -29,7 +29,6 @@ Stage 1 hybrid retrieval (added):
   are collapsed and pairs are sorted by their best score across both passes.
 """
 
-import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -97,9 +96,10 @@ class ContradictionAgent:
         self.db = Database()
         self.vector_store = VectorStore()
         # In-session hot cache: avoids repeat DB reads within one scan batch.
-        # Keys are text-hash strings; values are ContradictionResult objects.
-        # Does NOT persist across restarts — the relationships table is truth.
-        self._judgment_cache: dict[str, ContradictionResult] = {}
+        # Keyed by the sorted claim-id pair — claim ids are per user, so one
+        # user's judgment can never be served for another user's (textually
+        # identical) claims. Does NOT persist; the relationships table is truth.
+        self._judgment_cache: dict[tuple[str, str], ContradictionResult] = {}
         # Claim-embedding cache keyed by claim id. A claim's text is immutable for
         # a given id, so its vector stays valid for the process lifetime — this
         # stops every contradiction scan from re-embedding the whole library via
@@ -113,14 +113,10 @@ class ContradictionAgent:
         return Anthropic(api_key=api_key) if api_key else self.client
 
     @staticmethod
-    def _cache_key(claim_a_text: str, claim_b_text: str) -> str:
-        """
-        Deterministic cache key from two claim texts.
-        Sorted so (A,B) and (B,A) hit the same entry.
-        """
-        texts = sorted([claim_a_text.strip(), claim_b_text.strip()])
-        combined = f"{texts[0]}|||{texts[1]}"
-        return hashlib.sha256(combined.encode()).hexdigest()[:16]
+    def _cache_key(claim_a_id: str, claim_b_id: str) -> tuple[str, str]:
+        """Order-independent key for a claim pair: (A,B) and (B,A) match."""
+        lo, hi = sorted([claim_a_id, claim_b_id])
+        return lo, hi
 
     # ── Stage 1: Extract claims — DB-first ───────────────────
 
@@ -413,7 +409,7 @@ class ContradictionAgent:
           Used by the eval harness to avoid polluting production data.
         """
         if use_cache:
-            key = self._cache_key(pair.claim_a.text, pair.claim_b.text)
+            key = self._cache_key(pair.claim_a.id, pair.claim_b.id)
             if key in self._judgment_cache:
                 return self._judgment_cache[key]
 
