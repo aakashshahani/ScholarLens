@@ -61,6 +61,42 @@ class BM25Index:
         self._texts = texts
         tokenized = [_tokenize(t) for t in texts]
         self._bm25 = BM25Okapi(tokenized)
+        self._build_postings()
+
+    def _build_postings(self) -> None:
+        """Precompute, per term, the docs containing it and each posting's
+        BM25Okapi weight. rank_bm25's get_scores() loops over every document
+        in Python for every query token — O(corpus) per token — which made the
+        all-claims-vs-all-claims Stage-1 pass quadratic in Python. With the
+        postings, scoring a query is a few numpy scatter-adds; the numbers are
+        identical (same idf / k1 / b / avgdl as BM25Okapi)."""
+        import numpy as np
+        bm = self._bm25
+        k1, b = bm.k1, bm.b
+        doc_len = np.asarray(bm.doc_len, dtype=np.float64)
+        norm = k1 * (1 - b + b * doc_len / bm.avgdl) if bm.avgdl else np.full(len(doc_len), k1)
+        docs: dict[str, list[int]] = {}
+        tfs: dict[str, list[float]] = {}
+        for d, freqs in enumerate(bm.doc_freqs):
+            for term, f in freqs.items():
+                docs.setdefault(term, []).append(d)
+                tfs.setdefault(term, []).append(f)
+        self._postings: dict[str, tuple] = {}
+        for term, idx in docs.items():
+            idx_arr = np.asarray(idx, dtype=np.int64)
+            tf = np.asarray(tfs[term], dtype=np.float64)
+            weight = (bm.idf.get(term) or 0.0) * (tf * (k1 + 1) / (tf + norm[idx_arr]))
+            self._postings[term] = (idx_arr, weight)
+
+    def _raw_scores(self, tokens: list[str]):
+        """Equivalent to BM25Okapi.get_scores(tokens), via the postings."""
+        import numpy as np
+        scores = np.zeros(len(self._texts))
+        for tok in tokens:  # repeated query tokens count repeatedly, as in rank_bm25
+            posting = self._postings.get(tok)
+            if posting is not None:
+                scores[posting[0]] += posting[1]
+        return scores
 
     def query(self, text: str, n: int = 10) -> list[BM25Match]:
         """
@@ -78,7 +114,7 @@ class BM25Index:
         if not tokens or len(self._texts) < 2:
             return []
 
-        raw_scores = self._bm25.get_scores(tokens)  # numpy array, length = len(texts)
+        raw_scores = self._raw_scores(tokens)  # numpy array, length = len(texts)
         max_score = float(raw_scores.max())
 
         if max_score == 0.0:
@@ -92,6 +128,19 @@ class BM25Index:
         ]
         scored.sort(key=lambda m: m.score, reverse=True)
         return scored[:n]
+
+    def normalized_scores(self, text: str):
+        """BM25 score of `text` against every document, normalised to [0, 1]
+        by the best score (a numpy array, index-aligned with the corpus), or
+        None when nothing matches. Lets callers mask and rank in numpy."""
+        tokens = _tokenize(text)
+        if not tokens or len(self._texts) < 2:
+            return None
+        raw = self._raw_scores(tokens)
+        max_score = float(raw.max())
+        if max_score <= 0.0:
+            return None
+        return raw / max_score
 
     def __len__(self) -> int:
         return len(self._texts)
