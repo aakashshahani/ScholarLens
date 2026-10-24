@@ -24,8 +24,7 @@ Analysis pipeline change:
   the LLM's judgment in stage 2 depends on vector similarity results from
   stage 1 — that's where the agentic pattern actually earns its keep.
 
-The ask() method retains its agentic RAG loop unchanged — that one is
-open-ended by nature (the model doesn't know in advance what to search for).
+ask() is single-pass RAG: one embed, one pgvector search, one LLM call.
 """
 
 import json
@@ -138,39 +137,6 @@ ANALYSIS_TYPES = [
         ),
     },
 ]
-
-# Keep TOOLS for the ask() RAG loop — that one is still agentic
-TOOLS = [
-    {
-        "name": "search_paper_chunks",
-        "description": (
-            "Semantic search across stored paper chunks. Use this to find "
-            "relevant passages when answering questions about papers. "
-            "Returns matching chunks, each with a paper_title (cite this) and "
-            "a section label."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Natural language search query",
-                },
-                "paper_id": {
-                    "type": "string",
-                    "description": "Optional: filter to a specific paper ID",
-                },
-                "n_results": {
-                    "type": "integer",
-                    "description": "Number of results (default 5)",
-                    "default": 5,
-                },
-            },
-            "required": ["query"],
-        },
-    },
-]
-
 
 def _sanitize_for_xml(text: str) -> str:
     """Strip closing XML tags that could break out of our document sandbox.
@@ -463,18 +429,20 @@ class PDFAnalysisAgent:
 
         return results
 
-    # ── Question Answering (agentic RAG — unchanged) ─────────
+    # ── Question Answering (single-pass RAG) ─────────────────
 
     def ask(self, question: str, paper_id: str | None = None,
             paper_ids: list[str] | None = None,
             api_key: str | None = None, model: str | None = None,
             history: list[dict] | None = None,
             return_sources: bool = False):
-        """When return_sources is True, returns (answer, sources) where sources
-        is the list of retrieved passages that grounded the answer; otherwise
-        returns just the answer string (backward-compatible)."""
         """
         Answer a question using simple single-pass RAG.
+
+        When return_sources is True, returns (answer, sources) where sources is
+        the list of retrieved passages that grounded the answer; otherwise just
+        the answer string. Raises RuntimeError when retrieval or generation
+        fails, so callers never mistake an error message for an answer.
 
         1. Embed the question via Voyage AI (one API call)
         2. Find the top 6 most relevant chunks via pgvector (one DB call)
