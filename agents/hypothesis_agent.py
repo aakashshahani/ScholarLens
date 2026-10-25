@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from anthropic import Anthropic
 
 from config import settings
+from utils.llm_json import parse_llm_json
 from db import Database, StoredRelationship, StoredClaim, HypothesisRun
 from utils import VectorStore
 
@@ -393,14 +394,7 @@ class HypothesisAgent:
                 }],
             )
 
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-                if raw.endswith("```"):
-                    raw = raw[:-3]
-                raw = raw.strip()
-
-            parsed = json.loads(raw)
+            parsed = parse_llm_json(response.content[0].text)
 
         except Exception as e:
             print(f"Hypothesis generation failed: {e}")

@@ -27,7 +27,6 @@ Analysis pipeline change:
 ask() is single-pass RAG: one embed, one pgvector search, one LLM call.
 """
 
-import json
 import re
 import concurrent.futures
 from pathlib import Path
@@ -35,6 +34,7 @@ from pathlib import Path
 from anthropic import Anthropic
 
 from config import settings
+from utils.llm_json import parse_llm_json
 from db import Database, Paper, Chunk, AnalysisResult
 from utils import extract_pdf, chunk_text, VectorStore
 
@@ -187,13 +187,7 @@ class PDFAnalysisAgent:
                     ),
                 }],
             )
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-                if raw.endswith("```"):
-                    raw = raw[:-3]
-                raw = raw.strip()
-            meta = json.loads(raw)
+            meta = parse_llm_json(response.content[0].text)
             if not isinstance(meta.get("authors"), list):
                 meta["authors"] = []
             if isinstance(meta.get("year"), str):

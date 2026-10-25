@@ -30,7 +30,6 @@ Stage 1 hybrid retrieval (added):
 """
 
 import concurrent.futures
-import json
 import threading
 import uuid
 from collections import OrderedDict
@@ -41,6 +40,7 @@ import numpy as np
 from anthropic import Anthropic
 
 from config import settings
+from utils.llm_json import parse_llm_json
 from db import Database, StoredClaim, StoredRelationship
 from utils import VectorStore
 from utils.bm25_index import BM25Index
@@ -199,14 +199,7 @@ class ContradictionAgent:
                 }],
             )
 
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-                if raw.endswith("```"):
-                    raw = raw[:-3]
-                raw = raw.strip()
-
-            parsed = json.loads(raw)
+            parsed = parse_llm_json(response.content[0].text)
 
             # Build StoredClaim objects with stable UUIDs and persist
             stored_claims = []
@@ -514,14 +507,7 @@ class ContradictionAgent:
                 }],
             )
 
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-                if raw.endswith("```"):
-                    raw = raw[:-3]
-                raw = raw.strip()
-
-            parsed = json.loads(raw)
+            parsed = parse_llm_json(response.content[0].text)
 
             VALID_RELATIONSHIPS = {"contradiction", "support", "nuance", "unrelated"}
             raw_rel = parsed.get("relationship", "unrelated")
@@ -795,13 +781,7 @@ class ContradictionAgent:
                     ),
                 }],
             )
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-                if raw.endswith("```"):
-                    raw = raw[:-3]
-                raw = raw.strip()
-            parsed = json.loads(raw)
+            parsed = parse_llm_json(response.content[0].text)
             return (
                 parsed.get("name", "Research Cluster"),
                 parsed.get("research_question"),
