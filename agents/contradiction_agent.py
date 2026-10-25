@@ -35,6 +35,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+import numpy as np
 from anthropic import Anthropic
 
 from config import settings
@@ -297,84 +298,63 @@ class ContradictionAgent:
         # pair_key → ClaimPair; used for dedup across passes
         pair_map: dict[tuple[str, str], ClaimPair] = {}
 
-        # O(n²) cosine via numpy matrix multiply — ~100x faster than the pure
-        # Python nested loop it replaces. With 200 claims at 1024 dims this
-        # takes ~5ms instead of ~30s. Falls back to pure Python if numpy is
-        # unavailable (shouldn't happen on Render but safe to guard).
-        try:
-            import numpy as np
-            emb_matrix = np.array(embeddings, dtype=np.float32)
-            # L2-normalize each row so dot product == cosine similarity
-            norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
-            norms = np.where(norms == 0, 1e-9, norms)
-            emb_matrix = emb_matrix / norms
-            # Full pairwise cosine matrix — shape (n, n)
-            sim_matrix = emb_matrix @ emb_matrix.T
+        # Integer paper code per claim so "same paper?" is a vectorised compare.
+        codes_by_paper: dict[str, int] = {}
+        paper_codes = np.array(
+            [codes_by_paper.setdefault(c.paper_id, len(codes_by_paper)) for c in all_claims]
+        )
 
-            for i in range(len(all_claims)):
-                for j in range(i + 1, len(all_claims)):
-                    if all_claims[i].paper_id == all_claims[j].paper_id:
-                        continue
-                    sim = float(sim_matrix[i, j])
-                    if sim >= similarity_threshold:
-                        key = (all_claims[i].id, all_claims[j].id)
-                        pair_map[key] = ClaimPair(
-                            claim_a=all_claims[i],
-                            claim_b=all_claims[j],
-                            similarity=sim,
-                            retrieval_source="dense",
-                        )
-        except ImportError:
-            # Pure Python fallback — correct but slow at scale
-            for i in range(len(all_claims)):
-                for j in range(i + 1, len(all_claims)):
-                    if all_claims[i].paper_id == all_claims[j].paper_id:
-                        continue
-                    sim = self._cosine_similarity(embeddings[i], embeddings[j])
-                    if sim >= similarity_threshold:
-                        key = (all_claims[i].id, all_claims[j].id)
-                        pair_map[key] = ClaimPair(
-                            claim_a=all_claims[i],
-                            claim_b=all_claims[j],
-                            similarity=sim,
-                            retrieval_source="dense",
-                        )
+        # Full pairwise cosine via one matrix multiply on L2-normalised rows.
+        # Candidates are then selected with numpy too — the previous pure-Python
+        # walk over all n² cells was ~4.5M iterations at the 3000-claim cap.
+        emb_matrix = np.asarray(embeddings, dtype=np.float32)
+        norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+        emb_matrix = emb_matrix / np.where(norms == 0, 1e-9, norms)
+        sim_matrix = emb_matrix @ emb_matrix.T
+
+        cand = np.argwhere(sim_matrix >= similarity_threshold)
+        keep = (cand[:, 0] < cand[:, 1]) & (paper_codes[cand[:, 0]] != paper_codes[cand[:, 1]])
+        for i, j in cand[keep]:
+            a, b = all_claims[i], all_claims[j]
+            pair_map[(a.id, b.id)] = ClaimPair(
+                claim_a=a, claim_b=b,
+                similarity=float(sim_matrix[i, j]),
+                retrieval_source="dense",
+            )
+        del sim_matrix, emb_matrix
 
         # ── BM25 pass ─────────────────────────────────────────
-        # Build one index over all claim texts. For each claim query the
-        # index and keep cross-paper matches above the score threshold.
+        # Build one index over all claim texts. For each claim, take its top-k
+        # matches FROM OTHER PAPERS (same-paper hits must not use up the k
+        # slots) above the score threshold.
         bm25 = BM25Index(texts)
 
         for i, claim in enumerate(all_claims):
-            matches = bm25.query(claim.text, n=bm25_top_k + 1)  # +1 to skip self
-            for match in matches:
-                j = match.doc_index
-                if j == i:
-                    continue
-                if all_claims[j].paper_id == claim.paper_id:
-                    continue
-                if match.score < bm25_min_score:
-                    continue
+            scores = bm25.normalized_scores(claim.text)
+            if scores is None:
+                continue
+            scores[paper_codes == paper_codes[i]] = 0.0  # self + same paper
+            top = np.argsort(scores)[::-1][:bm25_top_k]
+            for j in top:
+                score = float(scores[j])
+                if score < bm25_min_score or score <= 0.0:
+                    break
 
                 # Canonical key: smaller index first so (i,j) == (j,i)
                 lo, hi = (i, j) if i < j else (j, i)
                 key = (all_claims[lo].id, all_claims[hi].id)
 
-                if key in pair_map:
+                existing = pair_map.get(key)
+                if existing is not None:
                     # Already found by dense — upgrade tag, keep cosine score
-                    existing = pair_map[key]
-                    pair_map[key] = ClaimPair(
-                        claim_a=existing.claim_a,
-                        claim_b=existing.claim_b,
-                        similarity=existing.similarity,
-                        retrieval_source="both",
-                    )
+                    if existing.retrieval_source == "dense":
+                        existing.retrieval_source = "both"
                 else:
                     # New pair from BM25 only — use normalised BM25 score
                     pair_map[key] = ClaimPair(
                         claim_a=all_claims[lo],
                         claim_b=all_claims[hi],
-                        similarity=match.score,
+                        similarity=score,
                         retrieval_source="bm25",
                     )
 
@@ -385,15 +365,6 @@ class ContradictionAgent:
 
         pairs = sorted(pair_map.values(), key=lambda p: p.similarity, reverse=True)
         return pairs
-
-    @staticmethod
-    def _cosine_similarity(a: list[float], b: list[float]) -> float:
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = sum(x * x for x in a) ** 0.5
-        norm_b = sum(x * x for x in b) ** 0.5
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return dot / (norm_a * norm_b)
 
     # ── Stage 2: LLM judges each pair ────────────────────────
 
