@@ -31,7 +31,9 @@ Stage 1 hybrid retrieval (added):
 
 import concurrent.futures
 import json
+import threading
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -101,12 +103,15 @@ class ContradictionAgent:
         # Keyed by the sorted claim-id pair — claim ids are per user, so one
         # user's judgment can never be served for another user's (textually
         # identical) claims. Does NOT persist; the relationships table is truth.
-        self._judgment_cache: dict[tuple[str, str], ContradictionResult] = {}
+        self._judgment_cache: OrderedDict[tuple[str, str], ContradictionResult] = OrderedDict()
         # Claim-embedding cache keyed by claim id. A claim's text is immutable for
         # a given id, so its vector stays valid for the process lifetime — this
         # stops every contradiction scan from re-embedding the whole library via
-        # the Voyage API (the previous behaviour). Bounded by library size.
-        self._embed_cache: dict[str, list[float]] = {}
+        # the Voyage API. Stored as float32 arrays (4KB per claim, vs ~32KB as a
+        # list of Python floats) and LRU-capped, because it is shared by every
+        # user of the process.
+        self._embed_cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._embed_lock = threading.Lock()
 
     def _anthropic(self, api_key: str | None = None):
         """Per-request Anthropic client: the caller's BYOK key when provided,
@@ -225,6 +230,27 @@ class ContradictionAgent:
             print(f"Claim extraction failed for {paper_id}: {e}")
             return []
 
+    _EMBED_CACHE_MAX = 20_000  # ~80MB worst case at 1024 dims
+
+    def _claim_embeddings(self, claims: list[Claim]) -> list[np.ndarray]:
+        """Vectors for `claims`, embedding (in one batch) only the ones not
+        already cached."""
+        with self._embed_lock:
+            missing = [c for c in claims if c.id not in self._embed_cache]
+        if missing:
+            new_vecs = self.vector_store.embed_texts([c.text for c in missing])
+            with self._embed_lock:
+                for c, v in zip(missing, new_vecs):
+                    self._embed_cache[c.id] = np.asarray(v, dtype=np.float32)
+        with self._embed_lock:
+            out = []
+            for c in claims:
+                self._embed_cache.move_to_end(c.id)
+                out.append(self._embed_cache[c.id])
+            while len(self._embed_cache) > max(self._EMBED_CACHE_MAX, len(claims)):
+                self._embed_cache.popitem(last=False)
+        return out
+
     # ── Stage 1b: Find similar claim pairs — hybrid retrieval ─
 
     def find_claim_pairs(
@@ -288,12 +314,7 @@ class ContradictionAgent:
         # Embed only claims not already cached this process-lifetime; reuse
         # vectors for the rest. Avoids re-embedding the whole library on every
         # scan (claim text is immutable per id).
-        missing = [c for c in all_claims if c.id not in self._embed_cache]
-        if missing:
-            new_vecs = self.vector_store.embed_texts([c.text for c in missing])
-            for c, v in zip(missing, new_vecs):
-                self._embed_cache[c.id] = v
-        embeddings = [self._embed_cache[c.id] for c in all_claims]
+        embeddings = self._claim_embeddings(all_claims)
 
         # pair_key → ClaimPair; used for dedup across passes
         pair_map: dict[tuple[str, str], ClaimPair] = {}
@@ -389,7 +410,7 @@ class ContradictionAgent:
             db_hit = self.db.get_relationship(pair.claim_a.id, pair.claim_b.id)
             if db_hit:
                 result = self._result_from_stored(db_hit, pair)
-                self._judgment_cache[key] = result
+                self._remember(key, result)
                 return result
 
         result = self._llm_judge(pair, api_key=api_key, model=model)
@@ -432,7 +453,18 @@ class ContradictionAgent:
             similarity=pair.similarity,
             created_at=result.created_at,
         ))
-        self._judgment_cache[self._cache_key(pair.claim_a.id, pair.claim_b.id)] = result
+        self._remember(self._cache_key(pair.claim_a.id, pair.claim_b.id), result)
+
+    _JUDGMENT_CACHE_MAX = 10_000
+
+    def _remember(self, key: tuple[str, str], result: ContradictionResult) -> None:
+        """Bounded LRU insert — the DB is the durable store, this only saves
+        repeat lookups, so old entries can be dropped freely."""
+        with self._embed_lock:
+            self._judgment_cache[key] = result
+            self._judgment_cache.move_to_end(key)
+            while len(self._judgment_cache) > self._JUDGMENT_CACHE_MAX:
+                self._judgment_cache.popitem(last=False)
 
     def _llm_judge(self, pair: ClaimPair, api_key: str | None = None, model: str | None = None) -> ContradictionResult:
         """One Stage-2 LLM judgment. Never raises: a failure comes back as a
