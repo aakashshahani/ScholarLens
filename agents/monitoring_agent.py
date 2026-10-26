@@ -217,16 +217,20 @@ class MonitoringAgent:
         except Exception as e:  # noqa: BLE001
             print(f"[monitor] reason embed failed: {e}")
             return [default] * len(abstracts)
-        out = []
+        nearest: list[str | None] = []
         for emb in embeddings:
             try:
                 hits = self.vector_store.search_by_embedding(
                     embedding=emb, n_results=1, paper_ids=lib_ids)
-                top = self.db.get_paper(hits[0].paper_id) if hits else None
-                out.append(f"Related to: {top.title}" if top else default)
+                nearest.append(hits[0].paper_id if hits else None)
             except Exception:  # noqa: BLE001
-                out.append(default)
-        return out
+                nearest.append(None)
+        # Titles in one query — not a full paper row (with its text) per hit.
+        try:
+            titles = self.db.get_paper_titles([pid for pid in set(nearest) if pid])
+        except Exception:  # noqa: BLE001
+            titles = {}
+        return [f"Related to: {titles[pid]}" if pid in titles else default for pid in nearest]
 
     def _score_relevance_cosine(
         self,
@@ -256,6 +260,7 @@ class MonitoringAgent:
         try:
             abstracts = [p.abstract[:400] for p in papers]
             embeddings = self.vector_store.embed_texts(abstracts)
+            matches: list[tuple[ImportResult, float, str]] = []
             for paper, embedding in zip(papers, embeddings):
                 try:
                     results = self.vector_store.search_by_embedding(
@@ -264,19 +269,20 @@ class MonitoringAgent:
                         avg_sim = 1 - (sum(r.score for r in results) / len(results))
                         avg_sim = max(0, min(1, avg_sim))
                         if avg_sim >= threshold:
-                            try:
-                                top_match = self.db.get_paper(results[0].paper_id)
-                                match_title = top_match.title if top_match else "unknown"
-                            except Exception:
-                                match_title = "unknown"
-                            scored.append(ScoredPaper(
-                                paper=paper,
-                                relevance_score=round(avg_sim, 3),
-                                relevance_reason=f"Related to: {match_title}",
-                            ))
+                            matches.append((paper, avg_sim, results[0].paper_id))
                 except Exception as e:
                     print(f"[monitor] scoring failed for '{paper.title[:40]}': {e}")
                     continue
+            try:
+                titles = self.db.get_paper_titles(list({pid for _, _, pid in matches}))
+            except Exception:  # noqa: BLE001
+                titles = {}
+            for paper, avg_sim, pid in matches:
+                scored.append(ScoredPaper(
+                    paper=paper,
+                    relevance_score=round(avg_sim, 3),
+                    relevance_reason=f"Related to: {titles.get(pid, 'unknown')}",
+                ))
         except Exception as e:
             print(f"[monitor] batch embed failed: {e}")
             return [ScoredPaper(paper=p, relevance_score=0.4,
