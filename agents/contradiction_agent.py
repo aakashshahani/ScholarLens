@@ -32,7 +32,7 @@ Stage 1 hybrid retrieval (added):
 import concurrent.futures
 import threading
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -666,6 +666,10 @@ class ContradictionAgent:
 
     # ── Cluster detection ─────────────────────────────────────
 
+    # A component whose claim set overlaps a previously named cluster at least
+    # this much (Jaccard) keeps that name instead of paying for a new one.
+    _CLUSTER_NAME_REUSE = 0.8
+
     def detect_clusters(
         self,
         paper_ids: list[str] | None = None,
@@ -678,10 +682,12 @@ class ContradictionAgent:
 
         Algorithm:
           1. Load all non-unrelated relationships for these papers
-          2. Build adjacency list: claim_id → list[StoredRelationship]
+          2. Build adjacency: claim_id → neighbouring claim_ids
           3. BFS to find connected components (claim clusters)
-          4. For each component ≥ 2 claims: ask LLM to name the cluster
-          5. Persist to clusters table and return
+          4. Name each component ≥ 2 claims — reusing the previous name when the
+             component is (nearly) unchanged, so a rescan doesn't re-pay the LLM
+             for every cluster; only new/changed ones are named, concurrently
+          5. Replace the user's stored clusters and return
 
         Returns a list of Cluster dataclass instances.
         """
@@ -693,71 +699,82 @@ class ContradictionAgent:
             relationships=["contradiction", "nuance", "support"],
             strict=bool(paper_ids),
         )
-        if not rels:
-            return []
 
-        # Build adjacency list
-        adjacency: dict[str, list] = {}
+        adjacency: dict[str, list[str]] = {}
         for rel in rels:
-            for cid in (rel.claim_lo, rel.claim_hi):
-                adjacency.setdefault(cid, [])
-            adjacency[rel.claim_lo].append(rel)
-            adjacency[rel.claim_hi].append(rel)
+            adjacency.setdefault(rel.claim_lo, []).append(rel.claim_hi)
+            adjacency.setdefault(rel.claim_hi, []).append(rel.claim_lo)
 
         # BFS to find connected components
-        visited: set[str] = set()
+        component_of: dict[str, int] = {}
         components: list[list[str]] = []
         for start in adjacency:
-            if start in visited:
+            if start in component_of:
                 continue
-            component: list[str] = []
-            queue = [start]
+            idx = len(components)
+            component = [start]
+            component_of[start] = idx
+            queue = deque([start])
             while queue:
-                node = queue.pop(0)
-                if node in visited:
-                    continue
-                visited.add(node)
-                component.append(node)
-                for rel in adjacency.get(node, []):
-                    other = rel.claim_hi if rel.claim_lo == node else rel.claim_lo
-                    if other not in visited:
+                node = queue.popleft()
+                for other in adjacency[node]:
+                    if other not in component_of:
+                        component_of[other] = idx
+                        component.append(other)
                         queue.append(other)
-            if len(component) >= 2:
-                components.append(component)
+            components.append(component)
 
-        if not components:
+        # Every relationship belongs to exactly one component (both ends do).
+        rels_by_component: dict[int, list] = {}
+        for rel in rels:
+            rels_by_component.setdefault(component_of[rel.claim_lo], []).append(rel)
+
+        keep = [(idx, comp) for idx, comp in enumerate(components) if len(comp) >= 2]
+        if not keep:
+            if user_id:
+                self.db.save_clusters(user_id, [])  # clear clusters that no longer exist
             return []
 
         # Load claim texts + paper info in batch
         paper_ids_needed = list({r.paper_a for r in rels} | {r.paper_b for r in rels})
-        claims_by_paper = self.db.get_claims_for_papers(paper_ids_needed)
         claim_by_id = {}
-        claim_paper_id: dict[str, str] = {}
-        for pid, claims in claims_by_paper.items():
+        for claims in self.db.get_claims_for_papers(paper_ids_needed).values():
             for c in claims:
                 claim_by_id[c.id] = c
-                claim_paper_id[c.id] = pid
 
-        # Build set of all relationship IDs for fast lookup
-        rel_set: dict[tuple[str, str], str] = {
-            (r.claim_lo, r.claim_hi): r.id for r in rels
-        }
+        previous = self.db.list_clusters(user_id) if user_id else []
 
+        def _reusable_name(comp_set: set[str]):
+            best, best_score = None, 0.0
+            for old in previous:
+                old_set = set(old.claim_ids)
+                score = len(comp_set & old_set) / len(comp_set | old_set) if old_set else 0.0
+                if score > best_score:
+                    best, best_score = old, score
+            return best if best_score >= self._CLUSTER_NAME_REUSE else None
+
+        names: dict[int, tuple[str, str | None, str | None]] = {}
+        to_name: list[tuple[int, list[str], int]] = []
+        for idx, comp in keep:
+            contra = sum(1 for r in rels_by_component[idx] if r.relationship == "contradiction")
+            old = _reusable_name(set(comp))
+            if old is not None:
+                names[idx] = (old.name, old.research_question, old.description)
+            else:
+                texts = [claim_by_id[cid].text for cid in comp if cid in claim_by_id]
+                to_name.append((idx, texts, contra))
+        if to_name:
+            workers = min(self._LLM_WORKERS, len(to_name))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                named = ex.map(lambda t: self._name_cluster(t[1], t[2], api_key, model), to_name)
+                for (idx, _, _), result in zip(to_name, named):
+                    names[idx] = result
+
+        now = datetime.now(timezone.utc).isoformat()
         clusters = []
-        for comp in components:
-            comp_set = set(comp)
-            comp_rels = [
-                r for r in rels
-                if r.claim_lo in comp_set and r.claim_hi in comp_set
-            ]
-            contra_count = sum(1 for r in comp_rels if r.relationship == "contradiction")
-            support_count = sum(1 for r in comp_rels if r.relationship == "support")
-            nuance_count = sum(1 for r in comp_rels if r.relationship == "nuance")
-            paper_ids_in = list({claim_paper_id[cid] for cid in comp if cid in claim_paper_id})
-
-            claim_texts = [claim_by_id[cid].text for cid in comp if cid in claim_by_id]
-            name, rq, desc = self._name_cluster(claim_texts, contra_count, api_key, model)
-
+        for idx, comp in keep:
+            comp_rels = rels_by_component[idx]
+            name, rq, desc = names[idx]
             clusters.append(Cluster(
                 id=str(uuid.uuid4()),
                 user_id=user_id,
@@ -766,15 +783,15 @@ class ContradictionAgent:
                 description=desc,
                 claim_ids=comp,
                 relationship_ids=[r.id for r in comp_rels],
-                contradiction_count=contra_count,
-                support_count=support_count,
-                nuance_count=nuance_count,
-                paper_count=len(paper_ids_in),
-                created_at=datetime.now(timezone.utc).isoformat(),
+                contradiction_count=sum(1 for r in comp_rels if r.relationship == "contradiction"),
+                support_count=sum(1 for r in comp_rels if r.relationship == "support"),
+                nuance_count=sum(1 for r in comp_rels if r.relationship == "nuance"),
+                paper_count=len({claim_by_id[cid].paper_id for cid in comp if cid in claim_by_id}),
+                created_at=now,
             ))
 
-        if clusters and user_id:
-            self.db.save_clusters(clusters)
+        if user_id:
+            self.db.save_clusters(user_id, clusters)
 
         return clusters
 

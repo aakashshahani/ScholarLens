@@ -1086,13 +1086,13 @@ class Database:
 
     # ── Clusters ──────────────────────────────────────────────────────────────
 
-    def save_clusters(self, clusters: list) -> None:
-        if not clusters:
-            return
-        user_id = clusters[0].user_id
+    def save_clusters(self, user_id: str, clusters: list) -> None:
+        """Replace the user's clusters with `clusters` (an empty list clears
+        them, so components that dissolved don't linger)."""
         with self._cursor() as cur:
-            if user_id:
-                cur.execute("DELETE FROM clusters WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM clusters WHERE user_id = %s", (user_id,))
+            if not clusters:
+                return
             psycopg2.extras.execute_batch(
                 cur,
                 """INSERT INTO clusters
