@@ -117,62 +117,51 @@ class HypothesisAgent:
 
     # ── Conflict context (primary grounding input) ───────────
 
+    # Conflicts handed to the model per generation. Contradictions first, then
+    # nuances, newest first within each — enough grounding for 5-10 hypotheses
+    # without letting a large library blow up the prompt (and its cost).
+    MAX_CONFLICTS = 40
+
     def _gather_conflict_context(
         self,
         paper_ids: list[str] | None,
-    ) -> tuple[str, list[str], str]:
+    ) -> tuple[str, list[str], str, dict[str, str], dict[str, StoredRelationship]]:
         """
         Build a structured conflict block from persisted relationships.
 
         Returns:
-            context_text  — formatted string fed into the prompt
-            conflict_ids  — list of relationship IDs handed to the model
-            grounding     — "detected_conflicts" or "single_paper_gaps"
+            context_text   — formatted string fed into the prompt
+            conflict_ids   — list of relationship IDs handed to the model
+            grounding      — "detected_conflicts" or "single_paper_gaps"
+            label_to_real  — prompt label ("CONFLICT_3") → relationship ID
+            rel_by_id      — relationship ID → relationship (for UI labels)
 
         Only contradiction and nuance relationships are included — these are
         the gaps between papers that good hypotheses come from. Support and
         unrelated relationships are not useful grounding material here.
         """
+        # strict: both papers must be in scope, or hypotheses cite papers the
+        # user never selected.
         conflicts = self.db.list_relationships(
             paper_ids=paper_ids,
             relationships=["contradiction", "nuance"],
+            strict=bool(paper_ids),
             exclude_feedback=["disagree"],  # user marked these as mislabeled
         )
 
         if conflicts:
-            # Load claim texts for each relationship so the model sees
-            # actual claim content, not just abstract IDs
-            claim_cache: dict[str, StoredClaim | None] = {}
+            # list_relationships is newest-first; stable sort keeps that order
+            # within each type.
+            conflicts.sort(key=lambda r: 0 if r.relationship == "contradiction" else 1)
+            conflicts = conflicts[: self.MAX_CONFLICTS]
 
-            def _get_claim(claim_id: str) -> StoredClaim | None:
-                if claim_id not in claim_cache:
-                    # StoredClaim doesn't have a get-by-id method; we look it up
-                    # via paper_id stored on the relationship
-                    claim_cache[claim_id] = None  # default miss
-                    for rel in conflicts:
-                        for cid, pid in [
-                            (rel.claim_lo, rel.paper_a),
-                            (rel.claim_hi, rel.paper_b),
-                        ]:
-                            if cid == claim_id:
-                                claims = self.db.get_claims_for_paper(pid)
-                                for c in claims:
-                                    claim_cache[c.id] = c
-                                break
-                return claim_cache.get(claim_id)
-
-            # Pre-populate claim cache to avoid N+1 DB calls
+            # Claim texts + titles in two batched queries.
             paper_ids_needed = list({r.paper_a for r in conflicts} | {r.paper_b for r in conflicts})
-            for pid in paper_ids_needed:
-                for c in self.db.get_claims_for_paper(pid):
+            claim_cache: dict[str, StoredClaim] = {}
+            for claims in self.db.get_claims_for_papers(paper_ids_needed).values():
+                for c in claims:
                     claim_cache[c.id] = c
-
-            # Also build paper title lookup
-            paper_titles: dict[str, str] = {}
-            for pid in paper_ids_needed:
-                p = self.db.get_paper(pid)
-                if p:
-                    paper_titles[pid] = p.title
+            paper_titles = self.db.get_paper_titles(paper_ids_needed)
 
             parts = []
             conflict_ids = []
@@ -201,28 +190,29 @@ class HypothesisAgent:
                 label_to_real[label] = rel.id
                 conflict_ids.append(rel.id)
 
-            return "\n\n".join(parts), conflict_ids, "detected_conflicts", label_to_real
+            return ("\n\n".join(parts), conflict_ids, "detected_conflicts", label_to_real,
+                    {r.id: r for r in conflicts})
 
         # ── Fallback: use research_gaps from stored analyses ──
         if paper_ids:
-            papers = [self.db.get_paper(pid) for pid in paper_ids]
-            papers = [p for p in papers if p is not None]
+            titles = self.db.get_paper_titles(paper_ids)
+            ordered = [(pid, titles[pid]) for pid in paper_ids if pid in titles]
         else:
-            papers = self.db.list_papers(limit=50)
+            ordered = [(p.id, p.title) for p in self.db.list_papers(limit=50)]
 
+        analyses_by_paper = self.db.get_analyses_for_papers([pid for pid, _ in ordered])
         gap_parts = []
-        for paper in papers:
-            analyses = self.db.get_analyses_for_paper(paper.id)
-            for a in analyses:
+        for pid, title in ordered:
+            for a in analyses_by_paper.get(pid, []):
                 if a.analysis_type in ("research_gaps", "findings", "key_claims"):
                     gap_parts.append(
-                        f"## {paper.title}\n"
+                        f"## {title}\n"
                         f"### {a.analysis_type.replace('_', ' ').title()}\n"
                         f"{a.content}\n"
                     )
                     break  # one section per paper is enough for the fallback
 
-        return "\n\n---\n\n".join(gap_parts), [], "single_paper_gaps", {}
+        return "\n\n---\n\n".join(gap_parts), [], "single_paper_gaps", {}, {}
 
     # ── Novelty scoring ──────────────────────────────────────
 
@@ -330,7 +320,7 @@ class HypothesisAgent:
                     print(f"Recent run deserialisation failed: {e}")
 
         # ── Gather grounding inputs ───────────────────────────
-        context_text, conflict_ids, grounding, label_to_real = self._gather_conflict_context(paper_ids)
+        context_text, conflict_ids, grounding, label_to_real, rel_by_id = self._gather_conflict_context(paper_ids)
         if not context_text:
             return []
 
@@ -407,15 +397,13 @@ class HypothesisAgent:
         valid_conflict_ids = set(conflict_ids)
         rq = research_question or "Generated from library analysis"
 
-        # Readable labels for cited conflicts — the UI shows the conflicting
-        # paper pair, not a raw UUID. Resolved once here from the relationship
-        # table + title map.
+        # Titles for readable conflict labels — the UI shows the conflicting
+        # paper pair, not a raw UUID — and the novelty comparison set below.
         try:
-            _titles = self.db.paper_title_map(user_id=user_id)
-            _rels = {r.id: r for r in self.db.list_relationships(paper_ids=list(_titles.keys()))}
+            _titles = self.db.paper_title_map(user_id=user_id) if user_id else self.db.get_paper_titles(paper_ids or [])
         except Exception as e:  # noqa: BLE001
-            print(f"[hypotheses] conflict-label lookup failed: {e}")
-            _titles, _rels = {}, {}
+            print(f"[hypotheses] title lookup failed: {e}")
+            _titles = {}
 
         # Novelty is measured against the user's whole library (not just the
         # selected scope, and never other users' papers).
@@ -447,7 +435,7 @@ class HypothesisAgent:
             # Resolve each cited conflict to its paper pair + type for the UI.
             conflict_details = []
             for rid in cited:
-                r = _rels.get(rid)
+                r = rel_by_id.get(rid)
                 conflict_details.append({
                     "id": rid,
                     "paper_a": _titles.get(r.paper_a, "") if r else "",
