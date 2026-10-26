@@ -226,7 +226,7 @@ class HypothesisAgent:
 
     # ── Novelty scoring ──────────────────────────────────────
 
-    def _score_novelty(self, statement: str) -> tuple[float, str]:
+    def _score_novelty(self, statement: str, library_ids: list[str] | None) -> tuple[float, str]:
         """
         Compute novelty as cosine distance between the hypothesis statement
         and the nearest chunk in the library.
@@ -239,7 +239,10 @@ class HypothesisAgent:
         is this statement from anything already in your library?"
         """
         try:
-            results = self.vector_store.search(statement, n_results=3)
+            # Nearest neighbour only — the cross-encoder adds nothing here, and
+            # the comparison set is the caller's library, never everyone's.
+            results = self.vector_store.search(
+                statement, n_results=3, paper_ids=library_ids, rerank=False)
             if not results:
                 # Nothing in the library to compare against — can't score
                 return 0.0, "unknown"
@@ -414,6 +417,10 @@ class HypothesisAgent:
             print(f"[hypotheses] conflict-label lookup failed: {e}")
             _titles, _rels = {}, {}
 
+        # Novelty is measured against the user's whole library (not just the
+        # selected scope, and never other users' papers).
+        library_ids = list(_titles) if (user_id and _titles) else (list(paper_ids) if paper_ids else None)
+
         # Batch-embed all hypothesis statements in one Voyage call instead of
         # one call per hypothesis inside _score_novelty.
         statements = [item.get("statement", "") for item in parsed]
@@ -464,7 +471,8 @@ class HypothesisAgent:
             emb = novelty_embeddings[idx] if idx < len(novelty_embeddings) else None
             if emb is not None:
                 try:
-                    results = self.vector_store.search_by_embedding(emb, n_results=3)
+                    results = self.vector_store.search_by_embedding(
+                        emb, n_results=3, paper_ids=library_ids)
                     if results:
                         min_distance = min(r.score for r in results)
                         score = round(min_distance, 4)
@@ -478,9 +486,9 @@ class HypothesisAgent:
                     else:
                         novelty_score, novelty_tier = 0.0, "unknown"
                 except Exception:
-                    novelty_score, novelty_tier = self._score_novelty(statement)
+                    novelty_score, novelty_tier = self._score_novelty(statement, library_ids)
             else:
-                novelty_score, novelty_tier = self._score_novelty(statement)
+                novelty_score, novelty_tier = self._score_novelty(statement, library_ids)
 
             hypotheses.append(Hypothesis(
                 id=str(uuid.uuid4()),
