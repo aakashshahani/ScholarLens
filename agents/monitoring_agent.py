@@ -73,7 +73,6 @@ class MonitoringAgent:
         self.db = Database()
         self.vector_store = VectorStore()
         self.importer = PaperImporter()
-        self._failed_sources: set[str] = set()
 
         # Email via Gmail SMTP — credentials from GMAIL_USER + GMAIL_APP_PASSWORD env vars
 
@@ -90,6 +89,7 @@ class MonitoringAgent:
         relevance_threshold: float = 0.3,
         lib_ids: list[str] | None = None,
         lib_titles: set[str] | None = None,
+        failed_sources: set[str] | None = None,
     ) -> DigestResult:
         """
         Scan a single topic for new relevant papers.
@@ -98,6 +98,9 @@ class MonitoringAgent:
         2. Filter out papers already in library
         3. Score relevance against library embeddings
         4. Return scored results
+
+        Sources that fail are added to `failed_sources` — a per-scan set owned
+        by the caller, since this agent is shared by concurrent scans.
         """
         # Search for papers. Use the status-aware variant so we can report
         # which external sources were unavailable rather than silently
@@ -120,8 +123,8 @@ class MonitoringAgent:
                 kw, sources=topic.sources, max_per_source=max_per_source
             )
             all_results.extend(results)
-            for label in failed:
-                self._failed_sources.add(label)
+            if failed_sources is not None:
+                failed_sources.update(failed)
             time.sleep(2)  # Rate limit between keyword searches
 
         # Deduplicate
@@ -527,7 +530,7 @@ class MonitoringAgent:
 
         Returns the same 4-tuple shape as run_full_scan.
         """
-        self._failed_sources = set()
+        failed_sources: set[str] = set()
         title_map = self.db.paper_title_map(user_id=user_id)
         lib_ids = list(title_map.keys())
         lib_titles = {t.lower().strip()[:60] for t in title_map.values()}
@@ -537,6 +540,7 @@ class MonitoringAgent:
             result = self.scan_topic(
                 topic, max_per_source, relevance_threshold,
                 lib_ids=lib_ids, lib_titles=lib_titles,
+                failed_sources=failed_sources,
             )
             # Persist immediately, then this topic's heavy data can be released.
             self.db.save_monitor_result(
@@ -564,7 +568,7 @@ class MonitoringAgent:
                 except Exception as e:  # noqa: BLE001
                     email_error = f"Email failed: {e}"
 
-        return kept, email_sent, email_error, sorted(self._failed_sources)
+        return kept, email_sent, email_error, sorted(failed_sources)
 
     def run_full_scan(
         self,
@@ -587,7 +591,7 @@ class MonitoringAgent:
         a requested send failed (e.g. no API key, or unverified-domain sandbox
         limits) so the UI never claims a send that didn't happen.
         """
-        self._failed_sources: set[str] = set()
+        failed_sources: set[str] = set()
         # Fetch only id+title — avoids loading full_text for every paper in the library.
         title_map = self.db.paper_title_map(user_id=user_id)
         lib_ids = list(title_map.keys())
@@ -597,6 +601,7 @@ class MonitoringAgent:
             result = self.scan_topic(
                 topic, max_per_source, relevance_threshold,
                 lib_ids=lib_ids, lib_titles=lib_titles,
+                failed_sources=failed_sources,
             )
             results.append(result)
 
@@ -624,4 +629,4 @@ class MonitoringAgent:
                 except Exception as e:  # noqa: BLE001
                     email_error = f"Email failed: {e}"
 
-        return results, email_sent, email_error, sorted(self._failed_sources)
+        return results, email_sent, email_error, sorted(failed_sources)
