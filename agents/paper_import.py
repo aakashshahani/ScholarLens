@@ -14,15 +14,15 @@ Uses the requests library with built-in retry and backoff.
 """
 
 import ipaddress
-import json
 import os
 import re
+import socket
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -71,26 +71,90 @@ _cache: dict[str, list] = {}
 _cache_lock = threading.Lock()
 
 
+def _host_is_public(hostname: str) -> bool:
+    """True only if every address the hostname resolves to is publicly
+    routable. Checking the resolved addresses (not just the literal string)
+    is what stops `internal.example.com -> 10.0.0.5` style SSRF."""
+    if not hostname or hostname == "localhost" or hostname.endswith((".local", ".internal")):
+        return False
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except (socket.gaierror, UnicodeError):
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0].split("%", 1)[0])
+        if (not addr.is_global or addr.is_private or addr.is_loopback
+                or addr.is_link_local or addr.is_multicast or addr.is_reserved):
+            return False
+    return True
+
+
 def _validate_pdf_url(url: str | None) -> bool:
-    """Block SSRF: only allow http/https to public routable addresses."""
+    """Block SSRF: only allow http/https to hosts that resolve to public addresses."""
     if not url:
         return False
     try:
         p = urlparse(url)
         if p.scheme not in ("http", "https"):
             return False
-        hostname = p.hostname or ""
-        try:
-            addr = ipaddress.ip_address(hostname)
-            if not addr.is_global or addr.is_loopback or addr.is_link_local or addr.is_private:
-                return False
-        except ValueError:
-            # It's a hostname — block obvious local names
-            if hostname in ("localhost",) or hostname.endswith(".local"):
-                return False
-        return True
+        return _host_is_public(p.hostname or "")
     except Exception:
         return False
+
+
+_MAX_REDIRECTS = 5
+
+
+def _fetch_pdf(url: str, path: Path, source: str, wait_seconds: float) -> Path | None:
+    """Download a PDF to `path`, safely:
+      - every redirect hop is re-validated (requests' automatic redirects
+        would happily follow a public URL into an internal address),
+      - the body is streamed with a hard size cap (no unbounded read),
+      - the payload must actually be a PDF.
+    Returns the path, or None on any failure (the partial file is removed)."""
+    try:
+        for _ in range(_MAX_REDIRECTS + 1):
+            if not _validate_pdf_url(url):
+                return None
+            _wait(source, wait_seconds)
+            resp = _session.get(url, timeout=(10, 60), stream=True, allow_redirects=False)
+            if resp.is_redirect or resp.is_permanent_redirect:
+                location = resp.headers.get("Location")
+                resp.close()
+                if not location:
+                    return None
+                url = urljoin(url, location)
+                continue
+            break
+        else:
+            return None  # too many redirects
+
+        with resp:
+            resp.raise_for_status()
+            max_bytes = settings.max_upload_bytes
+            total = 0
+            with open(path, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    if total == 0 and b"%PDF-" not in chunk[:1024]:
+                        raise ValueError("response is not a PDF")
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError(f"PDF exceeds {max_bytes // (1024 * 1024)} MB")
+                    fh.write(chunk)
+        if total == 0:
+            raise ValueError("empty response")
+        return path
+    except Exception as e:  # noqa: BLE001
+        print(f"PDF download failed ({source}): {e}")
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
 
 
 def _safe_download_path(title: str) -> Path:
@@ -221,16 +285,7 @@ class ArxivSource:
     def download_pdf(self, result: ImportResult) -> Path | None:
         if not _validate_pdf_url(result.pdf_url):
             return None
-        path = _safe_download_path(result.title)
-        try:
-            _wait("arxiv", 5.0)
-            resp = _session.get(result.pdf_url, timeout=(10, 60))
-            resp.raise_for_status()
-            path.write_bytes(resp.content)
-            return path
-        except Exception as e:
-            print(f"arXiv PDF download failed: {e}")
-            return None
+        return _fetch_pdf(result.pdf_url, _safe_download_path(result.title), "arxiv", 5.0)
 
 
 # ── OpenAlex ─────────────────────────────────────────────────
@@ -360,16 +415,7 @@ class OpenAlexSource:
     def download_pdf(self, result: ImportResult) -> Path | None:
         if not _validate_pdf_url(result.pdf_url):
             return None
-        path = _safe_download_path(result.title)
-        try:
-            _wait("openalex", 1.0)
-            resp = _session.get(result.pdf_url, timeout=(10, 60))
-            resp.raise_for_status()
-            path.write_bytes(resp.content)
-            return path
-        except Exception as e:
-            print(f"OpenAlex PDF download failed: {e}")
-            return None
+        return _fetch_pdf(result.pdf_url, _safe_download_path(result.title), "openalex", 1.0)
 
 
 # ── Semantic Scholar ─────────────────────────────────────────
@@ -500,16 +546,7 @@ class SemanticScholarSource:
     def download_pdf(self, result: ImportResult) -> Path | None:
         if not _validate_pdf_url(result.pdf_url):
             return None
-        path = _safe_download_path(result.title)
-        try:
-            _wait("s2", 1.5)
-            resp = _session.get(result.pdf_url, timeout=(10, 60))
-            resp.raise_for_status()
-            path.write_bytes(resp.content)
-            return path
-        except Exception as e:
-            print(f"S2 PDF download failed: {e}")
-            return None
+        return _fetch_pdf(result.pdf_url, _safe_download_path(result.title), "s2", 1.5)
 
 
 # ── Unified Interface ────────────────────────────────────────
