@@ -13,7 +13,6 @@ A researcher configures their topics once, and ScholarLens watches the field for
 """
 
 import html as _html
-import json
 import os
 import re
 import time
@@ -406,6 +405,9 @@ class MonitoringAgent:
         </div>
         """
         msg = MIMEMultipart("alternative")
+        # Topic names are user input: collapse whitespace (incl. CR/LF) so a
+        # crafted name can't inject extra headers, and keep the subject short.
+        topics = " ".join(topics.split())[:150]
         msg["Subject"] = f"ScholarLens: {total_papers} new paper{'s' if total_papers != 1 else ''} in {topics}"
         msg["From"] = f"ScholarLens <{gmail_user}>"
         msg["To"] = recipient
