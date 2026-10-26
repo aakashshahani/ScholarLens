@@ -394,6 +394,19 @@ class HypothesisAgent:
             return []
 
         # ── Post-parse: validate, score, assemble ─────────────
+        # The model was asked for a JSON list of objects; accept a wrapping
+        # object too, and drop entries without a statement, so one malformed
+        # item can't throw away the whole (already paid-for) generation.
+        if isinstance(parsed, dict):
+            parsed = next((v for v in parsed.values() if isinstance(v, list)), [])
+        items = [
+            it for it in (parsed if isinstance(parsed, list) else [])
+            if isinstance(it, dict) and str(it.get("statement") or "").strip()
+        ]
+        if not items:
+            print("Hypothesis generation returned no usable hypotheses")
+            return []
+
         valid_conflict_ids = set(conflict_ids)
         rq = research_question or "Generated from library analysis"
 
@@ -411,7 +424,7 @@ class HypothesisAgent:
 
         # Batch-embed all hypothesis statements in one Voyage call instead of
         # one call per hypothesis inside _score_novelty.
-        statements = [item.get("statement", "") for item in parsed]
+        statements = [str(item["statement"]).strip() for item in items]
         novelty_embeddings: list[list[float] | None] = [None] * len(statements)
         try:
             if statements and any(statements):
@@ -421,15 +434,17 @@ class HypothesisAgent:
             print(f"Batch novelty embedding failed (will fall back per-item): {e}")
 
         hypotheses = []
-        for idx, item in enumerate(parsed):
+        for idx, item in enumerate(items):
             # Validate cited conflict labels — convert CONFLICT_N → real UUID,
             # drop any the model fabricated or that don't map to real IDs
             cited = []
-            for ref in item.get("source_conflict_ids", []):
-                # Model may cite as "CONFLICT_1" or just "1" — normalise
+            refs = item.get("source_conflict_ids") or []
+            for ref in refs if isinstance(refs, list) else [refs]:
+                # Model may cite as "CONFLICT_1", "[CONFLICT_1]" or just 1 — normalise
+                ref = str(ref).strip().strip("[]").strip()
                 label = ref if ref.startswith("CONFLICT_") else f"CONFLICT_{ref}"
                 real_id = label_to_real.get(label)
-                if real_id and real_id in valid_conflict_ids:
+                if real_id and real_id in valid_conflict_ids and real_id not in cited:
                     cited.append(real_id)
 
             # Resolve each cited conflict to its paper pair + type for the UI.
@@ -445,14 +460,20 @@ class HypothesisAgent:
 
             # Map paper titles to IDs — try exact then lowercase-normalized
             supporting = []
-            for sp in item.get("supporting_papers", []):
-                title = sp.get("title", "")
+            sps = item.get("supporting_papers") or []
+            for sp in sps if isinstance(sps, list) else []:
+                if not isinstance(sp, dict):
+                    continue
+                title = str(sp.get("title") or "")
                 pid = paper_map.get(title) or paper_map.get(title.lower().strip(), "")
                 supporting.append({
                     "paper_id": pid,
                     "title": title,
-                    "relevant_finding": sp.get("relevant_finding", ""),
+                    "relevant_finding": str(sp.get("relevant_finding") or ""),
                 })
+            challenges = item.get("challenges") or []
+            if not isinstance(challenges, list):
+                challenges = [challenges]
 
             # Score novelty using pre-computed embedding when available
             statement = statements[idx]
@@ -481,12 +502,12 @@ class HypothesisAgent:
             hypotheses.append(Hypothesis(
                 id=str(uuid.uuid4()),
                 statement=statement,
-                rationale=item.get("rationale", ""),
+                rationale=str(item.get("rationale") or ""),
                 source_conflicts=cited,
                 conflict_details=conflict_details,
                 supporting_papers=supporting,
-                methodology=item.get("methodology", ""),
-                challenges=item.get("challenges", []),
+                methodology=str(item.get("methodology") or ""),
+                challenges=[str(c) for c in challenges if c],
                 novelty_score=novelty_score,
                 novelty_tier=novelty_tier,
                 grounding=grounding,
