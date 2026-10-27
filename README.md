@@ -107,9 +107,8 @@ The sections below walk through each stage in depth.
 Papers are ingested via **PyMuPDF** (`fitz`) with column-aware extraction. The extractor applies several post-processing steps to improve text quality from academic PDFs:
 
 - **Dynamic two-column detection**: word x-positions are bucketed to locate the actual column gutter on each page, then words are ordered down the left column before the right. This replaced a fixed 50%-page split that broke on papers with off-center or single-column layouts.
-- Hyphenation repair across line breaks
-- Letter/number boundary insertion to fix common concatenation artifacts
-- Section detection via regex patterns matching standard academic headings (Abstract, Introduction, Methods, Results, Discussion, Conclusion, References)
+- Hyphenation repair across line breaks, plus a missing space restored after sentence punctuation (`results.The` becomes `results. The`); deliberately no camelCase or letter/digit splitting, which would corrupt names like `ResNet50`, `GPT4o` and `F1`
+- Section detection via regex patterns matching standard academic headings (Abstract, Introduction, Methods, Results, Discussion, Conclusion, References), applied only to heading-like lines (short, with any words after the keyword title-cased) so a body sentence such as "Results show that..." never switches sections
 - **References and appendix sections are excluded** from indexing and search, they add citation noise and dilute retrieval quality without carrying claims
 - Overlap-preserving chunking at ~500 tokens with 50-token overlap, flushing on section boundaries so chunks don't span major structural divides
 

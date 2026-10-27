@@ -95,12 +95,15 @@ def detect_section(line: str) -> str | None:
 # ── PDF Extraction ───────────────────────────────────────────
 
 def _clean(text: str) -> str:
-    """Post-process extracted text to fix common academic PDF artifacts."""
-    text = re.sub(r"-\n\s*", "", text)                    # hyphenation repair
-    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)      # camelCase split
-    text = re.sub(r"([a-zA-Z])(\d)", r"\1 \2", text)      # letter-digit boundary
-    text = re.sub(r"(\d)([a-zA-Z])", r"\1 \2", text)      # digit-letter boundary
-    text = re.sub(r"([.,;:])([A-Za-z])", r"\1 \2", text)  # punctuation spacing
+    """Post-process extracted text to fix common academic PDF artifacts.
+
+    Deliberately conservative: PyMuPDF keeps inter-word spacing, and blanket
+    camelCase / letter-digit splitting turned "ResNet50", "GPT4o", "F1" and
+    "word2vec" into "Res Net 50", "GPT 4 o", "F 1", "word 2 vec" — corrupting
+    exactly the method and metric names that claims and BM25 depend on."""
+    text = re.sub(r"(\w)-\n\s*(\w)", r"\1\2", text)                  # hyphenation across line breaks
+    text = re.sub(r"([a-z]{2,}[.;:])([A-Z][a-z])", r"\1 \2", text)    # "results.The" -> "results. The"
+    text = re.sub(r"([a-z]{2,},)([a-z]{2,})", r"\1 \2", text)          # "faster,and" -> "faster, and"
     text = re.sub(r"[ \t]+", " ", text)                    # collapse spaces/tabs
     text = re.sub(r"\n{3,}", "\n\n", text)                 # collapse blank lines
     return text.strip()
