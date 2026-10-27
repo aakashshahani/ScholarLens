@@ -211,7 +211,9 @@ class ArxivSource:
             # papers that loosely matched any term — so "LLM negotiation" surfaced
             # song-generation and astronomy preprints. Quoting multi-word queries
             # (all:"a b") keeps the terms together; the reranker filters after.
-            term = f'"{query}"' if " " in query else query
+            # Strip any quotes first so a user-typed '"' can't unbalance the phrase.
+            q = " ".join(query.replace('"', " ").split())
+            term = f'"{q}"' if " " in q else q
             resp = _session.get(self.BASE, params={
                 "search_query": f"all:{term}",
                 "start": 0,
