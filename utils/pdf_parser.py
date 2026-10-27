@@ -42,25 +42,53 @@ class TextChunk:
 
 # ── Section Detection ────────────────────────────────────────
 
+# Optional heading number: "4", "4.", "2.1", or IEEE-style roman "IV." (lines are lowercased).
 SECTION_PATTERNS = [
-    (r"^\s*(?:\d+\.?\s+)?abstract\b", "abstract"),
-    (r"^\s*(?:\d+\.?\s+)?introduction\b", "introduction"),
-    (r"^\s*(?:\d+\.?\s+)?(?:related\s+work|background|literature\s+review)\b", "related_work"),
-    (r"^\s*(?:\d+\.?\s+)?(?:method(?:s|ology)?|approach|framework)\b", "methods"),
-    (r"^\s*(?:\d+\.?\s+)?(?:experiment(?:s|al)?|evaluation|results)\b", "results"),
-    (r"^\s*(?:\d+\.?\s+)?discussion\b", "discussion"),
-    (r"^\s*(?:\d+\.?\s+)?(?:conclusion(?:s)?|summary)\b", "conclusion"),
-    (r"^\s*(?:\d+\.?\s+)?(?:references|bibliography)\b", "references"),
-    (r"^\s*(?:\d+\.?\s+)?(?:appendix|supplementary)\b", "appendix"),
+    (r"^\s*(?:(?:\d+(?:\.\d+)*|[ivx]+)\.?\s+)?abstract\b", "abstract"),
+    (r"^\s*(?:(?:\d+(?:\.\d+)*|[ivx]+)\.?\s+)?introduction\b", "introduction"),
+    (r"^\s*(?:(?:\d+(?:\.\d+)*|[ivx]+)\.?\s+)?(?:related\s+work|background|literature\s+review)\b", "related_work"),
+    (r"^\s*(?:(?:\d+(?:\.\d+)*|[ivx]+)\.?\s+)?(?:method(?:s|ology)?|approach|framework)\b", "methods"),
+    (r"^\s*(?:(?:\d+(?:\.\d+)*|[ivx]+)\.?\s+)?(?:experiment(?:s|al)?|evaluation|results)\b", "results"),
+    (r"^\s*(?:(?:\d+(?:\.\d+)*|[ivx]+)\.?\s+)?discussion\b", "discussion"),
+    (r"^\s*(?:(?:\d+(?:\.\d+)*|[ivx]+)\.?\s+)?(?:conclusion(?:s)?|summary)\b", "conclusion"),
+    (r"^\s*(?:(?:\d+(?:\.\d+)*|[ivx]+)\.?\s+)?(?:references|bibliography)\b", "references"),
+    (r"^\s*(?:(?:\d+(?:\.\d+)*|[ivx]+)\.?\s+)?(?:appendix|supplementary)\b", "appendix"),
 ]
 
 
+# Words allowed in lowercase inside a heading ("Results and Discussion").
+_HEADING_CONNECTORS = {"and", "of", "the", "in", "for", "on", "to", "a", "an", "&", "with"}
+_HEADING_MAX_CHARS = 80
+
+
 def detect_section(line: str) -> str | None:
-    """Try to match a line to a known paper section."""
-    stripped = line.strip().lower()
+    """Match a line to a known paper section — but only when it looks like a
+    heading, not a body sentence that happens to start with the keyword.
+
+    "Results show that…" or "Supplementary materials are available…" must not
+    switch sections: references/appendix chunks are dropped from the index, so
+    one such sentence used to silently discard everything after it. A heading
+    is short and whatever follows the keyword is title-cased ("Related Work",
+    "Results and Discussion", "Appendix A: Proofs"), not running lowercase text.
+    "Abstract" is the exception: IEEE-style "Abstract—We study…" runs inline.
+    """
+    stripped = line.strip()
+    lowered = stripped.lower()
     for pattern, section_name in SECTION_PATTERNS:
-        if re.match(pattern, stripped, re.IGNORECASE):
+        m = re.match(pattern, lowered)
+        if not m:
+            continue
+        rest = stripped[m.end():].strip(" .:;-–—\t")
+        if section_name == "abstract":
+            # "Abstract", "Abstract.", "Abstract—We present …" — but not "Abstractive".
+            return section_name if not stripped[m.end():m.end() + 1].isalpha() else None
+        if len(stripped) > _HEADING_MAX_CHARS:
+            return None
+        words = re.findall(r"[^\s:]+", rest)
+        if all(w[0].isupper() or w[0].isdigit() or w.lower() in _HEADING_CONNECTORS
+               or not w[0].isalpha() for w in words):
             return section_name
+        return None
     return None
 
 
@@ -298,10 +326,12 @@ def chunk_text(
         for line in lines:
             detected = detect_section(line)
 
-            # Section boundary → flush before switching
+            # Section boundary → flush before switching; the next chunk starts
+            # on this page (not the page the previous chunk started on).
             if detected and detected != current_section and current_text.strip():
                 overlap_text = _flush(current_text, current_section, current_page)
                 current_text = overlap_text + " " if overlap_text else ""
+                current_page = page.page_number
 
             if detected:
                 current_section = detected
