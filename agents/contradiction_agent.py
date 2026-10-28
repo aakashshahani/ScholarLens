@@ -576,7 +576,7 @@ class ContradictionAgent:
     # BYOK key's per-minute rate limit isn't hammered.
     _LLM_WORKERS = 4
 
-    def _claims_for_papers(self, paper_ids: list[str], api_key: str | None,
+    def claims_for_papers(self, paper_ids: list[str], api_key: str | None,
                            model: str | None) -> list[Claim]:
         """Claims for every paper — cached rows in one query, and LLM extraction
         (concurrently) only for papers that have none yet."""
@@ -619,7 +619,7 @@ class ContradictionAgent:
         if len(paper_ids) < 2:
             return []
 
-        all_claims = self._claims_for_papers(paper_ids, api_key, model)
+        all_claims = self.claims_for_papers(paper_ids, api_key, model)
         if len(all_claims) < 2:
             return []
 

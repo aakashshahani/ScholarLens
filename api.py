@@ -2001,10 +2001,9 @@ def _build_graph_compute(req, papers, api_key: str | None = None, model: str | N
     judged by a previous scan are cache hits; only genuinely new pairs fire
     the LLM judge (and get persisted, moving the relationships watermark).
     """
-    # Extract claims (DB-first, zero LLM if already cached)
-    all_claims = []
-    for paper in papers:
-        all_claims.extend(contradiction_agent.extract_claims(paper.id, api_key=api_key, model=model))
+    # Claims: cached rows in one query; LLM extraction (concurrent) only for
+    # papers that have none yet.
+    all_claims = contradiction_agent.claims_for_papers([p.id for p in papers], api_key, model)
 
     if len(all_claims) < 2:
         return {"nodes": [], "edges": [], "papers": [{"id": p.id, "title": p.title} for p in papers]}
