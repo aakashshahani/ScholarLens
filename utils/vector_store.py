@@ -37,6 +37,15 @@ class SearchResult:
 # every agent constructs its own instance.
 _table_ready = False
 _table_lock = threading.Lock()
+# pgvector >= 0.8 supports iterative HNSW scans (see _set_scan_options).
+_iterative_scan = False
+
+
+def _pgvector_version(version: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(p) for p in version.split(".")[:3])
+    except ValueError:
+        return (0,)
 
 
 class VectorStore:
@@ -104,6 +113,26 @@ class VectorStore:
             # rolled back and search falls back to the exact sequential scan.
             print(f"[vector_store] HNSW index unavailable, using exact scan: {exc}")
 
+        global _iterative_scan
+        with self._cursor() as cur:
+            cur.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+            row = cur.fetchone()
+            _iterative_scan = bool(row) and _pgvector_version(row["extversion"]) >= (0, 8, 0)
+
+    @staticmethod
+    def _set_scan_options(cur, fetch_n: int) -> None:
+        """Make filtered ANN search return enough rows.
+
+        The HNSW index covers every user's chunks; `paper_id = ANY(...)` is
+        applied to the candidates the index yields (ef_search, default 40). For
+        a small library inside a large shared table that can leave fewer than
+        `fetch_n` rows — or none. Iterative scans (pgvector 0.8+) keep walking
+        the graph until the filter is satisfied; a larger ef_search helps on
+        older versions. SET LOCAL scopes both to this query's transaction."""
+        cur.execute(f"SET LOCAL hnsw.ef_search = {min(1000, max(100, fetch_n * 4))}")
+        if _iterative_scan:
+            cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
+
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of document texts."""
         # Voyage API has a max batch size of 128
@@ -111,13 +140,13 @@ class VectorStore:
         batch_size = 128
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
-            result = self.client.embed(batch, model="voyage-3.5-lite", input_type="document")
+            result = self.client.embed(batch, model=settings.embedding_model, input_type="document")
             all_embeddings.extend(result.embeddings)
         return all_embeddings
 
     def embed_query(self, query: str) -> list[float]:
         """Embed a single search query."""
-        result = self.client.embed([query], model="voyage-3.5-lite", input_type="query")
+        result = self.client.embed([query], model=settings.embedding_model, input_type="query")
         return result.embeddings[0]
 
     def rerank(
@@ -224,8 +253,11 @@ class VectorStore:
         params_full = [query_vec_str] + params + [fetch_n]
 
         with self._cursor() as cur:
+            self._set_scan_options(cur, fetch_n)
             cur.execute(sql, params_full)
             rows = cur.fetchall()
+        # relaxed_order may return near-sorted rows; restore exact order.
+        rows.sort(key=lambda r: float(r["score"]))
 
         # All candidates, still in cosine-distance order from SQL.
         candidates = [
@@ -294,8 +326,11 @@ class VectorStore:
         params_full = [query_vec_str] + params + [fetch_n]
 
         with self._cursor() as cur:
+            self._set_scan_options(cur, fetch_n)
             cur.execute(sql, params_full)
             rows = cur.fetchall()
+        # relaxed_order may return near-sorted rows; restore exact order.
+        rows.sort(key=lambda r: float(r["score"]))
 
         results = []
         for r in rows:
