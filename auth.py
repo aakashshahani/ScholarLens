@@ -25,7 +25,7 @@ from fastapi import Request, HTTPException
 from config import settings
 from db.database import Database, User
 
-# Single DB handle for auth lookups (same SQLite file as the rest of the app).
+# Single DB handle for auth lookups (shares the app-wide connection pool).
 _db = Database()
 
 _BCRYPT_MAX_BYTES = 72
@@ -148,19 +148,14 @@ def get_current_user(request: Request) -> User:
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    sess = _db.get_session(token)
-    if not sess:
+    found = _db.get_session_user(token)
+    if not found:
         raise HTTPException(status_code=401, detail="Invalid session")
+    expires_at, user = found
 
-    if _is_expired(sess.expires_at):
+    if _is_expired(expires_at):
         _db.delete_session(token)  # clean up the dead row
         raise HTTPException(status_code=401, detail="Session expired")
-
-    user = _db.get_user_by_id(sess.user_id)
-    if not user:
-        # Session points at a deleted user — clean up and reject.
-        _db.delete_session(token)
-        raise HTTPException(status_code=401, detail="Not authenticated")
 
     # Per-endpoint rate limits run after dependencies resolve, so setting this
     # here makes them key on the account instead of the (shared) client IP.

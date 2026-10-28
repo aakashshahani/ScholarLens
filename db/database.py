@@ -1258,14 +1258,18 @@ class Database:
             )
             return sess
 
-    def get_session(self, token: str) -> Session | None:
+    def get_session_user(self, token: str) -> tuple[str, User] | None:
+        """(expires_at, user) for a session token in ONE query — this runs on
+        every authenticated request. None when the token is unknown (sessions
+        cascade-delete with their user, so a live row always has a user)."""
         with self._cursor() as cur:
-            cur.execute("SELECT * FROM sessions WHERE token = %s", (token,))
+            cur.execute(
+                "SELECT s.expires_at AS session_expires_at, u.* "
+                "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = %s",
+                (token,),
+            )
             row = cur.fetchone()
-            if not row:
-                return None
-            return Session(token=row["token"], user_id=row["user_id"],
-                           created_at=row["created_at"], expires_at=row["expires_at"])
+            return (row["session_expires_at"], self._row_to_user(row)) if row else None
 
     def delete_session(self, token: str) -> None:
         with self._cursor() as cur:
