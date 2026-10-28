@@ -1737,9 +1737,14 @@ def create_monitor_topic(
     if not keywords:
         raise HTTPException(status_code=400, detail="At least one keyword is required.")
     cadence = req.cadence if req.cadence in ("daily", "weekly", "paused") else "daily"
+    name = req.name.strip()
+    # Scan results are stored per (user, topic name), so a second topic with
+    # the same name would silently overwrite the first one's results.
+    if any(t.name.strip().lower() == name.lower() for t in db.list_monitor_topics(user.id)):
+        raise HTTPException(status_code=409, detail="You already have a topic with this name.")
     topic = db.create_monitor_topic(
         user_id=user.id,
-        name=req.name.strip(),
+        name=name,
         keywords=keywords,
         sources=sources,
         cadence=cadence,
