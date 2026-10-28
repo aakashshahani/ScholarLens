@@ -1802,7 +1802,7 @@ def follow_author(req: FollowAuthorRequest, user: User = Depends(authlib.get_cur
     return {"name": req.name.strip(), "created": created}
 
 
-@app.delete("/api/monitor/authors/{name}")
+@app.delete("/api/monitor/authors/{name:path}")
 def unfollow_author(name: str, user: User = Depends(authlib.get_current_user)):
     deleted = db.remove_followed_author(user.id, name)
     if not deleted:
