@@ -40,7 +40,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from config import settings, UPLOAD_DIR
 from db import Database, Paper
-from db.database import User, MonitorTopicRow
+from db.database import User
 import auth as authlib
 from agents import (
     PDFAnalysisAgent,
@@ -684,9 +684,10 @@ def fix_abstracts():
             continue
         if p.abstract and len(p.abstract) >= 400:
             continue
-        # Re-fetch from arXiv using the stored arxiv_id or title lookup
+        # Re-fetch by the stored arXiv id (exact); title search only as a fallback,
+        # since a fuzzy title match could overwrite the abstract of the wrong paper.
         try:
-            result = importer.lookup(p.title)
+            result = importer.arxiv.fetch_by_id(p.arxiv_id) if p.arxiv_id else importer.lookup(p.title)
             if result and result.abstract and len(result.abstract) > len(p.abstract or ""):
                 db.update_paper_abstract(p.id, _normalize_abstract(result.abstract))
                 updated += 1
