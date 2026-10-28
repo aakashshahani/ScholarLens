@@ -29,6 +29,18 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_str(name: str, default: str) -> str:
+    """A string env var where an empty value (`NAME=` in .env) means unset."""
+    return (os.getenv(name) or "").strip() or default
+
+
+def _env_samesite() -> str:
+    """Starlette's set_cookie() raises on anything but strict/lax/none, which
+    would break every login — so validate here and fall back to lax."""
+    value = _env_str("COOKIE_SAMESITE", "lax").lower()
+    return value if value in {"strict", "lax", "none"} else "lax"
+
+
 def _env_bool(name: str, default: bool) -> bool:
     """Parse a boolean env var ('1','true','yes','on' -> True)."""
     raw = os.getenv(name)
@@ -75,7 +87,7 @@ class Settings:
     # no local model weights — deliberately NOT a torch cross-encoder, which
     # would reintroduce the RAM overhead the Voyage migration removed.
     # Disable with SEARCH_RERANK=false; falls back to pure vector ordering.
-    rerank_model: str = field(default_factory=lambda: os.getenv("RERANK_MODEL", "rerank-2.5-lite"))
+    rerank_model: str = field(default_factory=lambda: _env_str("RERANK_MODEL", "rerank-2.5-lite"))
     search_rerank_enabled: bool = field(default_factory=lambda: _env_bool("SEARCH_RERANK", True))
     # How many vector candidates to pull before reranking down to n_results.
     # A wider pool lets the reranker recover relevant passages the embedding
@@ -126,22 +138,22 @@ class Settings:
     rate_limit_storage_uri: str = field(
         default_factory=lambda: os.getenv("RATE_LIMIT_STORAGE_URI", "") or "memory://"
     )
-    rl_default: str = field(default_factory=lambda: os.getenv("RL_DEFAULT", "1000/hour"))
-    rl_upload: str = field(default_factory=lambda: os.getenv("RL_UPLOAD", "10/hour"))
-    rl_contradictions: str = field(default_factory=lambda: os.getenv("RL_CONTRADICTIONS", "20/hour"))
-    rl_hypotheses: str = field(default_factory=lambda: os.getenv("RL_HYPOTHESES", "20/hour"))
-    rl_ask: str = field(default_factory=lambda: os.getenv("RL_ASK", "60/hour"))
-    rl_search: str = field(default_factory=lambda: os.getenv("RL_SEARCH", "120/hour"))
-    rl_monitor: str = field(default_factory=lambda: os.getenv("RL_MONITOR", "10/hour"))
-    rl_import_search: str = field(default_factory=lambda: os.getenv("RL_IMPORT_SEARCH", "30/hour"))
-    rl_import_lookup: str = field(default_factory=lambda: os.getenv("RL_IMPORT_LOOKUP", "20/hour"))
-    rl_import_add: str = field(default_factory=lambda: os.getenv("RL_IMPORT_ADD", "20/hour"))
-    rl_test_key: str = field(default_factory=lambda: os.getenv("RL_TEST_KEY", "5/minute"))
-    rl_test_digest: str = field(default_factory=lambda: os.getenv("RL_TEST_DIGEST", "3/hour"))
-    rl_graph: str = field(default_factory=lambda: os.getenv("RL_GRAPH", "30/hour"))
-    rl_insights: str = field(default_factory=lambda: os.getenv("RL_INSIGHTS", "60/hour"))
-    rl_feedback: str = field(default_factory=lambda: os.getenv("RL_FEEDBACK", "60/minute"))
-    rl_upload_batch: str = field(default_factory=lambda: os.getenv("RL_UPLOAD_BATCH", "3/hour"))
+    rl_default: str = field(default_factory=lambda: _env_str("RL_DEFAULT", "1000/hour"))
+    rl_upload: str = field(default_factory=lambda: _env_str("RL_UPLOAD", "10/hour"))
+    rl_contradictions: str = field(default_factory=lambda: _env_str("RL_CONTRADICTIONS", "20/hour"))
+    rl_hypotheses: str = field(default_factory=lambda: _env_str("RL_HYPOTHESES", "20/hour"))
+    rl_ask: str = field(default_factory=lambda: _env_str("RL_ASK", "60/hour"))
+    rl_search: str = field(default_factory=lambda: _env_str("RL_SEARCH", "120/hour"))
+    rl_monitor: str = field(default_factory=lambda: _env_str("RL_MONITOR", "10/hour"))
+    rl_import_search: str = field(default_factory=lambda: _env_str("RL_IMPORT_SEARCH", "30/hour"))
+    rl_import_lookup: str = field(default_factory=lambda: _env_str("RL_IMPORT_LOOKUP", "20/hour"))
+    rl_import_add: str = field(default_factory=lambda: _env_str("RL_IMPORT_ADD", "20/hour"))
+    rl_test_key: str = field(default_factory=lambda: _env_str("RL_TEST_KEY", "5/minute"))
+    rl_test_digest: str = field(default_factory=lambda: _env_str("RL_TEST_DIGEST", "3/hour"))
+    rl_graph: str = field(default_factory=lambda: _env_str("RL_GRAPH", "30/hour"))
+    rl_insights: str = field(default_factory=lambda: _env_str("RL_INSIGHTS", "60/hour"))
+    rl_feedback: str = field(default_factory=lambda: _env_str("RL_FEEDBACK", "60/minute"))
+    rl_upload_batch: str = field(default_factory=lambda: _env_str("RL_UPLOAD_BATCH", "3/hour"))
 
     # ── Auth / sessions / BYOK ───────────────────────────────
     # Fernet key for encrypting tenant Anthropic keys at rest. MUST be stable
@@ -155,7 +167,7 @@ class Settings:
     # Clerk session JWT and resolve/link the internal user). Switching to clerk
     # requires CLERK_JWKS_URL + CLERK_ISSUER; CLERK_SECRET_KEY is optional and
     # only used to look up an email when the JWT has no email claim.
-    auth_provider: str = field(default_factory=lambda: os.getenv("AUTH_PROVIDER", "password").strip().lower())
+    auth_provider: str = field(default_factory=lambda: _env_str("AUTH_PROVIDER", "password").lower())
     clerk_jwks_url: str = field(default_factory=lambda: os.getenv("CLERK_JWKS_URL", ""))
     clerk_issuer: str = field(default_factory=lambda: os.getenv("CLERK_ISSUER", ""))
     clerk_secret_key: str = field(default_factory=lambda: os.getenv("CLERK_SECRET_KEY", ""))
@@ -165,10 +177,10 @@ class Settings:
     # Secure flag MUST be False on localhost (http) or the browser drops the
     # cookie. Set COOKIE_SECURE=true in production (https).
     cookie_secure: bool = field(default_factory=lambda: _env_bool("COOKIE_SECURE", True))
-    cookie_samesite: str = field(default_factory=lambda: os.getenv("COOKIE_SAMESITE", "lax"))
+    cookie_samesite: str = field(default_factory=_env_samesite)
 
-    rl_login: str = field(default_factory=lambda: os.getenv("RL_LOGIN", "10/minute"))
-    rl_register: str = field(default_factory=lambda: os.getenv("RL_REGISTER", "5/hour"))
+    rl_login: str = field(default_factory=lambda: _env_str("RL_LOGIN", "10/minute"))
+    rl_register: str = field(default_factory=lambda: _env_str("RL_REGISTER", "5/hour"))
 
     def validate(self) -> list[str]:
         errors = []
