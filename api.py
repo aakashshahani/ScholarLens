@@ -95,9 +95,14 @@ app.add_middleware(SlowAPIMiddleware)
 
 # Allowed origins: localhost for dev, plus the deployed frontend from env.
 # allow_credentials=True forbids the "*" wildcard, so origins stay explicit.
+# FRONTEND_ORIGIN may list several origins, comma-separated (e.g. production
+# plus a preview deploy). Browsers send the Origin header without a trailing
+# slash, so one in the env value would silently fail every CORS check.
 _allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
-if settings.frontend_origin:
-    _allowed_origins.append(settings.frontend_origin)
+for _origin in settings.frontend_origin.split(","):
+    _origin = _origin.strip().rstrip("/")
+    if _origin and _origin not in _allowed_origins:
+        _allowed_origins.append(_origin)
 
 app.add_middleware(
     CORSMiddleware,
