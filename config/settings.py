@@ -16,7 +16,8 @@ if _env_file.exists():
 
 # Upload directory for PDF files. Still local/ephemeral on Render free tier
 # (uploads are transient — only used during analysis, not stored long-term).
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "data" / "uploads")))
+# `or`: an empty UPLOAD_DIR= line must not mean "the current directory".
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR") or str(BASE_DIR / "data" / "uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
