@@ -107,6 +107,13 @@ export default function ContradictionsPage() {
   const [showConfig, setShowConfig] = useState(false);
   const [libraryChanged, setLibraryChanged] = useState(false);
   const [feedbacks, setFeedbacks] = useState<Record<string, "agree" | "disagree" | "flag">>({});
+  // Seed votes from the server's saved verdicts (they used to vanish on reload).
+  const rememberFeedback = (rows: ContradictionResult[]) =>
+    setFeedbacks((f) => {
+      const next = { ...f };
+      rows.forEach((r) => { if (r.user_feedback) next[r.id] = r.user_feedback; });
+      return next;
+    });
 
   useEffect(() => {
     const cachedPapers = cache.read<Paper[]>("papers");
@@ -129,6 +136,7 @@ export default function ContradictionsPage() {
       .then((full) => {
         if (Array.isArray(full) && full.length > 0) {
           setResults(full);
+          rememberFeedback(full);
           cache.write("contradictions", full);
           setSelected((prev) => prev || full.find(
             (r) => r.relationship !== "unrelated" && r.relationship !== "error"
@@ -199,6 +207,7 @@ export default function ContradictionsPage() {
         }).catch(() => {}),
       ]);
       setResults(full);
+      rememberFeedback(full);
       cache.write("contradictions", full);
       setShowConfig(false);
       setSelected(full.find((r) => r.relationship !== "unrelated" && r.relationship !== "error") || null);

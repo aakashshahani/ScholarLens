@@ -186,6 +186,7 @@ class StoredRelationship:
     resolution: str | None = None
     similarity: float | None = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    user_feedback: str | None = None  # agree / disagree / flag, set by the owner
 
     @staticmethod
     def new_id() -> str:
@@ -966,6 +967,7 @@ class Database:
             category=r["category"], explanation=r["explanation"],
             stronger_evidence=r["stronger_evidence"], resolution=r["resolution"],
             similarity=r["similarity"], created_at=r["created_at"],
+            user_feedback=r.get("user_feedback"),
         )
 
     # ── Hypothesis cache ──────────────────────────────────────────────────────

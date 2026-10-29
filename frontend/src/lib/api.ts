@@ -100,6 +100,8 @@ export interface ContradictionResult {
   // predate it.
   evidence_gap?: { gap: number; stronger: "claim_a" | "claim_b" | "neither" };
   similarity?: number;
+  // The owner's saved verdict on this relationship, if any.
+  user_feedback?: "agree" | "disagree" | "flag" | null;
   claim_a: { paper_id: string; paper_title: string; text: string; confidence: string; evidence_strength?: EvidenceStrength };
   claim_b: { paper_id: string; paper_title: string; text: string; confidence: string; evidence_strength?: EvidenceStrength };
   created_at: string;

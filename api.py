@@ -1256,6 +1256,7 @@ def list_contradictions(user: User = Depends(authlib.get_current_user)):
             # from the claims' own stated cues — independent of the LLM verdict.
             "evidence_gap": evidence_gap(es_a, es_b),
             "similarity": round(r.similarity or 0.0, 3),
+            "user_feedback": r.user_feedback,
             "claim_a": {
                 "paper_id": a.paper_id,
                 "paper_title": claim_paper_title.get(a.id, "Unknown paper"),
