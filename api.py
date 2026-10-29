@@ -600,7 +600,7 @@ def update_settings(req: SettingsUpdateRequest, user: User = Depends(authlib.get
             raise HTTPException(status_code=400, detail="Unknown model.")
         updates["model"] = req.model
     if req.library_name is not None:
-        updates["library_name"] = req.library_name
+        updates["library_name"] = req.library_name.strip() or "My Library"
     if req.digest_email is not None:
         updates["digest_email"] = req.digest_email.strip() or None
     if req.api_key is not None:
