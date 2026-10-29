@@ -6,6 +6,7 @@ import { PageHeader, Card, EmptyState, Spinner, Slider, SelectChip, PrimaryButto
 import { FlaskConical, TriangleAlert, GitBranch, AlertCircle, CheckCircle2, Zap, RefreshCw, ThumbsUp, ThumbsDown, Download, Clock } from "lucide-react";
 import Link from "next/link";
 import { cache } from "@/lib/cache";
+import { escapeHtml } from "@/lib/html";
 
 // Novelty tier badge — shows only when the hypothesis is genuinely high
 // novelty (score > 0.30 for voyage-3.5-lite). Medium and low are silent:
@@ -208,14 +209,18 @@ export default function HypothesesPage() {
   const handleExport = () => {
     if (!hypotheses.length) return;
     const date = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+    // Every value is LLM output derived from uploaded PDFs, written into a
+    // same-origin window — escape it all, or a prompt-injected paper could run
+    // script with access to this app's session.
+    const e = escapeHtml;
     const rows = hypotheses.map((h, i) => `
       <div class="hypothesis">
         <div class="h-num">H${i + 1}</div>
-        <h2>${h.statement}</h2>
-        <p class="rationale">${h.rationale}</p>
-        ${h.methodology ? `<div class="section-label">Methodology</div><p>${h.methodology}</p>` : ""}
-        ${h.challenges?.length ? `<div class="section-label">Anticipated Challenges</div><ul>${h.challenges.map((c: string) => `<li>${c}</li>`).join("")}</ul>` : ""}
-        ${h.supporting_papers?.length ? `<div class="section-label">Source Papers</div><ul>${h.supporting_papers.map((sp: any) => `<li><strong>${sp.title}</strong>${sp.relevant_finding ? ` — ${sp.relevant_finding}` : ""}</li>`).join("")}</ul>` : ""}
+        <h2>${e(h.statement)}</h2>
+        <p class="rationale">${e(h.rationale)}</p>
+        ${h.methodology ? `<div class="section-label">Methodology</div><p>${e(h.methodology)}</p>` : ""}
+        ${h.challenges?.length ? `<div class="section-label">Anticipated Challenges</div><ul>${h.challenges.map((c) => `<li>${e(c)}</li>`).join("")}</ul>` : ""}
+        ${h.supporting_papers?.length ? `<div class="section-label">Source Papers</div><ul>${h.supporting_papers.map((sp) => `<li><strong>${e(sp.title)}</strong>${sp.relevant_finding ? ` — ${e(sp.relevant_finding)}` : ""}</li>`).join("")}</ul>` : ""}
       </div>`).join("");
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Research Hypotheses — ScholarLens</title>
 <style>
