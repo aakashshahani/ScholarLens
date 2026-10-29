@@ -2253,11 +2253,6 @@ def insight_feed(request: Request, req: InsightRequest, user: User = Depends(aut
         cut = s[:n].rsplit(" ", 1)[0]
         return cut + "…"
 
-    # Track papers already surfaced by a cross-paper relationship insight, so a
-    # single dominant paper does not headline both a contradiction AND a gap.
-    # Cross-paper relationships are higher-value signal than single-paper gaps,
-    # so they claim their papers first and gaps fill in only what is left.
-    papers_in_relationships: set[str] = set()
 
     # Contradiction / consensus / nuance insights — from the relationships table.
     try:
@@ -2309,7 +2304,6 @@ def insight_feed(request: Request, req: InsightRequest, user: User = Depends(aut
                     "claim": "", "detail": explanation,
                     "papers": [ta, tb], "created_at": rel.created_at,
                 })
-                papers_in_relationships.add(ta); papers_in_relationships.add(tb)
             elif rel.relationship == "support":
                 headline = _truncate(first_sentence, 120) if first_sentence else f"Converging evidence across {ta[:40]} and {tb[:40]}"
                 insights.append({
@@ -2317,7 +2311,6 @@ def insight_feed(request: Request, req: InsightRequest, user: User = Depends(aut
                     "claim": "", "detail": explanation,
                     "papers": [ta, tb], "created_at": rel.created_at,
                 })
-                papers_in_relationships.add(ta); papers_in_relationships.add(tb)
             elif rel.relationship == "nuance":
                 if len(explanation) > 80:
                     headline = _truncate(first_sentence, 120) if first_sentence else f"Boundary condition between {ta[:40]} and {tb[:40]}"
@@ -2326,20 +2319,19 @@ def insight_feed(request: Request, req: InsightRequest, user: User = Depends(aut
                         "claim": "", "detail": explanation,
                         "papers": [ta, tb], "created_at": rel.created_at,
                     })
-                    papers_in_relationships.add(ta); papers_in_relationships.add(tb)
     except Exception as e:
         print(f"Insight relationship read skipped: {e}")
 
-    # Gap insights from research_gaps analyses — but ONLY for papers that aren't
-    # already represented by a relationship insight above. This is the dedup
-    # that stops one paper from headlining multiple cells on the dashboard.
-    # Gap insights — batch fetch all analyses in one DB call
+    # Gap insights from research_gaps analyses (one batched DB call). These are
+    # deliberately NOT deduped against papers already in relationship cards:
+    # once a library has been scanned nearly every paper is in some
+    # relationship, so that dedup left the dashboard with no gap insight at all.
     gap_paper_ids = [p.id for p in papers[:8]]
     gap_analyses_map = db.get_analyses_for_papers(gap_paper_ids)
     gap_paper_map = {p.id: p for p in papers[:8]}
     for pid, analyses in gap_analyses_map.items():
         p = gap_paper_map.get(pid)
-        if not p or p.title in papers_in_relationships:
+        if not p:
             continue
         for a in analyses:
             if a.analysis_type == "research_gaps" and a.content:
