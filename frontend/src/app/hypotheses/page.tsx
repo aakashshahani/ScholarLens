@@ -56,16 +56,6 @@ export default function HypothesesPage() {
   const [libraryChanged, setLibraryChanged] = useState(false);
   const [feedbacks, setFeedbacks] = useState<Record<string, "up" | "down">>({});
 
-  // Build a cache key from sorted paper IDs so switching selections
-  // never shows results from a different scope.
-  const selectionCacheKey = (ids: string[], allPapers: Paper[]) => {
-    // Treat "all papers explicitly selected" the same as "none selected (= all)"
-    // so the cache hit works regardless of how the user made the selection.
-    const allSelected = ids.length === allPapers.length && allPapers.length > 0;
-    return (ids.length === 0 || allSelected) ? "hypotheses:all"
-      : `hypotheses:${[...ids].sort().join(",")}`;
-  };
-
   const loadRun = async (runId: string) => {
     setLoadingRun(true);
     setSelectedRunId(runId);
@@ -131,19 +121,10 @@ export default function HypothesesPage() {
 
   const generate = async () => {
     setLoading(true); setError("");
-    const cacheKey = selectionCacheKey(selectedIds, papers);
-
-    // Serve from localStorage cache if library hasn't changed
-    if (!libraryChanged) {
-      const localHit = cache.read<Hypothesis[]>(cacheKey);
-      if (localHit && localHit.length > 0) {
-        setHypotheses(localHit);
-        setShowConfig(false);
-        setLoading(false);
-        return;
-      }
-    }
-
+    // No client-side shortcut here: the old localStorage hit was keyed only on
+    // the paper selection, so a new research question or count silently
+    // returned the previous run for 24h. The server already dedups identical
+    // requests (same question + scope) made within 5 minutes.
     try {
       const { job_id } = await api.generateHypotheses({
         researchQuestion: question || undefined,
@@ -164,7 +145,6 @@ export default function HypothesesPage() {
             stopPolling();
             cache.clear("hypotheses_job");
             setHypotheses(job.result);
-            cache.write(cacheKey, job.result);
             setShowConfig(false);
             setLibraryChanged(false);
             // Refresh run history so the new run appears
