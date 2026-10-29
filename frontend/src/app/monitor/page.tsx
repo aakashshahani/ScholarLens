@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, MonitorDigest, MonitorTopic, CitationGroup, AuthorGroup, AlertPaper } from "@/lib/api";
+import { api, waitForJob, isAbortError, MonitorDigest, MonitorTopic, CitationGroup, AuthorGroup, AlertPaper } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, SectionLabel } from "@/components/ui";
 import { Radar, Plus, X, ExternalLink, AlertCircle, CheckCircle2, Clock, BookPlus, Loader2, Quote, Users } from "lucide-react";
 import { cache } from "@/lib/cache";
@@ -164,80 +164,68 @@ export default function MonitorPage() {
     try { await api.unfollowAuthor(name); } catch { /* ignore */ }
   };
 
+  // One controller per in-flight job, all aborted on unmount so polling stops.
+  const jobAborts = useRef<Record<string, AbortController>>({});
+  useEffect(() => () => Object.values(jobAborts.current).forEach((c) => c.abort()), []);
+  const newJobSignal = (key: string) => {
+    jobAborts.current[key]?.abort();
+    const ctrl = new AbortController();
+    jobAborts.current[key] = ctrl;
+    return ctrl.signal;
+  };
+
   const runCitationScan = async () => {
     setCiteLoading(true); setError(""); setCiteGroups(null);
+    const signal = newJobSignal("citations");
     try {
-      const { job_id } = await api.scanCitations();
-      const poll = setInterval(async () => {
-        try {
-          const job = await api.getJob<{ groups: CitationGroup[] }>(job_id);
-          if (job.status === "done" && job.result) { clearInterval(poll); setCiteGroups(job.result.groups); setCiteLoading(false); }
-          else if (job.status === "error") { clearInterval(poll); setError(job.error || "Citation scan failed."); setCiteLoading(false); }
-        } catch (e: any) { clearInterval(poll); setError(e.message); setCiteLoading(false); }
-      }, 2500);
-    } catch (e: any) { setError(e.message); setCiteLoading(false); }
+      const result = await waitForJob(await api.scanCitations(), { signal });
+      setCiteGroups(result?.groups ?? []);
+    } catch (e) {
+      if (isAbortError(e)) return;
+      setError(e instanceof Error ? e.message : "Citation scan failed.");
+    } finally {
+      if (!signal.aborted) setCiteLoading(false);
+    }
   };
 
   const runAuthorScan = async () => {
     if (followed.length === 0) { setError("Follow an author first."); return; }
     setAuthorLoading(true); setError(""); setAuthorGroups(null);
+    const signal = newJobSignal("authors");
     try {
-      const { job_id } = await api.scanAuthors();
-      const poll = setInterval(async () => {
-        try {
-          const job = await api.getJob<{ groups: AuthorGroup[] }>(job_id);
-          if (job.status === "done" && job.result) { clearInterval(poll); setAuthorGroups(job.result.groups); setAuthorLoading(false); }
-          else if (job.status === "error") { clearInterval(poll); setError(job.error || "Author scan failed."); setAuthorLoading(false); }
-        } catch (e: any) { clearInterval(poll); setError(e.message); setAuthorLoading(false); }
-      }, 2500);
-    } catch (e: any) { setError(e.message); setAuthorLoading(false); }
+      const result = await waitForJob(await api.scanAuthors(), { signal });
+      setAuthorGroups(result?.groups ?? []);
+    } catch (e) {
+      if (isAbortError(e)) return;
+      setError(e instanceof Error ? e.message : "Author scan failed.");
+    } finally {
+      if (!signal.aborted) setAuthorLoading(false);
+    }
   };
-
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const stopPolling = () => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-  };
-  useEffect(() => () => stopPolling(), []);
 
   const runScan = async () => {
     if (savedTopics.length === 0) { setError("Add at least one topic to monitor."); return; }
-    setLoading(true); setError(""); setResults([]);
+    setLoading(true); setError("");
+    const signal = newJobSignal("scan");
     try {
-      const { job_id } = await api.monitorScan({
+      const start = await api.monitorScan({
         topics: savedTopics.map((t) => ({ name: t.name, keywords: t.keywords, sources: t.sources })),
         email: undefined,
         relevanceThreshold: 0.5,
         maxPerSource: 5,
       });
-
-      cache.write("monitor_job", job_id);
-      stopPolling();
-      pollRef.current = setInterval(async () => {
-        try {
-          const job = await api.getJob<{ digests: MonitorDigest[]; sources_failed: string[] }>(job_id);
-          if (job.status === "done" && job.result) {
-            stopPolling();
-            cache.clear("monitor_job");
-            setResults(job.result.digests);
-            setSourcesFailed(job.result.sources_failed || []);
-            cache.write("monitor_results", job.result.digests);
-            setShowConfig(false);
-            setLoading(false);
-          } else if (job.status === "error") {
-            stopPolling();
-            cache.clear("monitor_job");
-            setError(job.error || "Scan failed.");
-            setLoading(false);
-          }
-        } catch (e: any) {
-          stopPolling();
-          setError(e.message);
-          setLoading(false);
-        }
-      }, 2500);
-    } catch (e: any) {
-      setError(e.message);
-      setLoading(false);
+      const result = await waitForJob(start, { signal });
+      if (result) {
+        setResults(result.digests);
+        setSourcesFailed(result.sources_failed || []);
+        cache.write("monitor_results", result.digests);
+        setShowConfig(false);
+      }
+    } catch (e) {
+      if (isAbortError(e)) return;
+      setError(e instanceof Error ? e.message : "Scan failed.");
+    } finally {
+      if (!signal.aborted) setLoading(false);
     }
   };
 

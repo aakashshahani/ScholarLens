@@ -333,6 +333,74 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+// ── Background jobs ─────────────────────────────────────────
+
+/** What an endpoint that starts a background job returns. `job_id` is null
+ *  when there was nothing to do (e.g. an empty paper scope) — the call is
+ *  then already "done", with any result inline. */
+export interface JobStart<T = unknown> {
+  job_id: string | null;
+  status: string;
+  result?: T;
+  cached?: boolean;
+}
+
+export const isAbortError = (e: unknown): boolean =>
+  e instanceof DOMException && e.name === "AbortError";
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(t);
+      reject(new DOMException("Aborted", "AbortError"));
+    }, { once: true });
+  });
+}
+
+/**
+ * Wait for a background job to finish and return its result.
+ *
+ * One place for what every page used to hand-roll with setInterval:
+ *  - a null job_id resolves immediately (there was nothing to run)
+ *  - a job already "done" (cache hit) is fetched without waiting
+ *  - a few consecutive network blips are retried instead of aborting
+ *  - a 404 means the server restarted and lost the in-memory job
+ *  - pass an AbortSignal and abort it on unmount: polling stops and the
+ *    promise rejects with an AbortError (check with isAbortError)
+ */
+export async function waitForJob<T>(
+  start: JobStart<T>,
+  opts: { signal?: AbortSignal; intervalMs?: number; timeoutMs?: number } = {},
+): Promise<T | null> {
+  if (!start.job_id) return start.result ?? null;
+  const { signal, intervalMs = 2500, timeoutMs = 15 * 60_000 } = opts;
+  const deadline = Date.now() + timeoutMs;
+  let failures = 0;
+  let first = true;
+  for (;;) {
+    if (!(first && start.status === "done")) await sleep(intervalMs, signal);
+    first = false;
+    let job;
+    try {
+      job = await api.getJob<T>(start.job_id);
+      failures = 0;
+    } catch (e) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      if (e instanceof ApiError && e.status === 404) {
+        throw new ApiError(404, "This job is no longer available (the server may have restarted). Please run it again.");
+      }
+      if (e instanceof ApiError && e.status === 401) throw e;
+      if (++failures >= 4) throw e;
+      continue;
+    }
+    if (job.status === "done") return job.result;
+    if (job.status === "error") throw new ApiError(500, job.error || "The job failed.");
+    if (Date.now() > deadline) throw new ApiError(408, "This is taking longer than expected. Check back in a few minutes.");
+  }
+}
+
 // ── API methods ─────────────────────────────────────────────
 
 export const api = {
@@ -464,7 +532,7 @@ export const api = {
     }),
 
   ask: (question: string, paperId?: string, history?: {role: string; content: string}[]) =>
-    apiFetch<{ job_id: string; status: string; cached?: boolean }>("/api/ask", {
+    apiFetch<JobStart<{ answer: string; sources: SearchResult[] }>>("/api/ask", {
       method: "POST",
       body: JSON.stringify({
         question,
@@ -478,7 +546,7 @@ export const api = {
     apiFetch<ContradictionResult[]>("/api/contradictions"),
 
   runContradictions: (opts?: { paperIds?: string[]; similarityThreshold?: number; maxPairs?: number }) =>
-    apiFetch<{ job_id: string; status: string }>("/api/contradictions", {
+    apiFetch<JobStart<ContradictionResult[]>>("/api/contradictions", {
       method: "POST",
       body: JSON.stringify({
         paper_ids: opts?.paperIds || null,
@@ -511,7 +579,7 @@ export const api = {
     }),
 
   generateHypotheses: (opts?: { researchQuestion?: string; paperIds?: string[]; numHypotheses?: number; refresh?: boolean }) =>
-    apiFetch<{ job_id: string; status: string }>("/api/hypotheses", {
+    apiFetch<JobStart<Hypothesis[]>>("/api/hypotheses", {
       method: "POST",
       body: JSON.stringify({
         research_question: opts?.researchQuestion || null,
@@ -551,7 +619,7 @@ export const api = {
     relevanceThreshold?: number;
     maxPerSource?: number;
   }) =>
-    apiFetch<{ job_id: string; status: string }>("/api/monitor/scan", {
+    apiFetch<JobStart<MonitorScanResponse>>("/api/monitor/scan", {
       method: "POST",
       body: JSON.stringify({
         topics: opts.topics,
@@ -606,10 +674,10 @@ export const api = {
     }),
 
   scanCitations: () =>
-    apiFetch<{ job_id: string; status: string }>("/api/monitor/citations", { method: "POST" }),
+    apiFetch<JobStart<{ groups: CitationGroup[] }>>("/api/monitor/citations", { method: "POST" }),
 
   scanAuthors: () =>
-    apiFetch<{ job_id: string; status: string }>("/api/monitor/author-scan", { method: "POST" }),
+    apiFetch<JobStart<{ groups: AuthorGroup[] }>>("/api/monitor/author-scan", { method: "POST" }),
 
   testDigest: () =>
     apiFetch<{
@@ -692,7 +760,7 @@ export const api = {
     apiFetch<DebateCluster[]>("/api/graph/clusters"),
 
   detectClusters: (paperIds?: string[]) =>
-    apiFetch<{ job_id: string; status: string }>("/api/graph/clusters", {
+    apiFetch<JobStart<DebateCluster[]>>("/api/graph/clusters", {
       method: "POST",
       body: JSON.stringify({ paper_ids: paperIds || null }),
     }),

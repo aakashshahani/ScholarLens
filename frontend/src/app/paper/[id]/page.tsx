@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { api, Paper } from "@/lib/api";
+import { api, waitForJob, isAbortError, Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { Card, Spinner, EmptyState, AnalysisTag, SectionLabel } from "@/components/ui";
 import { ArrowLeft, RefreshCw, Trash2, FileText, CheckCircle2, SendHorizontal, Download, ExternalLink, Copy, Check } from "lucide-react";
@@ -162,7 +162,7 @@ export default function PaperDetailPage() {
   const [reanalyzeError, setReanalyzeError] = useState("");
   const [reanalyzeStage, setReanalyzeStage] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const askPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const askAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     // Cache-first: show cached paper instantly, refresh in background
@@ -173,7 +173,7 @@ export default function PaperDetailPage() {
       .catch(() => setLoading(false));
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
-      if (askPollRef.current) clearInterval(askPollRef.current);
+      askAbortRef.current?.abort();
     };
   }, [paperId]);
 
@@ -240,32 +240,20 @@ export default function PaperDetailPage() {
   const handleAsk = async () => {
     if (!question.trim()) return;
     setAsking(true); setAnswer(""); setAnswerSources([]);
+    askAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    askAbortRef.current = ctrl;
     try {
-      const { job_id } = await api.ask(
-        `Regarding "${paper?.title}": ${question}`, paperId
-      );
-      askPollRef.current = setInterval(async () => {
-        try {
-          const job = await api.getJob<{ answer: string; sources?: typeof answerSources }>(job_id);
-          if (job.status === "done" && job.result) {
-            clearInterval(askPollRef.current!);
-            setAnswer(job.result.answer);
-            setAnswerSources(job.result.sources || []);
-            setAsking(false);
-          } else if (job.status === "error") {
-            clearInterval(askPollRef.current!);
-            setAnswer("Could not answer — try rephrasing.");
-            setAsking(false);
-          }
-        } catch {
-          clearInterval(askPollRef.current!);
-          setAnswer("Connection error — try again.");
-          setAsking(false);
-        }
-      }, 2000);
-    } catch (e: any) {
-      setAnswer(`Error: ${e.message}`);
-      setAsking(false);
+      const start = await api.ask(`Regarding "${paper?.title}": ${question}`, paperId);
+      const result = await waitForJob(start, { signal: ctrl.signal, intervalMs: 2000 });
+      setAnswer(result?.answer || "No answer was returned.");
+      setAnswerSources(result?.sources || []);
+    } catch (e) {
+      if (isAbortError(e)) return;
+      // Surface the server's reason (e.g. the free limit), not a generic retry hint.
+      setAnswer(e instanceof Error ? e.message : "Could not answer — try again.");
+    } finally {
+      if (!ctrl.signal.aborted) setAsking(false);
     }
   };
 

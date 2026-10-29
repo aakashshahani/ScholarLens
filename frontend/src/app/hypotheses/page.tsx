@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, Paper, Hypothesis, HypothesisRunMeta } from "@/lib/api";
+import { api, waitForJob, isAbortError, Paper, Hypothesis, HypothesisRunMeta } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, Slider, SelectChip, PrimaryButton, SectionLabel, Claim } from "@/components/ui";
 import { FlaskConical, TriangleAlert, GitBranch, AlertCircle, CheckCircle2, Zap, RefreshCw, ThumbsUp, ThumbsDown, Download, Clock } from "lucide-react";
 import Link from "next/link";
@@ -113,11 +113,9 @@ export default function HypothesesPage() {
     [hypotheses]
   );
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const stopPolling = () => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-  };
-  useEffect(() => () => stopPolling(), []);
+  // Aborted on unmount so an in-flight generation stops polling.
+  const genAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => genAbortRef.current?.abort(), []);
 
   const generate = async () => {
     setLoading(true); setError("");
@@ -125,8 +123,11 @@ export default function HypothesesPage() {
     // the paper selection, so a new research question or count silently
     // returned the previous run for 24h. The server already dedups identical
     // requests (same question + scope) made within 5 minutes.
+    genAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    genAbortRef.current = ctrl;
     try {
-      const { job_id } = await api.generateHypotheses({
+      const start = await api.generateHypotheses({
         researchQuestion: question || undefined,
         // If all papers are selected or none are, pass undefined (= all papers).
         paperIds: (selectedIds.length === 0 || selectedIds.length === papers.length)
@@ -135,43 +136,27 @@ export default function HypothesesPage() {
         numHypotheses: count,
         refresh: false,
       });
-
-      cache.write("hypotheses_job", job_id);
-      stopPolling();
-      pollRef.current = setInterval(async () => {
-        try {
-          const job = await api.getJob<Hypothesis[]>(job_id);
-          if (job.status === "done" && job.result) {
-            stopPolling();
-            cache.clear("hypotheses_job");
-            setHypotheses(job.result);
-            setShowConfig(false);
-            setLibraryChanged(false);
-            // Refresh run history so the new run appears
-            api.listHypothesisRuns().then((r) => {
-              setRuns(r);
-              if (r.length > 0) setSelectedRunId(r[0].id);
-            }).catch(() => {});
-            api.health().then((h) => {
-              const fp = h.library_fingerprint || "default";
-              cache.write("hypotheses_fp", fp);
-            }).catch(() => {});
-            setLoading(false);
-          } else if (job.status === "error") {
-            stopPolling();
-            cache.clear("hypotheses_job");
-            setError(job.error || "Generation failed.");
-            setLoading(false);
-          }
-        } catch (e: any) {
-          stopPolling();
-          setError(e.message);
-          setLoading(false);
-        }
-      }, 2500);
-    } catch (e: any) {
-      setError(e.message);
-      setLoading(false);
+      const result = await waitForJob(start, { signal: ctrl.signal });
+      if (!result?.length) {
+        setError("No hypotheses could be generated yet — analyze more papers or run a contradiction scan first.");
+        return;
+      }
+      setHypotheses(result);
+      setShowConfig(false);
+      setLibraryChanged(false);
+      // Refresh run history so the new run appears
+      api.listHypothesisRuns().then((r) => {
+        setRuns(r);
+        if (r.length > 0) setSelectedRunId(r[0].id);
+      }).catch(() => {});
+      api.health().then((h) => {
+        cache.write("hypotheses_fp", h.library_fingerprint || "default");
+      }).catch(() => {});
+    } catch (e) {
+      if (isAbortError(e)) return;
+      setError(e instanceof Error ? e.message : "Generation failed.");
+    } finally {
+      if (!ctrl.signal.aborted) setLoading(false);
     }
   };
 

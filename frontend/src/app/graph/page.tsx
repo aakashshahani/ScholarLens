@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { api, Paper, GraphPayload, GraphNode, GraphEdge, DebateCluster } from "@/lib/api";
+import { api, waitForJob, isAbortError, Paper, GraphPayload, GraphNode, GraphEdge, DebateCluster } from "@/lib/api";
 import { Spinner, REL } from "@/components/ui";
 import {
   Network, Zap, Download, Search, Layers,
@@ -202,19 +202,25 @@ export default function GraphPage() {
     setLoading(false);
   };
 
+  const clusterAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => clusterAbortRef.current?.abort(), []);
+
   const detectClusters = async () => {
-    setClusterLoading(true);
+    setClusterLoading(true); setError("");
+    clusterAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    clusterAbortRef.current = ctrl;
     try {
-      const { job_id } = await api.detectClusters();
-      if (!job_id) { setClusters(await api.listClusters()); setView("clusters"); return; }
-      const poll = setInterval(async () => {
-        try {
-          const job = await api.getJob<DebateCluster[]>(job_id);
-          if (job.status === "done") { clearInterval(poll); setClusters(await api.listClusters()); setView("clusters"); setClusterLoading(false); }
-          else if (job.status === "error") { clearInterval(poll); setClusterLoading(false); }
-        } catch { clearInterval(poll); setClusterLoading(false); }
-      }, 2000);
-    } catch { setClusterLoading(false); }
+      await waitForJob(await api.detectClusters(), { signal: ctrl.signal, intervalMs: 2000 });
+      setClusters(await api.listClusters());
+      setView("clusters");
+    } catch (e) {
+      if (isAbortError(e)) return;
+      setError(e instanceof Error ? e.message : "Cluster detection failed.");
+    } finally {
+      // Always clear the spinner (the old early return on an empty scope left it on).
+      if (!ctrl.signal.aborted) setClusterLoading(false);
+    }
   };
 
   const zoomToFit = () => {

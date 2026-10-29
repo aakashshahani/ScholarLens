@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { api, type SearchResult, type Paper } from "@/lib/api";
+import { api, waitForJob, isAbortError, type SearchResult, type Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { Card } from "@/components/ui";
 import { Trash2, ChevronDown, ChevronUp, ArrowUp, Sparkles } from "lucide-react";
@@ -355,35 +355,29 @@ export default function SearchPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const heroInputRef = useRef<HTMLInputElement>(null);
   const autoSubmittedRef = useRef(false);
-  const synthRefs = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  const synthAborts = useRef<Record<string, AbortController>>({});
   const searchParams = useSearchParams();
 
-  // Clear any in-flight synthesis polls on unmount.
-  useEffect(() => () => { Object.values(synthRefs.current).forEach(clearInterval); }, []);
+  // Stop any in-flight synthesis polls on unmount.
+  useEffect(() => () => { Object.values(synthAborts.current).forEach((c) => c.abort()); }, []);
 
   // "Answer this": synthesize an answer over the retrieved passages via /api/ask.
   async function synthesize(exchangeId: string, question: string, scope: string | null) {
-    setExchanges((prev) => prev.map((e) => e.id === exchangeId ? { ...e, synthLoading: true, synthError: null } : e));
+    const patch = (fields: Partial<Exchange>) =>
+      setExchanges((prev) => prev.map((e) => e.id === exchangeId ? { ...e, ...fields } : e));
+    patch({ synthLoading: true, synthError: null });
+    synthAborts.current[exchangeId]?.abort();
+    const ctrl = new AbortController();
+    synthAborts.current[exchangeId] = ctrl;
     try {
-      const res = await api.ask(question, scope || undefined);
-      const poll = setInterval(async () => {
-        try {
-          const job = await api.getJob<{ answer: string }>(res.job_id);
-          if (job.status === "done" && job.result) {
-            clearInterval(poll); delete synthRefs.current[exchangeId];
-            setExchanges((prev) => prev.map((e) => e.id === exchangeId ? { ...e, synthLoading: false, synthAnswer: job.result!.answer || "" } : e));
-          } else if (job.status === "error") {
-            clearInterval(poll); delete synthRefs.current[exchangeId];
-            setExchanges((prev) => prev.map((e) => e.id === exchangeId ? { ...e, synthLoading: false, synthError: job.error || "Could not synthesize an answer." } : e));
-          }
-        } catch (err: any) {
-          clearInterval(poll); delete synthRefs.current[exchangeId];
-          setExchanges((prev) => prev.map((e) => e.id === exchangeId ? { ...e, synthLoading: false, synthError: err.message } : e));
-        }
-      }, POLL_INTERVAL);
-      synthRefs.current[exchangeId] = poll;
-    } catch (err: any) {
-      setExchanges((prev) => prev.map((e) => e.id === exchangeId ? { ...e, synthLoading: false, synthError: err.message } : e));
+      const result = await waitForJob(await api.ask(question, scope || undefined),
+                                      { signal: ctrl.signal, intervalMs: POLL_INTERVAL });
+      patch({ synthLoading: false, synthAnswer: result?.answer || "" });
+    } catch (err) {
+      if (isAbortError(err)) return;
+      patch({ synthLoading: false, synthError: err instanceof Error ? err.message : "Could not synthesize an answer." });
+    } finally {
+      if (synthAborts.current[exchangeId] === ctrl) delete synthAborts.current[exchangeId];
     }
   }
 

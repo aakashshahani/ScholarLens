@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, Paper, ContradictionResult, EvidenceStrength } from "@/lib/api";
+import { api, waitForJob, isAbortError, Paper, ContradictionResult, EvidenceStrength } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, Claim, REL } from "@/components/ui";
 import { Zap, Settings2, AlertCircle, Download, ThumbsUp, ThumbsDown, Flag } from "lucide-react";
 import { cache } from "@/lib/cache";
@@ -153,14 +153,9 @@ export default function ContradictionsPage() {
 
   const p = PRESETS[preset];
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const stopPolling = () => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-  };
-
-  // Cleanup on unmount
-  useEffect(() => () => stopPolling(), []);
+  // Aborted on unmount so an in-flight scan stops polling (and setting state).
+  const scanAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => scanAbortRef.current?.abort(), []);
 
   const handleExport = async (fmt: "markdown" | "json") => {
     const blob = await api.exportContradictions(fmt);
@@ -178,60 +173,41 @@ export default function ContradictionsPage() {
   };
 
   const runScan = async () => {
-    setLoading(true); setResults([]); setFilter(null); setPaperFilter(null); setSelected(null); setError("");
+    // Keep the current results on screen while scanning — a failed scan must
+    // not leave an empty map when the persisted relationships still exist.
+    setLoading(true); setFilter(null); setPaperFilter(null); setError("");
     setLibraryChanged(false);
     const stages = ["Extracting claims from papers", "Embedding & comparing claims", "Judging relationships"];
     let si = 0; setStage(stages[0]);
     const ticker = setInterval(() => { si = Math.min(si + 1, stages.length - 1); setStage(stages[si]); }, 3000);
 
+    scanAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    scanAbortRef.current = ctrl;
     try {
-      const { job_id } = await api.runContradictions({
+      const start = await api.runContradictions({
         paperIds: selectedIds.length ? selectedIds : undefined,
         similarityThreshold: p.threshold,
         maxPairs: p.maxPairs,
       });
-
-      cache.write("contradictions_job", job_id);
-
-      stopPolling();
-      pollRef.current = setInterval(async () => {
-        try {
-          const job = await api.getJob<ContradictionResult[]>(job_id);
-          if (job.status === "done") {
-            stopPolling();
-            clearInterval(ticker);
-            cache.clear("contradictions_job");
-            // Reload the full persisted set + refresh fingerprint in parallel
-            const [full] = await Promise.all([
-              api.listContradictions(),
-              api.health().then((h) => {
-                cache.write("contradictions_fp", h.library_fingerprint || "default");
-              }).catch(() => {}),
-            ]);
-            setResults(full);
-            cache.write("contradictions", full);
-            setShowConfig(false);
-            const firstReal = full.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
-            if (firstReal) setSelected(firstReal);
-            setLoading(false); setStage("");
-          } else if (job.status === "error") {
-            stopPolling();
-            clearInterval(ticker);
-            cache.clear("contradictions_job");
-            setError(job.error || "Scan failed.");
-            setLoading(false); setStage("");
-          }
-        } catch (e: any) {
-          stopPolling();
-          clearInterval(ticker);
-          setError(e.message);
-          setLoading(false); setStage("");
-        }
-      }, 2500);
-    } catch (e: any) {
+      await waitForJob(start, { signal: ctrl.signal });
+      // Reload the full persisted set + refresh fingerprint in parallel
+      const [full] = await Promise.all([
+        api.listContradictions(),
+        api.health().then((h) => {
+          cache.write("contradictions_fp", h.library_fingerprint || "default");
+        }).catch(() => {}),
+      ]);
+      setResults(full);
+      cache.write("contradictions", full);
+      setShowConfig(false);
+      setSelected(full.find((r) => r.relationship !== "unrelated" && r.relationship !== "error") || null);
+    } catch (e) {
+      if (isAbortError(e)) return;
+      setError(e instanceof Error ? e.message : "Scan failed.");
+    } finally {
       clearInterval(ticker);
-      setError(e.message);
-      setLoading(false); setStage("");
+      if (!ctrl.signal.aborted) { setLoading(false); setStage(""); }
     }
   }
 
