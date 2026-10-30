@@ -44,7 +44,7 @@ export function CommandPalette() {
   useEffect(() => {
     const cached = cache.read<Paper[]>("papers");
     if (cached?.length) setPapers(cached);
-    api.listPapers(100).then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
+    api.listPapers().then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
   }, []);
 
   const q = query.toLowerCase();

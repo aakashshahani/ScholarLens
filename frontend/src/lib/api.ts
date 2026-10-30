@@ -336,6 +336,8 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export const PAPER_PAGE_SIZE = 200;
+
 // ── Background jobs ─────────────────────────────────────────
 
 /** What an endpoint that starts a background job returns. `job_id` is null
@@ -468,7 +470,10 @@ export const api = {
     }),
 
   // ── Papers ────────────────────────────────────────────────
-  listPapers: (limit = 50, offset = 0, tag?: string) =>
+  // Every page shares one cached "papers" list, so they all fetch the same
+  // page size (the backend maximum) — otherwise whichever page ran last
+  // decided how many papers the others saw.
+  listPapers: (limit = PAPER_PAGE_SIZE, offset = 0, tag?: string) =>
     apiFetch<Paper[]>(`/api/papers?limit=${limit}&offset=${offset}${tag ? `&tag=${encodeURIComponent(tag)}` : ""}`),
 
   getPaper: (id: string) => apiFetch<Paper>(`/api/papers/${id}`),

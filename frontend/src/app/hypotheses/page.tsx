@@ -70,7 +70,7 @@ export default function HypothesesPage() {
   useEffect(() => {
     const cachedPapers = cache.read<Paper[]>("papers");
     if (cachedPapers?.length) setPapers(cachedPapers);
-    api.listPapers(50).then((p) => { setPapers(p); cache.write("papers", p); });
+    api.listPapers().then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
 
     // Load run history — permanent records, never lost
     api.listHypothesisRuns().then((r) => {

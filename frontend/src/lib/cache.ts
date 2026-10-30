@@ -22,7 +22,7 @@ interface CacheEntry<T> {
   version: number; // bump to bust old caches on schema changes
 }
 
-const VERSION = 4; // bumped: keys are now namespaced per user
+const VERSION = 5; // bumped: paper list entries carry claim_count, not chunk_count
 
 // Set by the auth layer. "anon" until a user is known, so pre-login reads/writes
 // never collide with a real user's namespace.

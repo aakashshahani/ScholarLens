@@ -52,7 +52,7 @@ export default function LibraryPage() {
   const loadPapers = () => {
     const cachedPapers = cache.read<Paper[]>("papers");
     if (cachedPapers?.length) { setPapers(cachedPapers); setLoading(false); if (cachedPapers[0] && !selected) setSelected(cachedPapers[0]); }
-    api.listPapers(100).then((p) => {
+    api.listPapers().then((p) => {
       setPapers(p); cache.write("papers", p); setLoading(false);
       if (p[0] && !selected) setSelected(p[0]);
     }).catch(() => setLoading(false));

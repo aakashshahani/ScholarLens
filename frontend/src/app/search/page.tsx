@@ -387,7 +387,7 @@ export default function SearchPage() {
     // Papers power the library-specific suggestion chip.
     const cachedPapers = cache.read<Paper[]>("papers");
     if (cachedPapers?.length) setPapers(cachedPapers);
-    api.listPapers(50).then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
+    api.listPapers().then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
   }, []);
 
   const suggestions = buildSuggestions(papers);

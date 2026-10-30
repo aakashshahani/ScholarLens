@@ -77,7 +77,7 @@ export default function GraphPage() {
   useEffect(() => {
     const cp = cache.read<Paper[]>("papers");
     if (cp?.length) setPapers(cp);
-    api.listPapers(50).then((p) => { setPapers(p); cache.write("papers", p); });
+    api.listPapers().then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
     const cg = cache.read<GraphPayload>("graph");
     if (cg?.nodes?.length) { setData(cg); seed(cg); }
     else {

@@ -107,7 +107,7 @@ export default function Dashboard() {
       api.health()
         .then((h) => { setHealth(h); cache.write("health", h); })
         .catch((e) => setError(e.message)),
-      api.listPapers(50)
+      api.listPapers()
         .then((p) => { setPapers(p); cache.write("papers", p); }),
       api.contradictionCount()
         .then((d) => { const c = d.counts || null; setRelCounts(c); if (c) cache.write("rel_counts", c); }),
