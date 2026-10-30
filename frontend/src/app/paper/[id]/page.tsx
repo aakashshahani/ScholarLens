@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { api, waitForJob, isAbortError, Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
+import { downloadBlob } from "@/lib/download";
 import { Card, Spinner, EmptyState, AnalysisTag, SectionLabel } from "@/components/ui";
 import { ArrowLeft, RefreshCw, Trash2, FileText, CheckCircle2, SendHorizontal, Download, ExternalLink, Copy, Check } from "lucide-react";
 
@@ -334,11 +335,11 @@ export default function PaperDetailPage() {
               return (
                 <button key={fmt}
                   onClick={async () => {
-                    const blob = await api.exportCitation(paperId, fmt);
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url; a.download = `citation.${ext[fmt]}`; a.click();
-                    URL.revokeObjectURL(url);
+                    try {
+                      downloadBlob(await api.exportCitation(paperId, fmt), `citation.${ext[fmt]}`);
+                    } catch {
+                      alert("Export failed — please try again.");
+                    }
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-md)] text-[12.5px] text-[var(--text-2)] border border-[var(--line)] bg-[var(--surface-2)] t-all hover:border-[var(--gen-line)] hover:text-[var(--gen)]">
                   <Download size={13} /> {fmt.toUpperCase()}

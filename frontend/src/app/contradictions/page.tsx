@@ -5,6 +5,7 @@ import { api, waitForJob, isAbortError, Paper, ContradictionResult, EvidenceStre
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, Claim, REL } from "@/components/ui";
 import { Zap, Settings2, AlertCircle, Download, ThumbsUp, ThumbsDown, Flag } from "lucide-react";
 import { cache } from "@/lib/cache";
+import { downloadBlob } from "@/lib/download";
 
 // ── Lightweight markdown renderer ────────────────────────────
 function MarkdownAnswer({ text }: { text: string }) {
@@ -166,11 +167,11 @@ export default function ContradictionsPage() {
   useEffect(() => () => scanAbortRef.current?.abort(), []);
 
   const handleExport = async (fmt: "markdown" | "json") => {
-    const blob = await api.exportContradictions(fmt);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `contradictions.${fmt === "markdown" ? "md" : "json"}`; a.click();
-    URL.revokeObjectURL(url);
+    try {
+      downloadBlob(await api.exportContradictions(fmt), `contradictions.${fmt === "markdown" ? "md" : "json"}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Export failed.");
+    }
   };
 
   const handleFeedback = async (relId: string, verdict: "agree" | "disagree" | "flag") => {

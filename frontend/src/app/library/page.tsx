@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
+import { downloadBlob } from "@/lib/download";
 import {
   PageHeader, EmptyState, SkeletonCard, FilterChip, AnalysisTag, ProgressRing,
 } from "@/components/ui";
@@ -109,11 +110,21 @@ export default function LibraryPage() {
     if (!checkedIds.size) return;
     setDeleting(true);
     // Parallel deletes — sequential awaits made bulk delete slow for large sets.
-    await Promise.allSettled([...checkedIds].map((id) => api.deletePaper(id)));
-    const remaining = papers.filter((p) => !checkedIds.has(p.id));
+    const ids = [...checkedIds];
+    const outcomes = await Promise.allSettled(ids.map((id) => api.deletePaper(id)));
+    // Only drop papers the server actually deleted; failures stay listed and selected.
+    const deleted = new Set(ids.filter((_, i) => outcomes[i].status === "fulfilled"));
+    const failed = ids.filter((id) => !deleted.has(id));
+    const remaining = papers.filter((p) => !deleted.has(p.id));
     setPapers(remaining); cache.write("papers", remaining);
-    if (selected && checkedIds.has(selected.id)) setSelected(remaining[0] || null);
-    setCheckedIds(new Set()); setBulkMode(false); setDeleting(false); setConfirmDelete(false);
+    if (selected && deleted.has(selected.id)) setSelected(remaining[0] || null);
+    setCheckedIds(new Set(failed));
+    if (failed.length) {
+      alert(`${failed.length} paper${failed.length !== 1 ? "s" : ""} could not be deleted. Please try again.`);
+    } else {
+      setBulkMode(false);
+    }
+    setDeleting(false); setConfirmDelete(false);
   };
 
   const addTag = async (paperId: string, tag: string) => {
@@ -144,11 +155,11 @@ export default function LibraryPage() {
 
   const exportCitation = async (paperId: string, fmt: "bibtex" | "ris" | "apa" | "chicago" | "mla") => {
     const ext: Record<string, string> = { bibtex: "bib", ris: "ris", apa: "txt", chicago: "txt", mla: "txt" };
-    const blob = await api.exportCitation(paperId, fmt);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `citation_${fmt}.${ext[fmt]}`; a.click();
-    URL.revokeObjectURL(url);
+    try {
+      downloadBlob(await api.exportCitation(paperId, fmt), `citation_${fmt}.${ext[fmt]}`);
+    } catch {
+      alert("Export failed — please try again.");
+    }
   };
 
   const SORT_LABELS: Record<SortKey, string> = {
