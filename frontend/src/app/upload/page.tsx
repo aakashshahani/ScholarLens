@@ -1,15 +1,16 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import Link from "next/link";
-import { api, BatchUploadResult } from "@/lib/api";
-import { PageHeader, Card, Spinner } from "@/components/ui";
+import { api } from "@/lib/api";
+import { PageHeader } from "@/components/ui";
 import {
   Upload as UploadIcon, FileText, CheckCircle2, AlertCircle,
   X, FolderOpen, ArrowRight, Loader2,
 } from "lucide-react";
 
 interface QueueItem {
+  key: string;            // stable id: rows are updated by key, never by index
   file: File;
   status: "pending" | "uploading" | "analyzing" | "complete" | "duplicate" | "error";
   paperId?: string;
@@ -41,6 +42,13 @@ export default function UploadPage() {
   const [running, setRunning] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const pollsRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  const nextKey = useRef(0);
+
+  // Stop every status poll when the page unmounts.
+  useEffect(() => () => { Object.values(pollsRef.current).forEach(clearInterval); }, []);
+
+  const patchItem = (key: string, fields: Partial<QueueItem>) =>
+    setQueue((q) => q.map((item) => item.key === key ? { ...item, ...fields } : item));
 
   const addFiles = useCallback((files: FileList | File[]) => {
     const pdfs = Array.from(files).filter((f) => f.name.toLowerCase().endsWith(".pdf"));
@@ -48,7 +56,7 @@ export default function UploadPage() {
     setQueue((q) => {
       const existing = new Set(q.map((i) => i.file.name + i.file.size));
       const fresh = pdfs.filter((f) => !existing.has(f.name + f.size));
-      return [...q, ...fresh.map((f) => ({ file: f, status: "pending" as const }))];
+      return [...q, ...fresh.map((f) => ({ key: `f${nextKey.current++}`, file: f, status: "pending" as const }))];
     });
   }, []);
 
@@ -67,59 +75,62 @@ export default function UploadPage() {
     input.click();
   };
 
-  const remove = (idx: number) => {
-    setQueue((q) => q.filter((_, i) => i !== idx));
+  const remove = (key: string) => {
+    setQueue((q) => q.filter((item) => item.key !== key));
   };
 
-  const pollStatus = (paperId: string, idx: number) => {
-    const interval = setInterval(async () => {
+  const stopPoll = (paperId: string) => {
+    clearInterval(pollsRef.current[paperId]);
+    delete pollsRef.current[paperId];
+  };
+
+  const pollStatus = (paperId: string, key: string) => {
+    const startedAt = Date.now();
+    pollsRef.current[paperId] = setInterval(async () => {
+      if (Date.now() - startedAt > 180_000) {
+        stopPoll(paperId);
+        patchItem(key, { message: "still analyzing in the background — check the library" });
+        return;
+      }
       try {
         const st = await api.paperStatus(paperId);
-        setQueue((q) => q.map((item, i) => {
-          if (i !== idx) return item;
-          if (st.complete) {
-            clearInterval(pollsRef.current[paperId]);
-            delete pollsRef.current[paperId];
-            return { ...item, status: "complete", analysisTypes: st.analysis_types };
-          }
-          return { ...item, analysisTypes: st.analysis_types };
-        }));
-      } catch { /* keep polling */ }
+        if (st.complete) stopPoll(paperId);
+        patchItem(key, st.complete
+          ? { status: "complete", analysisTypes: st.analysis_types }
+          : { analysisTypes: st.analysis_types });
+      } catch { /* network blip — keep polling */ }
     }, 3000);
-    pollsRef.current[paperId] = interval;
-    setTimeout(() => {
-      clearInterval(pollsRef.current[paperId]);
-      delete pollsRef.current[paperId];
-    }, 120000);
   };
 
-  const runUpload = async () => {
-    const pending = queue.filter((i) => i.status === "pending");
-    if (!pending.length) return;
-    setRunning(true);
+  // Batches the server accepts per request; the endpoint is rate limited per
+  // request (not per file), so files go up together rather than one call each.
+  const BATCH_SIZE = 20;
 
-    // Process sequentially to show per-file progress; batch API used for the actual upload
-    for (let i = 0; i < queue.length; i++) {
-      if (queue[i].status !== "pending") continue;
-      setQueue((q) => q.map((item, j) => j === i ? { ...item, status: "uploading" } : item));
+  const runUpload = async () => {
+    const pendingItems = queue.filter((i) => i.status === "pending");
+    if (!pendingItems.length) return;
+    setRunning(true);
+    pendingItems.forEach((item) => patchItem(item.key, { status: "uploading" }));
+
+    for (let start = 0; start < pendingItems.length; start += BATCH_SIZE) {
+      const batch = pendingItems.slice(start, start + BATCH_SIZE);
       try {
-        const res = await api.uploadPapersBatch([queue[i].file]);
-        const r = res.results[0];
-        if (!r) continue;
-        if (r.status === "error") {
-          setQueue((q) => q.map((item, j) =>
-            j === i ? { ...item, status: "error", message: r.message } : item));
-        } else if (r.status === "duplicate") {
-          setQueue((q) => q.map((item, j) =>
-            j === i ? { ...item, status: "duplicate", paperId: r.id, title: r.title, message: r.message } : item));
-        } else {
-          setQueue((q) => q.map((item, j) =>
-            j === i ? { ...item, status: "analyzing", paperId: r.id, title: r.title } : item));
-          if (r.id) pollStatus(r.id, i);
-        }
-      } catch (e: any) {
-        setQueue((q) => q.map((item, j) =>
-          j === i ? { ...item, status: "error", message: e.message } : item));
+        const res = await api.uploadPapersBatch(batch.map((item) => item.file));
+        // Results come back in upload order, one per file.
+        batch.forEach((item, n) => {
+          const r = res.results[n];
+          if (!r || r.status === "error") {
+            patchItem(item.key, { status: "error", message: r?.message || "Upload failed." });
+          } else if (r.status === "duplicate") {
+            patchItem(item.key, { status: "duplicate", paperId: r.id, title: r.title, message: r.message });
+          } else {
+            patchItem(item.key, { status: "analyzing", paperId: r.id, title: r.title });
+            if (r.id) pollStatus(r.id, item.key);
+          }
+        });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : "Upload failed.";
+        batch.forEach((item) => patchItem(item.key, { status: "error", message }));
       }
     }
 
@@ -189,8 +200,8 @@ export default function UploadPage() {
             )}
           </div>
 
-          {queue.map((item, i) => (
-            <div key={i}
+          {queue.map((item) => (
+            <div key={item.key}
               className="flex items-center gap-3 bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-md)] px-4 py-3">
               <FileText size={15} className="text-[var(--text-4)] shrink-0" />
               <div className="flex-1 min-w-0">
@@ -227,7 +238,7 @@ export default function UploadPage() {
                 )}
 
                 {(item.status === "pending" || item.status === "error") && (
-                  <button onClick={() => remove(i)}
+                  <button onClick={() => remove(item.key)}
                     className="text-[var(--text-4)] hover:text-[var(--contra)] t-all">
                     <X size={14} />
                   </button>
