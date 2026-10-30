@@ -18,7 +18,7 @@
  *  - Rotating left-border colors on recent papers
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api, HealthStatus, Paper, Insight, Hypothesis, GraphPayload } from "@/lib/api";
 import { cache } from "@/lib/cache";
@@ -46,15 +46,17 @@ function cleanHeadline(s: string): string {
 function useCountUp(target: number, duration = 900): number {
   const [value, setValue] = useState(0);
   useEffect(() => {
-    if (target === 0) { setValue(0); return; }
+    let frame = 0;
     const start = performance.now();
     const tick = (now: number) => {
-      const p = Math.min((now - start) / duration, 1);
+      const p = target === 0 ? 1 : Math.min((now - start) / duration, 1);
       const eased = 1 - Math.pow(1 - p, 3); // ease-out-cubic
       setValue(Math.round(eased * target));
-      if (p < 1) requestAnimationFrame(tick);
+      if (p < 1) frame = requestAnimationFrame(tick);
     };
-    requestAnimationFrame(tick);
+    frame = requestAnimationFrame(tick);
+    // Cancel on unmount / new target so a stale loop can't keep setting state.
+    return () => cancelAnimationFrame(frame);
   }, [target, duration]);
   return value;
 }
@@ -156,24 +158,18 @@ export default function Dashboard() {
   // Only flag papers with zero analyses — those are freshly uploaded and queued.
   // Papers with partial analyses are old/failed runs, not actively processing.
   const analyzingPapers = papers.filter((p) => (p.analysis_types?.length ?? 0) === 0);
-  const paperCount         = papers.length || (cache.read<Paper[]>("papers")?.length ?? 0);
-  const coverage           = paperCount > 0 ? Math.round((analyzed / paperCount) * 100) : 0;
+  // The server's per-user count is authoritative; the loaded list is capped
+  // at one page, so it only stands in until health() answers.
+  const paperCount         = health?.papers ?? papers.length;
+  const coverage           = papers.length > 0 ? Math.round((analyzed / papers.length) * 100) : 0;
   const contradictionCount = relCounts?.contradiction ?? 0;
   const crossLinks         = relCounts
     ? relCounts.contradiction + relCounts.support + relCounts.nuance : 0;
 
-  // Dedup so one dominant paper doesn't headline every spotlight cell. We track
-  // which papers have already been "spent" so the gap cell picks a different
-  // paper than the top-contradiction cell where possible.
-  const usedPaperTitles = new Set<string>();
-  if (topContra) { usedPaperTitles.add(topContra.paper_a); usedPaperTitles.add(topContra.paper_b); }
-
   // Show gap insights regardless of which papers appeared in contradiction cards.
-  // The previous dedup skipped all papers in relationships — with an active scan,
-  // that meant zero gap insights ever surfaced. Gap and contradiction insights
-  // can share papers; they show different signals.
+  // A dedup that skipped every paper in a relationship meant that, after a
+  // scan, no gap insight ever surfaced. The two cards show different signals.
   const gapInsight = insights.find((i) => i.type === "gap") || null;
-  if (gapInsight) (gapInsight.papers || []).forEach((t) => usedPaperTitles.add(t));
 
   if (error) return (
     <div className="bg-[var(--contra-dim)] border border-[var(--contra-line)] rounded-[var(--r-lg)] p-5">
@@ -238,7 +234,7 @@ export default function Dashboard() {
             color="var(--support)"
             ring={coverage}
             suffix="%"
-            sub={`${analyzed} / ${paperCount} papers`}
+            sub={`${analyzed} / ${papers.length} papers`}
             delay={240}
           />
         </div>
