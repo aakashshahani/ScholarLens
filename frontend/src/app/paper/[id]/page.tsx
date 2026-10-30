@@ -260,7 +260,16 @@ export default function PaperDetailPage() {
 
   const handleDelete = async () => {
     if (!confirm("Delete this paper and all its analyses?")) return;
-    await api.deletePaper(paperId);
+    try {
+      await api.deletePaper(paperId);
+    } catch (e) {
+      alert(e instanceof Error ? `Could not delete: ${e.message}` : "Could not delete this paper.");
+      return;
+    }
+    // Drop it from the cached library so the list doesn't briefly show it again.
+    cache.clear(`paper_${paperId}`);
+    const cached = cache.read<Paper[]>("papers");
+    if (cached) cache.write("papers", cached.filter((p) => p.id !== paperId));
     router.push("/library");
   };
 
