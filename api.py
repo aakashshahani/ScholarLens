@@ -723,7 +723,7 @@ def list_papers(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=
             "page_count": p.page_count,
             "created_at": p.created_at,
             "analysis_types": [a.analysis_type for a in analyses_map.get(p.id, [])],
-            "chunk_count": claim_counts.get(p.id, 0),
+            "claim_count": claim_counts.get(p.id, 0),
             "tags": tags_map.get(p.id, []),
         }
         for p in papers

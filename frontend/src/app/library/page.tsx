@@ -343,7 +343,7 @@ export default function LibraryPage() {
                     {[
                       { v: selected.page_count ?? "?", l: "pages" },
                       { v: `${selected.analysis_types?.length || 0}/6`, l: "analyses" },
-                      { v: selected.chunk_count ?? "?", l: "chunks" },
+                      { v: selected.claim_count ?? "?", l: "claims" },
                     ].map(({ v, l }) => (
                       <div key={l} className="text-center">
                         <div className="font-display text-[16px] text-[var(--text-1)] tabular-nums leading-none">{v}</div>

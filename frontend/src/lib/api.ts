@@ -55,7 +55,8 @@ export interface Paper {
   page_count: number | null;
   created_at: string;
   analysis_types?: string[];
-  chunk_count?: number;
+  chunk_count?: number;   // paper detail only: indexed text chunks
+  claim_count?: number;   // paper list only: extracted claims
   analyses?: Analysis[];
   tags?: string[];
 }
