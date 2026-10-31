@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, ImportResult } from "@/lib/api";
 import { Card, Spinner, SelectChip, PrimaryButton, PageHeader } from "@/components/ui";
@@ -22,6 +22,10 @@ export default function AddPapersPage() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [importError, setImportError] = useState("");
   const [importing, setImporting] = useState<Record<number, string>>({});
+  // Post-upload status poll; cleared on unmount so it can't outlive the page.
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopPoll = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+  useEffect(() => stopPoll, []);
 
   const handleUpload = async () => {
     if (!file) return;
@@ -34,13 +38,37 @@ export default function AddPapersPage() {
         return;
       }
       setUploadStatus((s) => [...s, `Ingested "${res.title}"`, "Running 6-part analysis…"]);
-      const poll = setInterval(async () => { try { const st = await api.paperStatus(res.id); if (st.complete) { clearInterval(poll); setUploadDone(true); setUploading(false); setUploadStatus((s) => [...s, "All analyses complete"]); } } catch {} }, 3000);
-      setTimeout(() => { clearInterval(poll); setUploading(false); }, 120000);
-    } catch (e: any) { setUploadStatus((s) => [...s, `Error — ${e.message}`]); setUploading(false); }
+      stopPoll();
+      const startedAt = Date.now();
+      pollRef.current = setInterval(async () => {
+        if (Date.now() - startedAt > 180_000) {
+          stopPoll(); setUploading(false); setUploadDone(true);
+          setUploadStatus((s) => [...s, "Still analyzing in the background — open the paper to check progress"]);
+          return;
+        }
+        try {
+          const st = await api.paperStatus(res.id);
+          if (st.complete) {
+            stopPoll(); setUploadDone(true); setUploading(false);
+            setUploadStatus((s) => [...s, "All analyses complete"]);
+          }
+        } catch { /* network blip — keep polling */ }
+      }, 3000);
+    } catch (e) { setUploadStatus((s) => [...s, `Error — ${e instanceof Error ? e.message : "upload failed"}`]); setUploading(false); }
   };
   const handleLookup = async () => { if (!lookupId.trim()) return; setSearchLoading(true); setImportError(""); try { setResults([await api.importLookup(lookupId.trim())]); } catch (e: any) { setImportError(e.message || "Lookup failed."); } setSearchLoading(false); };
   const handleSearch = async () => { if (!query.trim()) return; if (sources.length === 0) { setImportError("Select at least one source."); return; } setSearchLoading(true); setImportError(""); try { setResults(await api.importSearch(query, sources, 5)); } catch (e: any) { setImportError(e.message || "Search failed."); } setSearchLoading(false); };
-  const handleAdd = async (r: ImportResult, idx: number) => { setImporting((p) => ({ ...p, [idx]: "importing" })); try { const res = await api.importAdd(r); setImporting((p) => ({ ...p, [idx]: (res as any).status === "duplicate" ? "duplicate" : "done" })); } catch (e: any) { setImporting((p) => ({ ...p, [idx]: `error` })); } };
+  const handleAdd = async (r: ImportResult, idx: number) => {
+    setImporting((p) => ({ ...p, [idx]: "importing" })); setImportError("");
+    try {
+      const res = await api.importAdd(r);
+      setImporting((p) => ({ ...p, [idx]: res.status === "duplicate" ? "duplicate" : "done" }));
+    } catch (e) {
+      // Say why (no open-access PDF, free limit reached…) instead of silently resetting.
+      setImporting((p) => ({ ...p, [idx]: "error" }));
+      setImportError(`Could not add "${r.title}": ${e instanceof Error ? e.message : "import failed"}`);
+    }
+  };
 
   return (
     <div>
