@@ -40,11 +40,16 @@ export function CommandPalette() {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Papers power the "Search … papers …" promise in the input placeholder.
-  useEffect(() => {
+  // Papers power the paper matches. Load them when the palette is opened —
+  // not on every app load, where the dashboard already fetches the list.
+  const papersLoaded = useRef(false);
+  const loadPapers = useCallback(() => {
+    if (papersLoaded.current) return;
+    papersLoaded.current = true;
     const cached = cache.read<Paper[]>("papers");
     if (cached?.length) setPapers(cached);
-    api.listPapers().then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
+    api.listPapers().then((p) => { setPapers(p); cache.write("papers", p); })
+      .catch(() => { papersLoaded.current = false; });
   }, []);
 
   const q = query.toLowerCase();
@@ -65,15 +70,14 @@ export function CommandPalette() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") { e.preventDefault(); setOpen((o) => !o); }
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") { e.preventDefault(); loadPapers(); setOpen((o) => !o); }
       if (e.key === "Escape") close();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [close]);
+  }, [close, loadPapers]);
 
   useEffect(() => { if (open) setTimeout(() => inputRef.current?.focus(), 30); }, [open]);
-  useEffect(() => { setSel(0); }, [query]);
 
   const run = (item: Item) => {
     if (item.kind === "cmd") item.cmd.action(router);
@@ -101,7 +105,7 @@ export function CommandPalette() {
           <input
             ref={inputRef}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => { setQuery(e.target.value); setSel(0); }}
             onKeyDown={onKeyDown}
             placeholder="Search commands, papers, actions…"
             className="flex-1 bg-transparent border-0 outline-none py-3.5 text-[14px] text-[var(--text-1)] placeholder:text-[var(--text-4)]"
