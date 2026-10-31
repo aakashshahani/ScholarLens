@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, useCallback, ReactNode } from "react";
-import { api, type AuthUser } from "@/lib/api";
+import { api, setUnauthorizedHandler, type AuthUser } from "@/lib/api";
 import { cache } from "@/lib/cache";
 
 interface AuthState {
@@ -58,6 +58,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const register = useCallback(async (email: string, password: string) => {
     applyUser(await api.register(email, password));
+  }, [applyUser]);
+
+  // A 401 from any data request means the session expired (or was revoked via
+  // "sign out everywhere"): clear local state so the login gate takes over.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      cache.clearAll();
+      applyUser(null);
+    });
+    return () => setUnauthorizedHandler(null);
   }, [applyUser]);
 
   const logout = useCallback(async () => {

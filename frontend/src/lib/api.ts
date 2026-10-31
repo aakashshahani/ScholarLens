@@ -34,6 +34,14 @@ let _tokenGetter: (() => Promise<string | null>) | null = null;
 export function setAuthTokenGetter(fn: (() => Promise<string | null>) | null) {
   _tokenGetter = fn;
 }
+// Called when an authenticated request comes back 401 (session expired or
+// revoked elsewhere), so the auth layer can drop to the login screen instead
+// of every page showing its own "Not authenticated" error.
+let _onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null) {
+  _onUnauthorized = fn;
+}
+
 async function getAuthToken(): Promise<string | null> {
   if (_tokenGetter) {
     try { return await _tokenGetter(); } catch { return null; }
@@ -351,6 +359,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
+    // Login/register/me answer 401 as part of normal flow; anything else means
+    // the session is gone.
+    if (res.status === 401 && !path.startsWith("/api/auth/")) _onUnauthorized?.();
     throw new ApiError(res.status, errorMessage(body, res));
   }
   // 204 / empty-body responses
