@@ -47,18 +47,46 @@ export default function SettingsPage() {
   const [digestError, setDigestError] = useState("");
   const [testDigestState, setTestDigestState] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [testDigestMsg, setTestDigestMsg] = useState("");
+  // Load failures and failed saves surface here instead of failing silently.
+  const [actionError, setActionError] = useState("");
 
   async function load() {
-    const data = await api.getSettings();
-    setS(data);
-    setLibName(data.library_name);
-    setDigestEmail(data.digest_email || "");
-    setLoading(false);
+    try {
+      const data = await api.getSettings();
+      setS(data);
+      setLibName(data.library_name);
+      setDigestEmail(data.digest_email || "");
+      setActionError("");
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Could not load settings.");
+    } finally {
+      setLoading(false);
+    }
   }
   useEffect(() => { load(); }, []);
 
-  if (loading || !s) {
+  // Run a save; on failure show why rather than leaving an unhandled rejection.
+  async function attempt(action: () => Promise<unknown>): Promise<boolean> {
+    try {
+      await action();
+      setActionError("");
+      return true;
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Could not save. Please try again.");
+      return false;
+    }
+  }
+
+  if (loading) {
     return <div className="text-[var(--text-3)] text-[14px] py-10">Loading settings…</div>;
+  }
+  if (!s) {
+    return (
+      <div className="text-[14px] py-10">
+        <p className="text-[var(--contra)] mb-3">{actionError || "Could not load settings."}</p>
+        <button onClick={() => { setLoading(true); load(); }} className={ghostBtn}>Retry</button>
+      </div>
+    );
   }
 
   const hasKey = s.has_api_key;
@@ -79,17 +107,19 @@ export default function SettingsPage() {
     if (!keyInput.trim()) return;
     setBusy(true);
     try {
-      await api.updateSettings({ apiKey: keyInput.trim() });
-      setKeyInput(""); setTestState("idle"); setTestMsg("");
-      await refresh(); await load();
+      if (await attempt(() => api.updateSettings({ apiKey: keyInput.trim() }))) {
+        setKeyInput(""); setTestState("idle"); setTestMsg("");
+        await refresh(); await load();
+      }
     } finally { setBusy(false); }
   }
 
   async function removeKey() {
     setBusy(true);
     try {
-      await api.updateSettings({ apiKey: "" });
-      await refresh(); await load();
+      if (await attempt(() => api.updateSettings({ apiKey: "" }))) {
+        await refresh(); await load();
+      }
     } finally { setBusy(false); }
   }
 
@@ -112,7 +142,7 @@ export default function SettingsPage() {
   }
 
   async function saveLib() {
-    await api.updateSettings({ libraryName: libName.trim() || "My Library" });
+    if (!(await attempt(() => api.updateSettings({ libraryName: libName.trim() || "My Library" })))) return;
     setLibSaved(true); setTimeout(() => setLibSaved(false), 1500);
     await refresh(); await load();
   }
@@ -125,7 +155,7 @@ export default function SettingsPage() {
       return;
     }
     setDigestError("");
-    await api.updateSettings({ digestEmail: val });
+    if (!(await attempt(() => api.updateSettings({ digestEmail: val })))) return;
     setDigestSaved(true); setTimeout(() => setDigestSaved(false), 1500);
     await refresh(); await load();
   }
@@ -141,9 +171,9 @@ export default function SettingsPage() {
         setTestDigestState("error");
         setTestDigestMsg(r.email_error || "Email not delivered.");
       }
-    } catch (e: any) {
+    } catch (e) {
       setTestDigestState("error");
-      setTestDigestMsg(e.message || "Test failed.");
+      setTestDigestMsg(e instanceof Error ? e.message : "Test failed.");
     }
     setTimeout(() => { setTestDigestState("idle"); setTestDigestMsg(""); }, 8000);
   }
@@ -156,6 +186,11 @@ export default function SettingsPage() {
   return (
     <div className="max-w-[680px]">
       <PageHeader title="Settings" subtitle="Your API key, model, digest email, and account." />
+      {actionError && (
+        <div className="mb-5 bg-[var(--contra-dim)] border border-[var(--contra-line)] rounded-[var(--r-lg)] p-3.5 text-[12.5px] text-[var(--contra)]">
+          {actionError}
+        </div>
+      )}
 
       {/* ── API key (BYOK) ── */}
       <Card className="mb-5">
