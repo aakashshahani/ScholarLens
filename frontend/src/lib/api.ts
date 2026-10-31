@@ -317,6 +317,28 @@ export class ApiError extends Error {
   }
 }
 
+/** A readable message from an error response. FastAPI validation errors
+ *  (422) carry `detail` as an array of objects, and slowapi's 429 uses
+ *  `error` — passing those straight to Error() showed "[object Object]". */
+function errorMessage(body: unknown, res: Response): string {
+  const b = (body ?? {}) as { detail?: unknown; error?: unknown };
+  if (typeof b.detail === "string" && b.detail) return b.detail;
+  if (Array.isArray(b.detail) && b.detail.length) {
+    return b.detail
+      .map((d) => {
+        const item = d as { msg?: string; loc?: unknown[] };
+        const field = Array.isArray(item.loc) ? item.loc[item.loc.length - 1] : undefined;
+        const msg = (item.msg || "is invalid").replace(/^Value error, /, "");
+        return field && typeof field === "string" && field !== "body" ? `${field}: ${msg}` : msg;
+      })
+      .join("; ");
+  }
+  if (typeof b.error === "string" && b.error) {
+    return res.status === 429 ? `Too many requests — ${b.error}. Please wait and try again.` : b.error;
+  }
+  return res.statusText || `Request failed (${res.status})`;
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await getAuthToken();
   const authHeaders: Record<string, string> = token
@@ -329,7 +351,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new ApiError(res.status, body.detail || res.statusText);
+    throw new ApiError(res.status, errorMessage(body, res));
   }
   // 204 / empty-body responses
   if (res.status === 204) return undefined as T;
@@ -496,7 +518,7 @@ export const api = {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new ApiError(res.status, body.detail || res.statusText);
+      throw new ApiError(res.status, errorMessage(body, res));
     }
     return res.json() as Promise<{ results: BatchUploadResult[]; total: number; queued: number }>;
   },
@@ -517,7 +539,7 @@ export const api = {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new ApiError(res.status, body.detail || res.statusText);
+      throw new ApiError(res.status, errorMessage(body, res));
     }
     return res.json() as Promise<{ id: string; title: string; status: string; message: string }>;
   },
