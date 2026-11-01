@@ -718,7 +718,7 @@ export default function GraphPage() {
                 <Layers size={30} style={{ color: "var(--text-4)", margin: "0 auto 16px", display: "block" }} />
                 <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-1)", marginBottom: 8 }}>No clusters yet</div>
                 <div style={{ fontSize: 13, color: "var(--text-3)", lineHeight: 1.65 }}>
-                  After running a contradiction scan, click "Detect clusters" to group related claims into debate clusters.
+                  After running a contradiction scan, click &ldquo;Detect clusters&rdquo; to group related claims into debate clusters.
                 </div>
               </div>
             </div>
@@ -731,7 +731,7 @@ export default function GraphPage() {
               <div style={{ ...G, padding: "26px 30px", marginBottom: 18 }}>
                 <div style={{ fontSize: 10, color: "var(--text-4)", textTransform: "uppercase", letterSpacing: "0.09em", marginBottom: 7 }}>Debate cluster</div>
                 <div style={{ fontSize: 24, fontWeight: 800, color: "var(--text-1)", marginBottom: 8, letterSpacing: "-0.02em" }}>{selCluster.name}</div>
-                {selCluster.research_question && <div style={{ fontSize: 14, color: "var(--text-2)", fontStyle: "italic", marginBottom: 10, lineHeight: 1.55 }}>"{selCluster.research_question}"</div>}
+                {selCluster.research_question && <div style={{ fontSize: 14, color: "var(--text-2)", fontStyle: "italic", marginBottom: 10, lineHeight: 1.55 }}>&ldquo;{selCluster.research_question}&rdquo;</div>}
                 {selCluster.description && <div style={{ fontSize: 13, color: "var(--text-3)", lineHeight: 1.68, marginBottom: 20 }}>{selCluster.description}</div>}
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
                   {[
@@ -816,7 +816,7 @@ export default function GraphPage() {
                         {c.support_count > 0 && <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 999, background: "rgba(61,212,160,0.14)", color: "var(--support)", border: "1px solid rgba(61,212,160,0.3)" }}>{c.support_count} support</span>}
                       </div>
                       <div style={{ fontSize: 17, fontWeight: 800, color: "var(--text-1)", marginBottom: 5, letterSpacing: "-0.015em" }}>{c.name}</div>
-                      {c.research_question && <div style={{ fontSize: 12.5, color: "var(--text-3)", fontStyle: "italic", marginBottom: 8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>"{c.research_question}"</div>}
+                      {c.research_question && <div style={{ fontSize: 12.5, color: "var(--text-3)", fontStyle: "italic", marginBottom: 8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>&ldquo;{c.research_question}&rdquo;</div>}
                       {c.description && <div style={{ fontSize: 12, color: "var(--text-3)", lineHeight: 1.55, marginBottom: 14, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{c.description}</div>}
                       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                         <span style={{ fontSize: 11, color: "var(--text-4)", display: "flex", alignItems: "center", gap: 4 }}><BookOpen size={10} /> {c.paper_count}p</span>

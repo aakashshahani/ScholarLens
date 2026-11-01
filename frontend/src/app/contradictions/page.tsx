@@ -407,7 +407,7 @@ export default function ContradictionsPage() {
                       feedback={feedbacks[selected.id] || null}
                       onFeedback={(v) => handleFeedback(selected.id, v)} />
                   ) : (
-                    <Card><div className="text-[13px] text-[var(--text-3)] text-center py-8">Select a pair to see the model's reasoning.</div></Card>
+                    <Card><div className="text-[13px] text-[var(--text-3)] text-center py-8">Select a pair to see the model&apos;s reasoning.</div></Card>
                   )}
                 </div>
               </div>

@@ -350,7 +350,7 @@ export default function MonitorPage() {
               </button>
             </div>
             <div className="text-[11px] text-[var(--text-3)] mt-1.5">
-              Topics are saved permanently and scanned on each topic's cadence
+              Topics are saved permanently and scanned on each topic&apos;s cadence
               (daily, weekly, or paused). Sources: Semantic Scholar, OpenAlex (250M+ works), and arXiv.
             </div>
           </Card>

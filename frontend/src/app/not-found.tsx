@@ -14,7 +14,7 @@ export default function NotFound() {
           Page not found
         </div>
         <div className="text-[13.5px] text-[var(--text-3)] mb-8 leading-[1.6]">
-          This page doesn't exist or was moved.
+          This page doesn&apos;t exist or was moved.
         </div>
         <Link
           href="/"
