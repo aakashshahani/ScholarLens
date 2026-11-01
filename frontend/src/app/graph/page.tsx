@@ -73,6 +73,22 @@ export default function GraphPage() {
     return () => window.removeEventListener("resize", upd);
   }, []);
 
+  // ── Seed positions ───────────────────────────────────────────
+  const seed = useCallback((g: GraphPayload) => {
+    const { w, h } = dimsRef.current;
+    const cx = w / 2, cy = h / 2;
+    const connected = new Set(g.edges.flatMap((e) => [e.source, e.target]));
+    const nodes = g.nodes.filter((n) => connected.has(n.id));
+    const r = Math.min(w, h) * 0.34;
+    const s: Sim[] = nodes.map((n, i) => ({
+      id: n.id, node: n,
+      x: cx + Math.cos((i / Math.max(nodes.length, 1)) * Math.PI * 2) * r + (Math.random() - 0.5) * 50,
+      y: cy + Math.sin((i / Math.max(nodes.length, 1)) * Math.PI * 2) * r + (Math.random() - 0.5) * 50,
+      vx: 0, vy: 0,
+    }));
+    simsRef.current = s; setSims(s);
+  }, []);
+
   // ── Load data ───────────────────────────────────────────────
   useEffect(() => {
     const cp = cache.read<Paper[]>("papers");
@@ -88,7 +104,7 @@ export default function GraphPage() {
         .finally(() => setLoading(false));
     }
     api.listClusters().then(setClusters).catch(() => {});
-  }, []);
+  }, [seed]);
 
   // ── Wheel zoom ──────────────────────────────────────────────
   useEffect(() => {
@@ -108,24 +124,10 @@ export default function GraphPage() {
     return () => svg.removeEventListener("wheel", onWheel);
   }, []);
 
-  // ── Seed positions ───────────────────────────────────────────
-  const seed = (g: GraphPayload) => {
-    const { w, h } = dimsRef.current;
-    const cx = w / 2, cy = h / 2;
-    const connected = new Set(g.edges.flatMap((e) => [e.source, e.target]));
-    const nodes = g.nodes.filter((n) => connected.has(n.id));
-    const r = Math.min(w, h) * 0.34;
-    const s: Sim[] = nodes.map((n, i) => ({
-      id: n.id, node: n,
-      x: cx + Math.cos((i / Math.max(nodes.length, 1)) * Math.PI * 2) * r + (Math.random() - 0.5) * 50,
-      y: cy + Math.sin((i / Math.max(nodes.length, 1)) * Math.PI * 2) * r + (Math.random() - 0.5) * 50,
-      vx: 0, vy: 0,
-    }));
-    simsRef.current = s; setSims(s);
-  };
-
   // ── Force tick ───────────────────────────────────────────────
   const tick = useCallback(() => {
+    // Named inner step so the rAF loop can reschedule itself.
+    const step = () => {
     const ns = simsRef.current;
     if (!ns.length) return;
     const { w, h } = dimsRef.current;
@@ -147,9 +149,11 @@ export default function GraphPage() {
     // Edges live in a ref to avoid both a stale closure and leaking onto window.
     const edges = edgesRef.current;
     if (edges.length) {
+      // id -> node once per tick; a find() per edge endpoint was O(E·N) per frame.
+      const byId = new Map(ns.map((n) => [n.id, n]));
       for (const e of edges) {
-        const a = ns.find((n) => n.id === e.source);
-        const b = ns.find((n) => n.id === e.target);
+        const a = byId.get(e.source);
+        const b = byId.get(e.target);
         if (!a || !b) continue;
         let dx = b.x - a.x, dy = b.y - a.y;
         const d = Math.hypot(dx, dy) || 1;
@@ -173,8 +177,10 @@ export default function GraphPage() {
     // Stop once the layout has settled — otherwise the O(n²) repulsion loop
     // burns CPU forever on a static graph. Reheats whenever seed() runs.
     if (maxV2 > 0.04) {
-      rafRef.current = requestAnimationFrame(tick);
+      rafRef.current = requestAnimationFrame(step);
     }
+    };
+    step();
   }, []);
 
   useEffect(() => {
@@ -221,6 +227,12 @@ export default function GraphPage() {
       // Always clear the spinner (the old early return on an empty scope left it on).
       if (!ctrl.signal.aborted) setClusterLoading(false);
     }
+  };
+
+  const zoomBy = (factor: number) => {
+    const cur = xformRef.current;
+    const t = { ...cur, k: Math.max(0.12, Math.min(5, cur.k * factor)) };
+    xformRef.current = t; setXform(t);
   };
 
   const zoomToFit = () => {
@@ -535,12 +547,12 @@ export default function GraphPage() {
           <>
             {/* Zoom controls */}
             <div style={{ ...G, display: "flex", flexDirection: "column", overflow: "hidden", padding: 0 }}>
-              {[
-                { icon: <Plus size={14} />, fn: () => { const t = { ...xformRef.current, k: Math.min(5, xformRef.current.k * 1.22) }; xformRef.current = t; setXform(t); } },
-                { icon: <Maximize2 size={13} />, fn: zoomToFit },
-                { icon: <Minus size={14} />, fn: () => { const t = { ...xformRef.current, k: Math.max(0.12, xformRef.current.k * 0.82) }; xformRef.current = t; setXform(t); } },
-              ].map(({ icon, fn }, i) => (
-                <button key={i} onClick={fn} style={{
+              {([
+                { icon: <Plus size={14} />, zoom: 1.22 },
+                { icon: <Maximize2 size={13} />, zoom: null },
+                { icon: <Minus size={14} />, zoom: 0.82 },
+              ] as const).map(({ icon, zoom }, i) => (
+                <button key={i} onClick={() => (zoom === null ? zoomToFit() : zoomBy(zoom))} style={{
                   padding: "10px 13px", background: "transparent", border: "none",
                   borderBottom: i < 2 ? "1px solid rgba(255,255,255,0.05)" : "none",
                   color: "var(--text-3)", cursor: "pointer",
