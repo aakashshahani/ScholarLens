@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { api, waitForJob, isAbortError, type SearchResult, type Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
-import { Card } from "@/components/ui";
 import { Trash2, ChevronDown, ChevronUp, ArrowUp, Sparkles } from "lucide-react";
 import { LogoMark } from "@/components/logo";
 

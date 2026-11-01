@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState, useRef } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { api, Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { downloadBlob } from "@/lib/download";
@@ -30,7 +29,6 @@ const orderAnalyses = (types: string[]) =>
 type SortKey = "recent" | "coverage" | "title" | "year";
 
 export default function LibraryPage() {
-  const router = useRouter();
   const [papers, setPapers]             = useState<Paper[]>([]);
   const [loading, setLoading]           = useState(true);
   const [filter, setFilter]             = useState("all");
@@ -101,7 +99,7 @@ export default function LibraryPage() {
   })();
 
   const toggleCheck = (id: string) => {
-    setCheckedIds((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+    setCheckedIds((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   };
   const checkAll = () => setCheckedIds(new Set(filtered.map((p) => p.id)));
   const uncheckAll = () => setCheckedIds(new Set());

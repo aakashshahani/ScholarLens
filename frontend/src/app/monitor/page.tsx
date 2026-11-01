@@ -7,7 +7,6 @@ import { Radar, Plus, X, ExternalLink, AlertCircle, CheckCircle2, Clock, BookPlu
 import { cache } from "@/lib/cache";
 
 // Local draft type — what the user is building before saving
-interface DraftTopic { name: string; keywords: string[]; sources: string[]; }
 
 const TIER_META: Record<string, { label: string; color: string }> = {
   highly_relevant: { label: "Highly relevant", color: "var(--support)" },

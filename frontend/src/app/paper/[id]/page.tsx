@@ -119,7 +119,7 @@ function parseClaimsFromContent(content: string): string[] {
   return claims;
 }
 
-function KeyClaimsView({ content, paperId }: { content: string; paperId: string }) {
+function KeyClaimsView({ content }: { content: string }) {
   const claims = parseClaimsFromContent(content);
   if (!claims.length) return <MarkdownContent text={content} />;
   return (
@@ -404,7 +404,7 @@ export default function PaperDetailPage() {
               </div>
               <div className="mb-7">
                 {active?.type === "key_claims" ? (
-                  <KeyClaimsView content={active.content} paperId={paperId} />
+                  <KeyClaimsView content={active.content} />
                 ) : (
                   <MarkdownContent text={active?.content || ""} />
                 )}
