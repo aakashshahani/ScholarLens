@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, waitForJob, isAbortError, MonitorDigest, MonitorTopic, CitationGroup, AuthorGroup, AlertPaper } from "@/lib/api";
+import { api, errorText, waitForJob, isAbortError, MonitorDigest, MonitorTopic, CitationGroup, AuthorGroup, AlertPaper } from "@/lib/api";
 import { PageHeader, Card, EmptyState, Spinner, PrimaryButton, SectionLabel } from "@/components/ui";
 import { Radar, Plus, X, ExternalLink, AlertCircle, CheckCircle2, Clock, BookPlus, Loader2, Quote, Users } from "lucide-react";
 import { cache } from "@/lib/cache";
@@ -128,8 +128,8 @@ export default function MonitorPage() {
       setSavedTopics((prev) => [...prev, topic]);
       setTopicName("");
       setTopicKeywords("");
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e) {
+      setError(errorText(e));
     } finally {
       setSavingTopic(false);
     }
@@ -139,15 +139,15 @@ export default function MonitorPage() {
     try {
       await api.deleteMonitorTopic(topicId);
       setSavedTopics((prev) => prev.filter((t) => t.id !== topicId));
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e) {
+      setError(errorText(e));
     }
   };
 
   const setCadence = async (topicId: string, cadence: "daily" | "weekly" | "paused") => {
     setSavedTopics((prev) => prev.map((t) => t.id === topicId ? { ...t, cadence } : t));
     try { await api.updateMonitorTopic(topicId, { cadence }); }
-    catch (e: any) { setError(e.message); }
+    catch (e) { setError(errorText(e)); }
   };
 
   const addAuthor = async () => {
@@ -155,7 +155,7 @@ export default function MonitorPage() {
     if (!name) return;
     setFollowed((prev) => prev.includes(name) ? prev : [...prev, name].sort());
     setAuthorInput("");
-    try { await api.followAuthor(name); } catch (e: any) { setError(e.message); }
+    try { await api.followAuthor(name); } catch (e) { setError(errorText(e)); }
   };
 
   const removeAuthor = async (name: string) => {

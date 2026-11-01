@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { api, ImportResult } from "@/lib/api";
+import { api, errorText, ImportResult } from "@/lib/api";
 import { PageHeader, Card, Spinner, EmptyState, SectionLabel } from "@/components/ui";
 import { Search, Plus, ExternalLink, CheckCircle2, Download } from "lucide-react";
 
@@ -25,7 +25,7 @@ export default function ImportPage() {
     try {
       const r = await api.importLookup(lookupId.trim());
       setResults([r]);
-    } catch (e: any) { setError(e.message || "Lookup failed."); }
+    } catch (e) { setError(errorText(e, "Lookup failed.")); }
     setSearched(true); setLoading(false);
   };
 
@@ -36,7 +36,7 @@ export default function ImportPage() {
     try {
       const res = await api.importSearch(query, sources, maxResults);
       setResults(res);
-    } catch (e: any) { setError(e.message || "Search failed."); }
+    } catch (e) { setError(errorText(e, "Search failed.")); }
     setSearched(true); setLoading(false);
   };
 
@@ -45,8 +45,8 @@ export default function ImportPage() {
     try {
       const res = await api.importAdd(r);
       setImporting((p) => ({ ...p, [idx]: res.status === "duplicate" ? "dup" : "done" }));
-    } catch (e: any) {
-      setImporting((p) => ({ ...p, [idx]: `error: ${e.message}` }));
+    } catch (e) {
+      setImporting((p) => ({ ...p, [idx]: `error: ${errorText(e)}` }));
     }
   };
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { api, waitForJob, isAbortError, type SearchResult, type Paper } from "@/lib/api";
+import { api, errorText, waitForJob, isAbortError, type SearchResult, type Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { Trash2, ChevronDown, ChevronUp, ArrowUp, Sparkles } from "lucide-react";
 import { LogoMark } from "@/components/logo";
@@ -435,8 +435,8 @@ export default function SearchPage() {
           ? { ...e, sources, answerLoading: false, answer: "" }
           : e
       ));
-    } catch (e: any) {
-      const msg: string = e?.message || "Search failed";
+    } catch (e) {
+      const msg = errorText(e, "Search failed");
       setExchanges((prev) => prev.map((ex) =>
         ex.id === exchangeId
           ? { ...ex, answerLoading: false, answerError: msg }

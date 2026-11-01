@@ -20,7 +20,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { api, HealthStatus, Paper, Insight, Hypothesis, GraphPayload } from "@/lib/api";
+import { api, errorText, HealthStatus, Paper, Insight, Hypothesis, GraphPayload } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import {
   FileStack, CheckCircle2, Link2, TrendingUp, ArrowRight, ArrowUpRight,
@@ -108,7 +108,7 @@ export default function Dashboard() {
     Promise.allSettled([
       api.health()
         .then((h) => { setHealth(h); cache.write("health", h); })
-        .catch((e) => setError(e.message)),
+        .catch((e) => setError(errorText(e, "Backend not reachable"))),
       api.listPapers()
         .then((p) => { setPapers(p); cache.write("papers", p); }),
       api.contradictionCount()
@@ -411,7 +411,7 @@ function SpotlightCard({ title, accent, glow, children }: {
 }) {
   return (
     <div className="group bg-[var(--surface-2)] border border-[var(--line)] rounded-[var(--r-lg)] overflow-hidden flex flex-col min-h-[168px] t-all hover:border-[var(--line-2)]"
-      style={{ ["--card-glow" as any]: glow }}
+      style={{ "--card-glow": glow } as React.CSSProperties}
       onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.boxShadow = `0 0 28px -6px ${glow}`; }}
       onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.boxShadow = "none"; }}>
       <div className="h-[2px]" style={{ background: accent }} />

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, ImportResult } from "@/lib/api";
+import { api, errorText, ImportResult } from "@/lib/api";
 import { Card, Spinner, SelectChip, PrimaryButton, PageHeader } from "@/components/ui";
 import { Upload, Search, Plus, CheckCircle2, ExternalLink, FileText, ArrowRight } from "lucide-react";
 
@@ -56,8 +56,8 @@ export default function AddPapersPage() {
       }, 3000);
     } catch (e) { setUploadStatus((s) => [...s, `Error — ${e instanceof Error ? e.message : "upload failed"}`]); setUploading(false); }
   };
-  const handleLookup = async () => { if (!lookupId.trim()) return; setSearchLoading(true); setImportError(""); try { setResults([await api.importLookup(lookupId.trim())]); } catch (e: any) { setImportError(e.message || "Lookup failed."); } setSearchLoading(false); };
-  const handleSearch = async () => { if (!query.trim()) return; if (sources.length === 0) { setImportError("Select at least one source."); return; } setSearchLoading(true); setImportError(""); try { setResults(await api.importSearch(query, sources, 5)); } catch (e: any) { setImportError(e.message || "Search failed."); } setSearchLoading(false); };
+  const handleLookup = async () => { if (!lookupId.trim()) return; setSearchLoading(true); setImportError(""); try { setResults([await api.importLookup(lookupId.trim())]); } catch (e) { setImportError(errorText(e, "Lookup failed.")); } setSearchLoading(false); };
+  const handleSearch = async () => { if (!query.trim()) return; if (sources.length === 0) { setImportError("Select at least one source."); return; } setSearchLoading(true); setImportError(""); try { setResults(await api.importSearch(query, sources, 5)); } catch (e) { setImportError(errorText(e, "Search failed.")); } setSearchLoading(false); };
   const handleAdd = async (r: ImportResult, idx: number) => {
     setImporting((p) => ({ ...p, [idx]: "importing" })); setImportError("");
     try {

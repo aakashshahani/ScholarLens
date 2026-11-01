@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { api, waitForJob, isAbortError, Paper } from "@/lib/api";
+import { api, errorText, waitForJob, isAbortError, Paper } from "@/lib/api";
 import { cache } from "@/lib/cache";
 import { downloadBlob } from "@/lib/download";
 import { Card, Spinner, EmptyState, AnalysisTag, SectionLabel } from "@/components/ui";
@@ -186,8 +186,8 @@ export default function PaperDetailPage() {
 
     try {
       await api.reanalyze(paperId);
-    } catch (e: any) {
-      setReanalyzeError(e.message);
+    } catch (e) {
+      setReanalyzeError(errorText(e));
       setReanalyzing(false);
       return;
     }

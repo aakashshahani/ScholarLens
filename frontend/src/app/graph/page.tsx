@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { api, waitForJob, isAbortError, Paper, GraphPayload, GraphNode, GraphEdge, DebateCluster } from "@/lib/api";
+import { api, errorText, waitForJob, isAbortError, Paper, GraphPayload, GraphNode, GraphEdge, DebateCluster } from "@/lib/api";
 import { Spinner, REL } from "@/components/ui";
 import {
   Network, Zap, Download, Search, Layers,
@@ -190,7 +190,7 @@ export default function GraphPage() {
   const refresh = async () => {
     setLoading(true); setSel(null); setError("");
     try { const g = await api.graph({ compute: false }); setData(g); cache.write("graph", g); seed(g); }
-    catch (e: any) { setError(e.message); }
+    catch (e) { setError(errorText(e)); }
     setLoading(false);
   };
 
@@ -198,7 +198,7 @@ export default function GraphPage() {
     if (!window.confirm("Expand relationships?\n\nRuns the contradiction pipeline on new pairs — uses API credits.")) return;
     setLoading(true); setSel(null); setError("");
     try { const g = await api.graph({ similarityThreshold: 0.40, maxPairs: 120, compute: true }); setData(g); cache.write("graph", g); seed(g); }
-    catch (e: any) { setError(e.message); }
+    catch (e) { setError(errorText(e)); }
     setLoading(false);
   };
 

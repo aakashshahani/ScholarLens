@@ -322,6 +322,11 @@ export interface UserSettings extends AuthUser {
 
 // ── Fetch helper ────────────────────────────────────────────
 
+/** The message to show for a caught error of unknown type. */
+export function errorText(e: unknown, fallback = "Something went wrong."): string {
+  return e instanceof Error && e.message ? e.message : fallback;
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
