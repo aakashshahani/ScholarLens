@@ -28,7 +28,7 @@ function formatLastScanned(iso: string | null): string {
 function AlertCard({ p, addingIds, onAdd }: {
   p: AlertPaper;
   addingIds: Record<string, "loading" | "done" | "error" | "dup">;
-  onAdd: (p: any) => void;
+  onAdd: (p: AlertPaper) => void;
 }) {
   const status = addingIds[p.title];
   return (
@@ -237,9 +237,14 @@ export default function MonitorPage() {
 
   const [addingIds, setAddingIds] = useState<Record<string, "loading" | "done" | "error" | "dup">>({});
 
-  const addToLibrary = async (p: MonitorDigest["papers"][0]) => {
+  const addToLibrary = async (p: AlertPaper | MonitorDigest["papers"][0]) => {
     const key = p.title;
     setAddingIds((s) => ({ ...s, [key]: "loading" }));
+    // The real source id matters: for arXiv it becomes the stored arXiv id,
+    // which dedup and citation alerts resolve. Results saved before the id was
+    // persisted only have a URL, so recover the id from it.
+    const arxivFromUrl = p.url?.match(/arxiv\.org\/(?:abs|pdf)\/([^/?#]+?)(?:\.pdf)?$/i)?.[1];
+    const sourceId = p.source_id || (p.source === "arxiv" ? arxivFromUrl : undefined) || p.url || p.title;
     try {
       const res = await api.importAdd({
         title: p.title,
@@ -247,12 +252,12 @@ export default function MonitorPage() {
         abstract: p.abstract || "",
         year: p.year,
         source: p.source || "semantic_scholar",
-        source_id: p.url || p.title,
-        doi: null,
+        source_id: sourceId,
+        doi: p.doi ?? null,
         pdf_url: p.pdf_url || null,
         url: p.url || "",
         citation_count: null,
-      } as any);
+      });
       setAddingIds((s) => ({ ...s, [key]: res.status === "duplicate" ? "dup" : "done" }));
     } catch {
       setAddingIds((s) => ({ ...s, [key]: "error" }));

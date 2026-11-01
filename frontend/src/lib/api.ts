@@ -175,6 +175,8 @@ export interface AlertPaper {
   url: string;
   pdf_url: string | null;
   source: string;
+  source_id?: string;     // absent on results saved before it was persisted
+  doi?: string | null;
   citation_count: number | null;
 }
 export interface CitationGroup { cited_paper_id: string; cited_title: string; citers: AlertPaper[]; }
@@ -193,6 +195,8 @@ export interface MonitorDigest {
     abstract: string;
     url: string;
     pdf_url: string | null;
+    source_id?: string;
+    doi?: string | null;
     relevance_score: number;
     relevance_tier?: string;
     relevance_reason: string;

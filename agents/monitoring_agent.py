@@ -450,6 +450,10 @@ class MonitoringAgent:
             "url": p.url,
             "pdf_url": p.pdf_url,
             "source": p.source,
+            # Needed to import the paper with its real identifiers (arXiv id /
+            # DOI), which dedup and citation alerts key on.
+            "source_id": p.source_id,
+            "doi": p.doi,
             "citation_count": p.citation_count,
             "relevance_score": sp.relevance_score,
             "relevance_tier": MonitoringAgent._tier_from_similarity(sp.relevance_score),
@@ -466,6 +470,8 @@ class MonitoringAgent:
             "url": p.url,
             "pdf_url": p.pdf_url,
             "source": p.source,
+            "source_id": p.source_id,
+            "doi": p.doi,
             "citation_count": p.citation_count,
         }
 
