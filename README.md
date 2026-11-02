@@ -186,7 +186,7 @@ For each pair the model also produces:
 
 **Prompt engineering:** The contradiction judge went through four iterations tracked against a formal eval set (see Evaluation section). The current prompt uses a decision tree structure that first distinguishes proxy vs. orthogonal measurements before asking for the contradiction classification, and includes six few-shot examples targeting the nuance/contradiction boundary, the hardest case for the model.
 
-**Cache behavior:** Judged relationships are persisted to a `relationships` table keyed on the sorted pair of claim IDs (`claim_lo`, `claim_hi`). Re-running a scan on the same papers costs zero judgment calls for pairs already seen. The upsert is idempotent, running the scan twice produces one row, not two.
+**Cache behavior:** Judged relationships are persisted to a `relationships` table keyed on the sorted pair of claim IDs (`claim_lo`, `claim_hi`). A scan loads every already-judged pair in its scope with one query, so re-running a scan on the same papers costs zero judgment calls for pairs already seen. The upsert is idempotent, running the scan twice produces one row, not two. Genuinely new pairs (and papers that still need claim extraction) are sent to the model a few at a time in parallel: same total cost, much shorter wall-clock time.
 
 ---
 
@@ -229,13 +229,13 @@ The hypothesis agent reads directly from the persisted contradiction results rat
 
 **Novelty scoring:** Rather than asking the model to self-assess novelty (unreliable, it tends toward high), novelty is computed as cosine distance between the hypothesis embedding and the nearest chunk in the library via pgvector. All hypothesis statements are batch-embedded in a single Voyage API call, then each is scored against the library using the pre-computed vector. A hypothesis very close to existing library content scores low novelty; one in unexplored territory scores high.
 
-**Cache:** Hypothesis results are cached keyed on the set of paper IDs, any research question, and a relationships watermark (`MAX(created_at)` aggregate over the relationships table, no full-table scan). Cache is invalidated when the library changes or a new scan adds relationships. A `GET /api/hypotheses` endpoint returns the most recent cached result (zero LLM calls), the frontend uses this as a fallback when localStorage expires.
+**Runs, not a cache:** every generation is stored permanently in a `hypothesis_runs` table (browsable history in the UI). An identical request (same research question and paper scope) within five minutes returns the stored run instead of calling the model again; anything else generates fresh. `GET /api/hypotheses` returns the latest run (zero LLM calls), and the export endpoints read the same runs. The conflict context handed to the model is capped (contradictions first, newest first) so a large library can't blow up the prompt.
 
 ---
 
 ### 7. Knowledge graph
 
-The knowledge graph endpoint assembles nodes and edges from the claims and relationships tables. It is **read-only by default** (`compute=false`): edges come straight from the persisted relationships table, zero LLM calls, no writes, and the relationships watermark never moves, so viewing the graph never invalidates the hypothesis cache. Passing `compute=true` runs the live two-stage pipeline to expand coverage deliberately.
+The knowledge graph endpoint assembles nodes and edges from the claims and relationships tables. It is **read-only by default** (`compute=false`): edges come straight from the persisted relationships table, zero LLM calls, no writes. Passing `compute=true` runs the live two-stage pipeline to expand coverage deliberately.
 
 Nodes are claims filtered to only those with at least one edge; isolated claims are excluded since they add visual noise without conveying information. Edges are persisted relationships colored by type (red = contradiction, green = support, amber = nuance).
 
@@ -281,7 +281,7 @@ The cost model for a naive implementation is brutal: every page load re-extracts
 
 Cache invalidation: deleting a paper cascades its claims (FK) and purges their relationships; re-analyzing a paper explicitly clears stale claims and relationships before re-running.
 
-The frontend mirrors this with localStorage caching (24-hour TTL, version-based busting, library-fingerprint cache-busting) for contradiction results, graph payloads, and hypothesis outputs, results survive tab switches and full page reloads. Every data-fetching tab uses a stale-while-revalidate pattern: cached data renders instantly, a background fetch updates it silently. The dashboard fires all API calls in parallel via `Promise.allSettled`.
+The frontend mirrors this with localStorage caching (24-hour TTL, version-based busting, library-fingerprint cache-busting) for papers, contradiction results, graph payloads and monitor results, so results survive tab switches and full page reloads. Every data-fetching tab uses a stale-while-revalidate pattern: cached data renders instantly, a background fetch updates it silently. The dashboard fires all API calls in parallel via `Promise.allSettled`.
 
 ---
 
@@ -289,13 +289,13 @@ The frontend mirrors this with localStorage caching (24-hour TTL, version-based 
 
 ScholarLens is multi-user: every account has its own private library, and the backend is hardened against the common web-app attack classes.
 
-**Authentication.** Pluggable via `AUTH_PROVIDER`. The default is **email + password**: passwords hashed with **bcrypt** (never plaintext); on login the server issues an opaque 256-bit session token in an **httpOnly + Secure + SameSite** cookie, httpOnly so JavaScript can't read it (defangs token theft via XSS), Secure so it's only sent over HTTPS, SameSite configurable via env var (`none` in production for cross-origin Vercel→Render requests). Sessions live server-side in a `sessions` table and rotate on each login. Setting `AUTH_PROVIDER=clerk` instead verifies a **Clerk** session JWT (RS256 via the JWKS endpoint, issuer-checked) and resolves it to the internal user, linking by clerk-id first, then **verified** email, so an existing library is preserved across the switch and an unverified address can never inherit another user's data. Either way a single FastAPI dependency (`get_current_user`) gates every protected endpoint, and the internal `user_id` stays the durable key for all data, so the provider can change without re-keying anything.
+**Authentication.** Pluggable via `AUTH_PROVIDER`. The default is **email + password**: passwords hashed with **bcrypt** (never plaintext); on login the server issues an opaque 256-bit session token in an **httpOnly + Secure + SameSite** cookie, httpOnly so JavaScript can't read it (defangs token theft via XSS), Secure so it's only sent over HTTPS, SameSite configurable via env var (`none` in production for cross-origin Vercel→Render requests). Sessions live server-side in a `sessions` table and rotate on each login. Where browsers block third-party cookies (a Vercel frontend talking to a Render API), the same token is also kept client-side and sent as an `Authorization: Bearer` header; logout revokes the server session either way, and an expired session drops the UI back to the sign-in screen. Setting `AUTH_PROVIDER=clerk` instead verifies a **Clerk** session JWT (RS256 via the JWKS endpoint, issuer-checked) and resolves it to the internal user, linking by clerk-id first, then **verified** email, so an existing library is preserved across the switch and an unverified address can never inherit another user's data. Either way a single FastAPI dependency (`get_current_user`) gates every protected endpoint, and the internal `user_id` stays the durable key for all data, so the provider can change without re-keying anything.
 
 **Per-user data isolation.** Every paper carries a `user_id`; claims and relationships inherit ownership through their paper. Direct-object endpoints (`GET`/`DELETE /api/papers/{id}`) verify ownership and return `404` (not `403`) for another user's resource, so the API never reveals that an id exists. Aggregate features, search, contradictions, hypotheses, graph, insights, monitor, are scoped to the caller's paper IDs, closing the IDOR (insecure direct object reference) bug class.
 
 **BYOK (bring-your-own-key).** Each user can store their own Anthropic key, encrypted at rest with **Fernet** (the encryption key lives in the environment, never the database). That user's LLM calls then run on their key; users without one fall back to the server key. The plaintext key is never returned to the client (settings shows a boolean + mask) and is validated without spending tokens via `models.list()`.
 
-**Abuse protection.** Expensive endpoints carry per-IP **rate limits** (`slowapi`), uploads, contradiction/hypothesis generation, search, monitor, and login (brute-force defense), plus a global backstop. Uploads are validated by **magic bytes** (`%PDF-`), size-capped via a bounded read, and written under a generated UUID filename so a hostile client filename can't escape the upload directory (**path-traversal** defense). Admin endpoints are gated behind an environment token and fail closed when unset. All DB queries are parameterized (no SQL injection); rendered text relies on React's default escaping (no XSS); the localStorage cache is namespaced per user and cleared on logout.
+**Abuse protection.** Expensive endpoints carry **rate limits** (`slowapi`, keyed per account when signed in and per IP otherwise), uploads, contradiction/hypothesis generation, search, monitor, and login (brute-force defense), plus a global backstop. Uploads are validated by **magic bytes** (`%PDF-`), size-capped via a bounded read, and written under a generated UUID filename so a hostile client filename can't escape the upload directory (**path-traversal** defense); the file is deleted once its text is extracted. Paper import downloads are **SSRF**-guarded: every hostname must resolve only to public addresses, each redirect hop is re-validated, and the body is streamed under the same size cap. Monitor digests can only be emailed to the account's own addresses. Admin endpoints are gated behind an environment token and fail closed when unset. All DB queries are parameterized (no SQL injection); rendered text relies on React's default escaping, and the few hand-built HTML strings (analysis markdown, the printable hypothesis report) escape every model-generated value first (no XSS); the localStorage cache is namespaced per user and cleared on logout. Row Level Security is enabled on every table so Supabase's public PostgREST API exposes nothing.
 
 ---
 
@@ -352,6 +352,8 @@ pip install -r requirements.txt
 
 uvicorn api:app --reload --port 8000
 ```
+
+Behind a reverse proxy (Render, Fly, nginx), start uvicorn with `--proxy-headers --forwarded-allow-ips="*"` so rate limits on unauthenticated routes (login, register) see the real client IP rather than the proxy's. Signed-in requests are limited per account.
 
 API docs at `http://localhost:8000/api/docs`.
 
@@ -417,7 +419,7 @@ All endpoints except `/api/health` and the `/api/auth/{register,login,logout}` r
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Bare health check for Render probe |
-| GET | `/api/health` | System status, paper count, library fingerprint |
+| GET | `/api/health` | System status; paper count and library fingerprint for the signed-in user |
 | POST | `/api/auth/register` | Create account, set session cookie |
 | POST | `/api/auth/login` | Authenticate, rotate + set session cookie |
 | POST | `/api/auth/logout` | Clear the current session |
@@ -429,12 +431,14 @@ All endpoints except `/api/health` and the `/api/auth/{register,login,logout}` r
 | GET | `/api/papers` | List papers with analysis types and claim count |
 | GET | `/api/papers/{id}` | Paper detail, analyses (scaffolding stripped), chunk count |
 | POST | `/api/papers/upload` | Upload PDF, deduplication before ingest, background analysis |
+| POST | `/api/papers/upload-batch` | Upload up to 20 PDFs in one request |
 | DELETE | `/api/papers/{id}` | Delete paper, cascade claims + relationships |
 | POST | `/api/papers/{id}/reanalyze` | Re-run analyses, invalidate claim/relationship cache |
 | GET | `/api/papers/{id}/status` | Analysis completion status for polling |
 | GET | `/api/papers/{id}/export` | Export a citation (BibTeX / RIS / APA / Chicago / MLA) |
 | GET | `/api/tags` | List the user's paper tags |
-| POST/DELETE | `/api/papers/{id}/tags` | Add or remove a tag on a paper |
+| POST | `/api/papers/{id}/tags` | Add a tag to a paper |
+| DELETE | `/api/papers/{id}/tags/{tag}` | Remove a tag from a paper |
 | GET | `/api/jobs/{id}` | Poll a background job (scan / hypotheses / monitor / ask) |
 | POST | `/api/search` | Semantic search, pgvector retrieve + cross-encoder rerank, relevance tiers |
 | POST | `/api/ask` | RAG Q&A grounded in retrieved passages (returns the sources) |
