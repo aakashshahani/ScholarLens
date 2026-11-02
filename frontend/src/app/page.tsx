@@ -42,6 +42,32 @@ function cleanHeadline(s: string): string {
     .trim();
 }
 
+// The headline contradiction card, from the (priority-ordered) insight feed.
+function topContraFrom(rows: Insight[]): TopContra | null {
+  const contra = rows.find((i) => i.type === "contradiction");
+  if (!contra) return null;
+  return {
+    // headline is already stripped of the paper-title prefix by the backend;
+    // only fall back to detail if headline is missing
+    explanation: cleanHeadline(contra.headline || contra.detail),
+    paper_a: contra.papers?.[0] || "",
+    paper_b: contra.papers?.[1] || "",
+  };
+}
+
+// Most-connected papers in the graph, by summed claim degree.
+function topicsFrom(g: GraphPayload | null): { title: string; links: number }[] {
+  if (!g?.nodes?.length) return [];
+  const byPaper: Record<string, number> = {};
+  g.nodes.forEach((n) => {
+    byPaper[n.paper_title] = (byPaper[n.paper_title] || 0) + (n.degree || 0);
+  });
+  return Object.entries(byPaper)
+    .map(([title, links]) => ({ title, links }))
+    .sort((a, b) => b.links - a.links)
+    .slice(0, 5);
+}
+
 // Animated count-up hook
 function useCountUp(target: number, duration = 900): number {
   const [value, setValue] = useState(0);
@@ -65,45 +91,18 @@ function useCountUp(target: number, duration = 900): number {
 const PAPER_ACCENTS = ["var(--gen)", "var(--support)", "var(--nuance)", "var(--contra)"];
 
 export default function Dashboard() {
-  const [health, setHealth]       = useState<HealthStatus | null>(null);
-  const [papers, setPapers]       = useState<Paper[]>([]);
-  const [insights, setInsights]   = useState<Insight[]>([]);
-  const [relCounts, setRelCounts] = useState<RelCounts | null>(null);
-  const [topContra, setTopContra] = useState<TopContra | null>(null);
-  const [topHypo, setTopHypo]     = useState<Hypothesis | null>(null);
-  const [topics, setTopics]       = useState<{ title: string; links: number }[]>([]);
+  // Cache-first: stale data paints from the initializers (the page renders
+  // client-side only, after sign-in), then the effect refreshes everything.
+  const [health, setHealth]       = useState<HealthStatus | null>(() => cache.read<HealthStatus>("health"));
+  const [papers, setPapers]       = useState<Paper[]>(() => cache.read<Paper[]>("papers") ?? []);
+  const [insights, setInsights]   = useState<Insight[]>(() => cache.read<Insight[]>("insights_short") ?? []);
+  const [relCounts, setRelCounts] = useState<RelCounts | null>(() => cache.read<RelCounts>("rel_counts"));
+  const [topContra, setTopContra] = useState<TopContra | null>(() => topContraFrom(cache.read<Insight[]>("insights_long") ?? []));
+  const [topHypo, setTopHypo]     = useState<Hypothesis | null>(() => cache.read<Hypothesis[]>("hypotheses")?.[0] ?? null);
+  const [topics, setTopics]       = useState<{ title: string; links: number }[]>(() => topicsFrom(cache.read<GraphPayload>("graph")));
   const [error, setError]         = useState("");
-  const [mounted, setMounted]     = useState(false);
 
   useEffect(() => {
-    setMounted(true);
-
-    // ── Cache-first: show stale data immediately, refresh in parallel ─────
-    const cachedHealth       = cache.read<HealthStatus>("health");
-    const cachedPapers       = cache.read<Paper[]>("papers");
-    const cachedInsights     = cache.read<Insight[]>("insights_short");
-    const cachedRelCounts    = cache.read<RelCounts>("rel_counts");
-    const cachedInsightsLong = cache.read<Insight[]>("insights_long");
-    const cachedHypos        = cache.read<Hypothesis[]>("hypotheses");
-
-    if (cachedHealth)          setHealth(cachedHealth);
-    if (cachedPapers?.length)  setPapers(cachedPapers);
-    if (cachedInsights?.length) setInsights(cachedInsights);
-    if (cachedRelCounts)       setRelCounts(cachedRelCounts);
-    if (cachedHypos?.length)   setTopHypo(cachedHypos[0]);
-
-    const applyInsightsLong = (rows: Insight[]) => {
-      const contra = rows.find((i) => i.type === "contradiction");
-      if (contra) setTopContra({
-        // headline is already stripped of the paper-title prefix by the backend;
-        // only fall back to detail if headline is missing
-        explanation: cleanHeadline(contra.headline || contra.detail),
-        paper_a: contra.papers?.[0] || "",
-        paper_b: contra.papers?.[1] || "",
-      });
-    };
-    if (cachedInsightsLong?.length) applyInsightsLong(cachedInsightsLong);
-
     // ── Fire all API calls in parallel ────────────────────────────────────
     Promise.allSettled([
       api.health()
@@ -118,7 +117,8 @@ export default function Dashboard() {
       api.insights({ limit: 30 })
         .then((rows) => {
           cache.write("insights_long", rows);
-          applyInsightsLong(rows);
+          const contra = topContraFrom(rows);
+          if (contra) setTopContra(contra);
           const shortList = rows.slice(0, 8);
           setInsights(shortList);
           cache.write("insights_short", shortList);
@@ -129,24 +129,9 @@ export default function Dashboard() {
         }),
     ]);
 
-    // Graph topics — cache-first, then live fetch (no compute, reads from existing relationships)
-    const buildTopics = (g: GraphPayload) => {
-      if (!g?.nodes?.length) return;
-      const byPaper: Record<string, number> = {};
-      g.nodes.forEach((n) => {
-        byPaper[n.paper_title] = (byPaper[n.paper_title] || 0) + (n.degree || 0);
-      });
-      setTopics(
-        Object.entries(byPaper)
-          .map(([title, links]) => ({ title, links }))
-          .sort((a, b) => b.links - a.links)
-          .slice(0, 5)
-      );
-    };
-    const cachedGraph = cache.read<GraphPayload>("graph");
-    if (cachedGraph?.nodes?.length) buildTopics(cachedGraph);
+    // Graph topics: live fetch (no compute — reads existing relationships).
     api.graph({ compute: false })
-      .then((g) => { cache.write("graph", g); buildTopics(g); })
+      .then((g) => { cache.write("graph", g); const t = topicsFrom(g); if (t.length) setTopics(t); })
       .catch(() => {});
   }, []);
 
@@ -198,7 +183,7 @@ export default function Dashboard() {
         </svg>
       </div>
 
-      <div className={mounted ? "fade-up" : "opacity-0"}>
+      <div className="fade-up">
 
         {/* ── Header ─────────────────────────────────────── */}
         <div className="flex items-start justify-between mb-7">
