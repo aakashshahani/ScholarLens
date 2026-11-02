@@ -69,13 +69,14 @@ export default function MonitorPage() {
   const [topicKeywords, setTopicKeywords] = useState("");
 
   // Scan config — digest email comes from account settings, not entered here
-  const [results, setResults] = useState<MonitorDigest[]>([]);
+  // Stale-while-revalidate: last results paint instantly from localStorage.
+  const [results, setResults] = useState<MonitorDigest[]>(() => cache.read<MonitorDigest[]>("monitor_results") ?? []);
 
   const [sourcesFailed, setSourcesFailed] = useState<string[]>([]);
   const [showTangential, setShowTangential] = useState<Record<number, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [showConfig, setShowConfig] = useState(true);
+  const [showConfig, setShowConfig] = useState(() => !(cache.read<MonitorDigest[]>("monitor_results")?.length));
   const [savingTopic, setSavingTopic] = useState(false);
 
   // Alerts: followed authors + citation/author scans
@@ -90,12 +91,6 @@ export default function MonitorPage() {
   // Stale-while-revalidate: paint localStorage instantly, then replace with the
   // DB-persisted results (which survive restarts and are shared across devices).
   useEffect(() => {
-    const cachedResults = cache.read<MonitorDigest[]>("monitor_results");
-    if (cachedResults && cachedResults.length > 0) {
-      setResults(cachedResults);
-      setShowConfig(false);
-    }
-
     api.getMonitorResults()
       .then(({ digests }) => {
         if (digests && digests.length > 0) {

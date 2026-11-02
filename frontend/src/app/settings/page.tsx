@@ -63,6 +63,9 @@ export default function SettingsPage() {
       setLoading(false);
     }
   }
+  // State is only set after the awaited fetch inside load(), not synchronously
+  // in the effect body, so the set-state-in-effect rule is a false positive.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, []);
 
   // Run a save; on failure show why rather than leaving an unhandled rejection.

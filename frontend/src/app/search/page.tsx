@@ -345,8 +345,10 @@ function InputBar({
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function SearchPage() {
-  const [exchanges, setExchanges] = useState<Exchange[]>([]);
-  const [papers, setPapers] = useState<Paper[]>([]);
+  // Restored conversation + cached papers paint instantly (client-only page).
+  const [exchanges, setExchanges] = useState<Exchange[]>(
+    () => (cache.read<Exchange[]>(CACHE_KEY) ?? []).filter((e) => !e.answerLoading));
+  const [papers, setPapers] = useState<Paper[]>(() => cache.read<Paper[]>("papers") ?? []);
   const [scopeId, setScopeId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -381,11 +383,7 @@ export default function SearchPage() {
   }
 
   useEffect(() => {
-    const saved = cache.read<Exchange[]>(CACHE_KEY);
-    if (saved?.length) setExchanges(saved.filter((e) => !e.answerLoading));
     // Papers power the library-specific suggestion chip.
-    const cachedPapers = cache.read<Paper[]>("papers");
-    if (cachedPapers?.length) setPapers(cachedPapers);
     api.listPapers().then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
   }, []);
 

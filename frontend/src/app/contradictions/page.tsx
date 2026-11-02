@@ -94,17 +94,28 @@ const PRESETS = {
 } as const;
 type Preset = keyof typeof PRESETS;
 
+// First real (non-unrelated, non-error) relationship — the default selection.
+const firstReal = (rows: ContradictionResult[]) =>
+  rows.find((r) => r.relationship !== "unrelated" && r.relationship !== "error") || null;
+
+// Cached conflict map for an instant first paint (pages render client-side
+// only, after sign-in, so reading localStorage in an initializer is safe).
+const cachedResults = () => {
+  const c = cache.read<ContradictionResult[]>("contradictions");
+  return Array.isArray(c) ? c : [];
+};
+
 export default function ContradictionsPage() {
-  const [papers, setPapers] = useState<Paper[]>([]);
+  const [papers, setPapers] = useState<Paper[]>(() => cache.read<Paper[]>("papers") ?? []);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [preset, setPreset] = useState<Preset>("balanced");
-  const [results, setResults] = useState<ContradictionResult[]>([]);
+  const [results, setResults] = useState<ContradictionResult[]>(cachedResults);
   const [loading, setLoading] = useState(false);
   const [stage, setStage] = useState("");
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<string | null>(null);
   const [paperFilter, setPaperFilter] = useState<string | null>(null);
-  const [selected, setSelected] = useState<ContradictionResult | null>(null);
+  const [selected, setSelected] = useState<ContradictionResult | null>(() => firstReal(cachedResults()));
   const [showConfig, setShowConfig] = useState(false);
   const [libraryChanged, setLibraryChanged] = useState(false);
   const [feedbacks, setFeedbacks] = useState<Record<string, "agree" | "disagree" | "flag">>({});
@@ -117,20 +128,13 @@ export default function ContradictionsPage() {
     });
 
   useEffect(() => {
-    const cachedPapers = cache.read<Paper[]>("papers");
-    if (cachedPapers?.length) setPapers(cachedPapers);
     api.listPapers().then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
 
-    // Fast first paint from localStorage if present, then replace with the
-    // full persisted set from the backend so the conflict map always shows
-    // ALL accumulated relationships — consistent with the dashboard count,
-    // not just the last scan's slice.
-    const cached = cache.read<ContradictionResult[]>("contradictions");
-    if (cached && Array.isArray(cached) && cached.length > 0) {
-      setResults(cached);
-      const firstReal = cached.find((r) => r.relationship !== "unrelated" && r.relationship !== "error");
-      if (firstReal) setSelected(firstReal);
-    }
+    // First paint came from localStorage (see the state initializers); now
+    // replace it with the full persisted set from the backend so the conflict
+    // map always shows ALL accumulated relationships — consistent with the
+    // dashboard count, not just the last scan's slice.
+    const cached = cachedResults();
 
     // Source of truth: the full relationship table (pure DB read, zero LLM).
     api.listContradictions()
@@ -139,9 +143,7 @@ export default function ContradictionsPage() {
           setResults(full);
           rememberFeedback(full);
           cache.write("contradictions", full);
-          setSelected((prev) => prev || full.find(
-            (r) => r.relationship !== "unrelated" && r.relationship !== "error"
-          ) || null);
+          setSelected((prev) => prev || firstReal(full));
           setShowConfig(false);
         } else if (!cached || cached.length === 0) {
           // Nothing persisted and nothing cached → first-run config prompt.
@@ -211,7 +213,7 @@ export default function ContradictionsPage() {
       rememberFeedback(full);
       cache.write("contradictions", full);
       setShowConfig(false);
-      setSelected(full.find((r) => r.relationship !== "unrelated" && r.relationship !== "error") || null);
+      setSelected(firstReal(full));
     } catch (e) {
       if (isAbortError(e)) return;
       setError(e instanceof Error ? e.message : "Scan failed.");

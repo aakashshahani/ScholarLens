@@ -41,7 +41,8 @@ function fmtRunDate(iso: string) {
 }
 
 export default function HypothesesPage() {
-  const [papers, setPapers] = useState<Paper[]>([]);
+  // Cached list paints instantly (pages render client-side only, after sign-in).
+  const [papers, setPapers] = useState<Paper[]>(() => cache.read<Paper[]>("papers") ?? []);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [question, setQuestion] = useState("");
   const [count, setCount] = useState(5);
@@ -68,8 +69,6 @@ export default function HypothesesPage() {
   };
 
   useEffect(() => {
-    const cachedPapers = cache.read<Paper[]>("papers");
-    if (cachedPapers?.length) setPapers(cachedPapers);
     api.listPapers().then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
 
     // Load run history — permanent records, never lost

@@ -39,16 +39,45 @@ const G: React.CSSProperties = {
   borderRadius: 13,
 };
 
+// Initial circular layout of the connected nodes (pure; the force tick refines it).
+function seedLayout(g: GraphPayload, { w, h }: { w: number; h: number }): Sim[] {
+  const cx = w / 2, cy = h / 2;
+  const connected = new Set(g.edges.flatMap((e) => [e.source, e.target]));
+  const nodes = g.nodes.filter((n) => connected.has(n.id));
+  const r = Math.min(w, h) * 0.34;
+  return nodes.map((n, i) => ({
+    id: n.id, node: n,
+    x: cx + Math.cos((i / Math.max(nodes.length, 1)) * Math.PI * 2) * r + (Math.random() - 0.5) * 50,
+    y: cy + Math.sin((i / Math.max(nodes.length, 1)) * Math.PI * 2) * r + (Math.random() - 0.5) * 50,
+    vx: 0, vy: 0,
+  }));
+}
+
+const viewport = () => ({ w: window.innerWidth - 60, h: window.innerHeight });
+
+// Cheap identity for a graph payload: did a refetch actually change anything?
+const graphSig = (g: GraphPayload) =>
+  `${g.nodes.length}:${g.edges.length}:${g.edges.map((e) => `${e.source}${e.target}${e.relationship}`).join("|").length}`;
+
+const cachedGraph = () => {
+  const g = cache.read<GraphPayload>("graph");
+  return g?.nodes?.length ? g : null;
+};
+
 // ── Component ────────────────────────────────────────────────
 export default function GraphPage() {
-  const [papers, setPapers]   = useState<Paper[]>([]);
-  const [data, setData]       = useState<GraphPayload | null>(null);
-  const [loading, setLoading] = useState(false);
+  // Cached values paint instantly (pages render client-side only, after sign-in).
+  const [papers, setPapers]   = useState<Paper[]>(() => cache.read<Paper[]>("papers") ?? []);
+  const [data, setData]       = useState<GraphPayload | null>(cachedGraph);
+  const [loading, setLoading] = useState(() => cachedGraph() === null);
   const [error, setError]     = useState("");
   const [sel, setSel]         = useState<GraphNode | null>(null);
   const [hovered, setHovered] = useState<Sim | null>(null);
   const [active, setActive]   = useState({ contradiction: true, support: true, nuance: true });
-  const [sims, setSims]       = useState<Sim[]>([]);
+  const [sims, setSims]       = useState<Sim[]>(() => {
+    const g = cachedGraph();
+    return g ? seedLayout(g, viewport()) : [];
+  });
   const [search, setSearch]   = useState("");
   const [view, setView]       = useState<"graph" | "clusters">("graph");
   const [clusters, setClusters]     = useState<DebateCluster[]>([]);
@@ -58,16 +87,16 @@ export default function GraphPage() {
   const [dragging, setDragging] = useState(false);
 
   const rafRef    = useRef<number>(0);
-  const simsRef   = useRef<Sim[]>([]);
+  const simsRef   = useRef<Sim[]>(sims);
   const edgesRef  = useRef<GraphEdge[]>([]);   // avoids the window global + stale closure
   const svgRef    = useRef<SVGSVGElement>(null);
   const xformRef  = useRef<XForm>({ x: 0, y: 0, k: 1 });
-  const dimsRef   = useRef({ w: 1400, h: 900 });
+  const dimsRef   = useRef(viewport());
   const dragRef   = useRef<{ sx: number; sy: number; px: number; py: number; moved: boolean } | null>(null);
 
   // ── Dims ────────────────────────────────────────────────────
   useEffect(() => {
-    const upd = () => { dimsRef.current = { w: window.innerWidth - 60, h: window.innerHeight }; };
+    const upd = () => { dimsRef.current = viewport(); };
     upd();
     window.addEventListener("resize", upd);
     return () => window.removeEventListener("resize", upd);
@@ -75,34 +104,23 @@ export default function GraphPage() {
 
   // ── Seed positions ───────────────────────────────────────────
   const seed = useCallback((g: GraphPayload) => {
-    const { w, h } = dimsRef.current;
-    const cx = w / 2, cy = h / 2;
-    const connected = new Set(g.edges.flatMap((e) => [e.source, e.target]));
-    const nodes = g.nodes.filter((n) => connected.has(n.id));
-    const r = Math.min(w, h) * 0.34;
-    const s: Sim[] = nodes.map((n, i) => ({
-      id: n.id, node: n,
-      x: cx + Math.cos((i / Math.max(nodes.length, 1)) * Math.PI * 2) * r + (Math.random() - 0.5) * 50,
-      y: cy + Math.sin((i / Math.max(nodes.length, 1)) * Math.PI * 2) * r + (Math.random() - 0.5) * 50,
-      vx: 0, vy: 0,
-    }));
+    const s = seedLayout(g, dimsRef.current);
     simsRef.current = s; setSims(s);
   }, []);
 
   // ── Load data ───────────────────────────────────────────────
   useEffect(() => {
-    const cp = cache.read<Paper[]>("papers");
-    if (cp?.length) setPapers(cp);
     api.listPapers().then((p) => { setPapers(p); cache.write("papers", p); }).catch(() => {});
-    const cg = cache.read<GraphPayload>("graph");
-    if (cg?.nodes?.length) { setData(cg); seed(cg); }
-    else {
-      setLoading(true);
-      api.graph({ compute: false })
-        .then((g) => { setData(g); cache.write("graph", g); seed(g); })
-        .catch(() => {})
-        .finally(() => setLoading(false));
-    }
+    // The cached graph (if any) is already on screen; revalidate in the
+    // background and only re-seed — which resets the layout — if it changed.
+    const cg = cachedGraph();
+    api.graph({ compute: false })
+      .then((g) => {
+        cache.write("graph", g);
+        if (!cg || graphSig(g) !== graphSig(cg)) { setData(g); seed(g); }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
     api.listClusters().then(setClusters).catch(() => {});
   }, [seed]);
 
