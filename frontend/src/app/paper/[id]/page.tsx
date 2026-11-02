@@ -146,9 +146,21 @@ export default function PaperDetailPage() {
   const params = useParams();
   const router = useRouter();
   const paperId = params.id as string;
-  const [paper, setPaper] = useState<Paper | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Cache-first: the cached copy paints from the initializer (client-only page).
+  const [paper, setPaper] = useState<Paper | null>(() => cache.read<Paper>(`paper_${paperId}`));
+  const [loading, setLoading] = useState(() => !cache.read<Paper>(`paper_${paperId}`));
   const [activeTab, setActiveTab] = useState(0);
+  // Navigating paper → paper keeps this component mounted with a new id: swap
+  // in the new paper's cached copy (or a spinner) during render, rather than
+  // leaving the previous paper on screen until the fetch lands.
+  const [shownId, setShownId] = useState(paperId);
+  if (shownId !== paperId) {
+    const cached = cache.read<Paper>(`paper_${paperId}`);
+    setShownId(paperId);
+    setPaper(cached);
+    setLoading(!cached);
+    setActiveTab(0);
+  }
   const [copiedFmt, setCopiedFmt] = useState<string | null>(null);
 
   // Ask state
@@ -166,9 +178,7 @@ export default function PaperDetailPage() {
   const askAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    // Cache-first: show cached paper instantly, refresh in background
-    const cachedPaper = cache.read<Paper>(`paper_${paperId}`);
-    if (cachedPaper) { setPaper(cachedPaper); setLoading(false); }
+    // Refresh in the background (the cached copy is already on screen).
     api.getPaper(paperId)
       .then((p) => { setPaper(p); setLoading(false); cache.write(`paper_${paperId}`, p); })
       .catch(() => setLoading(false));
