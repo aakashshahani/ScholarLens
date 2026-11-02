@@ -16,7 +16,7 @@
  * Ported from design_handoff_scholarlens/reference/ScholarLens.dc.html (constants intact).
  */
 
-import { useEffect, useRef, type RefObject } from "react";
+import { useEffect, useRef, type RefObject, useLayoutEffect } from "react";
 import { CLAIMS, PALETTE, CHAPTERS } from "@/components/landing-data";
 
 const MONO = "var(--font-mono), monospace";
@@ -34,10 +34,15 @@ interface Props {
 export default function LandingCinematic({ onOpenChamber, onReady, announceRef }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Latest-callback refs, updated after render (not during it) so the long-
+  // lived animation loop below always calls the current props. Layout effects
+  // run before the effect that starts the loop.
   const onOpenRef = useRef(onOpenChamber);
-  onOpenRef.current = onOpenChamber;
   const onReadyRef = useRef(onReady);
-  onReadyRef.current = onReady;
+  useLayoutEffect(() => {
+    onOpenRef.current = onOpenChamber;
+    onReadyRef.current = onReady;
+  });
 
   useEffect(() => {
     const root = rootRef.current;
