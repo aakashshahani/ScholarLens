@@ -29,15 +29,19 @@ const orderAnalyses = (types: string[]) =>
 type SortKey = "recent" | "coverage" | "title" | "year";
 
 export default function LibraryPage() {
-  const [papers, setPapers]             = useState<Paper[]>([]);
-  const [loading, setLoading]           = useState(true);
+  // Cached list paints instantly (pages render client-side only, after sign-in).
+  const [papers, setPapers]             = useState<Paper[]>(() => cache.read<Paper[]>("papers") ?? []);
+  const [loading, setLoading]           = useState(() => !cache.read<Paper[]>("papers")?.length);
   const [filter, setFilter]             = useState("all");
   const [activeTag, setActiveTag]       = useState<string | null>(null);
   const [allTags, setAllTags]           = useState<string[]>([]);
-  const [selected, setSelected]         = useState<Paper | null>(null);
+  // Track the selection by id and derive the paper from the current list, so a
+  // refresh or a tag edit never leaves a stale copy in the inspector.
+  const [selectedId, setSelectedId]     = useState<string | null>(() => cache.read<Paper[]>("papers")?.[0]?.id ?? null);
   const [sortBy, setSortBy]             = useState<SortKey>("recent");
   const [search, setSearch]             = useState("");
-  const [abstractExpanded, setAbstractExpanded] = useState(false);
+  // Which paper's abstract is expanded — switching papers collapses it.
+  const [expandedId, setExpandedId]     = useState<string | null>(null);
   const [bulkMode, setBulkMode]         = useState(false);
   const [checkedIds, setCheckedIds]     = useState<Set<string>>(new Set());
   const [deleting, setDeleting]         = useState(false);
@@ -47,18 +51,16 @@ export default function LibraryPage() {
   const [savingTag, setSavingTag]       = useState(false);
   const tagInputRef = useRef<HTMLInputElement>(null);
 
-  const loadPapers = () => {
-    const cachedPapers = cache.read<Paper[]>("papers");
-    if (cachedPapers?.length) { setPapers(cachedPapers); setLoading(false); if (cachedPapers[0] && !selected) setSelected(cachedPapers[0]); }
+  useEffect(() => {
     api.listPapers().then((p) => {
       setPapers(p); cache.write("papers", p); setLoading(false);
-      if (p[0] && !selected) setSelected(p[0]);
+      setSelectedId((cur) => (cur && p.some((x) => x.id === cur) ? cur : p[0]?.id ?? null));
     }).catch(() => setLoading(false));
     api.listTags().then((r) => setAllTags(r.tags)).catch(() => {});
-  };
+  }, []);
 
-  useEffect(() => { loadPapers(); }, []);
-  useEffect(() => { setAbstractExpanded(false); }, [selected?.id]);
+  const selected = papers.find((p) => p.id === selectedId) ?? null;
+  const abstractExpanded = expandedId !== null && expandedId === selectedId;
 
   const totalAnalyses = papers.reduce((n, p) => n + (p.analysis_types?.length || 0), 0);
 
@@ -115,7 +117,7 @@ export default function LibraryPage() {
     const failed = ids.filter((id) => !deleted.has(id));
     const remaining = papers.filter((p) => !deleted.has(p.id));
     setPapers(remaining); cache.write("papers", remaining);
-    if (selected && deleted.has(selected.id)) setSelected(remaining[0] || null);
+    if (selectedId && deleted.has(selectedId)) setSelectedId(remaining[0]?.id ?? null);
     setCheckedIds(new Set(failed));
     if (failed.length) {
       alert(`${failed.length} paper${failed.length !== 1 ? "s" : ""} could not be deleted. Please try again.`);
@@ -134,7 +136,6 @@ export default function LibraryPage() {
         p.id === paperId ? { ...p, tags: [...new Set([...(p.tags || []), tag.trim().toLowerCase()])] } : p
       );
       setPapers(updated); cache.write("papers", updated);
-      if (selected?.id === paperId) setSelected(updated.find((p) => p.id === paperId) || selected);
       if (!allTags.includes(tag.trim().toLowerCase())) setAllTags((t) => [...t, tag.trim().toLowerCase()].sort());
       setTagInput("");
     } catch {} finally { setSavingTag(false); }
@@ -147,7 +148,6 @@ export default function LibraryPage() {
         p.id === paperId ? { ...p, tags: (p.tags || []).filter((t) => t !== tag) } : p
       );
       setPapers(updated); cache.write("papers", updated);
-      if (selected?.id === paperId) setSelected(updated.find((p) => p.id === paperId) || selected);
     } catch {}
   };
 
@@ -289,7 +289,7 @@ export default function LibraryPage() {
                     </button>
                   )}
                   <button
-                    onClick={() => { if (!bulkMode) setSelected(p); else toggleCheck(p.id); }}
+                    onClick={() => { if (!bulkMode) setSelectedId(p.id); else toggleCheck(p.id); }}
                     className={`w-full text-left rounded-[var(--r-lg)] border overflow-hidden t-all ${
                       isSel && !bulkMode
                         ? "border-[var(--line-3)] bg-[var(--surface-3)]"
@@ -392,7 +392,7 @@ export default function LibraryPage() {
                       <div className="text-[10.5px] font-medium text-[var(--text-4)] uppercase tracking-wider mb-2">Abstract</div>
                       <p className="text-[12px] text-[var(--text-2)] leading-[1.65]">{abstractDisplay}</p>
                       {abstract.length > ABSTRACT_TRUNCATE && (
-                        <button onClick={() => setAbstractExpanded((e) => !e)}
+                        <button onClick={() => setExpandedId(abstractExpanded ? null : selectedId)}
                           className="text-[11px] text-[var(--gen)] mt-1.5 hover:underline t-all">
                           {abstractExpanded ? "Show less" : "Read full abstract"}
                         </button>
